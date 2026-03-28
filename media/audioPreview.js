@@ -1,20 +1,31 @@
 import {
-  buildInteractiveWaveformData,
-  renderInteractiveWaveform,
-  resizeInteractiveWaveformSurface,
-} from '../src-webview/interactiveWaveformRenderer.js';
+  DISPLAY_MIN_DPR,
+  TILE_COLUMN_COUNT,
+  WAVEFORM_SLOT_COUNT,
+  createControlState,
+  getSpectrogramArenaByteLength,
+  getSpectrogramSlotView,
+  getWaveformArenaByteLength,
+  quantizeCeil,
+} from '../src-webview/sharedBuffers.js';
 
 const vscode = acquireVsCodeApi();
 const analysisWorkerScriptUri = document.body.dataset.workerSrc;
 const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc;
-const DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, 2);
+const DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
+const HAS_SHARED_RUNTIME_SUPPORT =
+  typeof SharedArrayBuffer === 'function'
+  && window.crossOriginIsolated
+  && typeof Worker !== 'undefined';
+const RUNTIME_TRANSPORT_MODE = HAS_SHARED_RUNTIME_SUPPORT ? 'shared' : 'transfer';
 
-const SPECTROGRAM_MIN_FREQUENCY = 40;
-const SPECTROGRAM_MAX_FREQUENCY = 12000;
-const SPECTROGRAM_TICKS = [12000, 8000, 4000, 2000, 1000, 400, 100, 40];
+const SPECTROGRAM_MIN_FREQUENCY = 20;
+const SPECTROGRAM_MAX_FREQUENCY = 20000;
+const SPECTROGRAM_TICKS = [20000, 16000, 12000, 8000, 4000, 2000, 1000, 400, 100, 40, 20];
 const SPECTROGRAM_OVERVIEW_WIDTH_SCALE = 0.45;
 const SPECTROGRAM_OVERVIEW_HEIGHT_SCALE = 0.7;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
+const SPECTROGRAM_ROW_BUCKET_SIZE = 32;
 
 const WAVEFORM_COLOR = '#7dd3fc';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
@@ -30,6 +41,21 @@ const ANALYSIS_IDLE_TIMEOUT_MS = 1500;
 const ANALYSIS_FALLBACK_DELAY_MS = 240;
 const SEEK_COMMIT_TOLERANCE_SECONDS = 0.02;
 const SEEK_COMMIT_TIMEOUT_MS = 250;
+
+const QUALITY_PRESETS = {
+  balanced: {
+    rowsMultiplier: 1.5,
+    colsMultiplier: 2.5,
+  },
+  high: {
+    rowsMultiplier: 2.5,
+    colsMultiplier: 4,
+  },
+  max: {
+    rowsMultiplier: 4,
+    colsMultiplier: 6,
+  },
+};
 
 const elements = {
   waveformViewport: document.getElementById('waveform-viewport'),
@@ -51,8 +77,14 @@ const elements = {
   waveZoomIn: document.getElementById('wave-zoom-in'),
   waveFollow: document.getElementById('wave-follow'),
   spectrogram: document.getElementById('spectrogram'),
+  spectrogramSelection: document.getElementById('spectrogram-selection'),
+  spectrogramProgress: document.getElementById('spectrogram-progress'),
+  spectrogramCursor: document.getElementById('spectrogram-cursor'),
+  spectrogramLoopStart: document.getElementById('spectrogram-loop-start'),
+  spectrogramLoopEnd: document.getElementById('spectrogram-loop-end'),
   spectrogramAxis: document.getElementById('spectrogram-axis'),
   spectrogramGuides: document.getElementById('spectrogram-guides'),
+  spectrogramHitTarget: document.getElementById('spectrogram-hit-target'),
   jumpStart: document.getElementById('jump-start'),
   seekBackward: document.getElementById('seek-backward'),
   playToggle: document.getElementById('play-toggle'),
@@ -73,18 +105,16 @@ const state = {
   sourceFetchController: null,
   fetchController: null,
   analysisWorker: null,
-  analysisWorkerBlobUrl: null,
-  analysisWorkerSourcePromise: null,
+  analysisWorkerBootstrapUrl: null,
+  analysisRuntimeReadyPromise: null,
+  resolveAnalysisRuntimeReady: null,
   analysisIdleCallbackId: null,
   analysisTimeoutId: null,
   analysisStartedForLoadToken: 0,
   waveformWorker: null,
-  waveformWorkerBlobUrl: null,
-  waveformWorkerSourcePromise: null,
+  waveformWorkerBootstrapUrl: null,
   waveformSurfaceReadyPromise: null,
   waveformCanvas: null,
-  waveformFallbackContext: null,
-  waveformFallbackData: null,
   waveformViewRange: { start: 0, end: 0 },
   waveformThumbDrag: null,
   waveformSeekPointerId: null,
@@ -94,14 +124,25 @@ const state = {
   loopRange: null,
   pendingSeekTime: 0,
   followPlayback: true,
+  transportMode: RUNTIME_TRANSPORT_MODE,
   analysis: null,
+  sessionVersion: 0,
+  controlSab: null,
+  controlView: null,
+  pcmSab: null,
+  waveformSab: null,
+  waveformMaxColumns: 0,
+  waveformRequestGeneration: 0,
+  waveformSlotCursor: 0,
+  spectrogramSab: null,
+  spectrogramMaxColumns: 0,
+  spectrogramMaxRows: 0,
   playbackFrame: 0,
   spectrogramFrame: 0,
   spectrogramRequestFrame: 0,
 };
 
 const spectrogramContext = elements.spectrogram.getContext('2d', { alpha: false });
-const spectrogramPalette = buildSpectrogramPalette();
 
 if (!spectrogramContext) {
   setFatalStatus('Canvas initialization failed.');
@@ -358,43 +399,43 @@ async function initializeWaveformSurface(loadToken) {
   elements.waveformCanvasHost.replaceChildren(canvas);
   state.waveformCanvas = canvas;
 
-  const duration = getEffectiveDuration();
-  const range = getWaveformRange();
   const { width, height } = getWaveformViewportSize();
 
   if (
-    waveformWorkerScriptUri &&
-    typeof Worker !== 'undefined' &&
-    typeof canvas.transferControlToOffscreen === 'function'
+    !waveformWorkerScriptUri
+    || typeof canvas.transferControlToOffscreen !== 'function'
   ) {
-    const worker = await createWaveformWorker(loadToken);
-
-    if (worker && loadToken === state.loadToken) {
-      try {
-        const offscreenCanvas = canvas.transferControlToOffscreen();
-        worker.postMessage({
-          type: 'init',
-          payload: {
-            offscreenCanvas,
-            width,
-            height,
-            renderScale: WAVEFORM_RENDER_SCALE,
-            duration,
-            viewStart: range.start,
-            viewEnd: range.end,
-            color: WAVEFORM_COLOR,
-          },
-        }, [offscreenCanvas]);
-        return;
-      } catch (error) {
-        console.warn('Interactive waveform worker setup failed, falling back to 2D canvas.', error);
-        disposeWaveformRenderer();
-      }
-    }
+    throw new Error('Waveform worker runtime is unavailable.');
   }
 
-  state.waveformFallbackContext = canvas.getContext('2d');
-  renderWaveformFallback();
+  const worker = await createWaveformWorker(loadToken);
+
+  if (!worker || loadToken !== state.loadToken) {
+    return;
+  }
+
+  const offscreenCanvas = canvas.transferControlToOffscreen();
+  worker.postMessage({
+    type: 'initCanvas',
+    payload: {
+      color: WAVEFORM_COLOR,
+      height,
+      offscreenCanvas,
+      renderScale: WAVEFORM_RENDER_SCALE,
+      width,
+    },
+  }, [offscreenCanvas]);
+
+  if (state.transportMode === 'shared' && state.waveformSab && state.controlSab && state.waveformMaxColumns > 0) {
+    worker.postMessage({
+      type: 'attachSharedBuffers',
+      payload: {
+        controlSab: state.controlSab,
+        waveformMaxColumns: state.waveformMaxColumns,
+        waveformSab: state.waveformSab,
+      },
+    });
+  }
 }
 
 function cancelDeferredAnalysis() {
@@ -467,9 +508,22 @@ async function startAnalysis(loadToken, payload) {
       return;
     }
 
+    const analysisWorker = await createAnalysisWorker(loadToken);
+
+    if (!analysisWorker || loadToken !== state.loadToken) {
+      return;
+    }
+
+    setAnalysisStatus('Initializing wasm…');
+    await state.analysisRuntimeReadyPromise;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
     setAnalysisStatus('Decoding audio…');
 
-    const decodedAudio = await decodeAudioData(audioData.slice(0));
+    const decodedAudio = await decodeAudioData(audioData);
     const monoSamples = downmixToMono(decodedAudio);
 
     if (loadToken !== state.loadToken) {
@@ -497,33 +551,46 @@ async function startAnalysis(loadToken, payload) {
       return;
     }
 
-    await setWaveformData(loadToken, monoSamples, decodedAudio.duration);
-
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
-    const analysisWorker = await createAnalysisWorker(loadToken);
-
-    if (!analysisWorker || loadToken !== state.loadToken) {
-      return;
-    }
-
-    const analysisSamples = monoSamples.slice();
+    state.sessionVersion += 1;
     setAnalysisStatus('Queued');
 
-    analysisWorker.postMessage(
-      {
-        type: 'initAnalysis',
+    if (state.transportMode === 'shared') {
+      ensureSharedAudioBuffers(monoSamples, decodedAudio.sampleRate);
+      syncSharedBuffersToWorkers();
+      analysisWorker.postMessage({
+        type: 'attachAudioSession',
+        body: {
+          controlSab: state.controlSab,
+          duration: decodedAudio.duration,
+          pcmSab: state.pcmSab,
+          quality: state.analysis.quality,
+          sampleCount: monoSamples.length,
+          sampleRate: decodedAudio.sampleRate,
+          sessionVersion: state.sessionVersion,
+          spectrogramMaxColumns: state.spectrogramMaxColumns,
+          spectrogramMaxRows: state.spectrogramMaxRows,
+          spectrogramSab: state.spectrogramSab,
+          transportMode: state.transportMode,
+          waveformMaxColumns: state.waveformMaxColumns,
+          waveformSab: state.waveformSab,
+        },
+      });
+    } else {
+      analysisWorker.postMessage({
+        type: 'attachAudioSession',
         body: {
           duration: decodedAudio.duration,
           quality: state.analysis.quality,
+          sampleCount: monoSamples.length,
           sampleRate: decodedAudio.sampleRate,
-          samplesBuffer: analysisSamples.buffer,
+          samplesBuffer: monoSamples.buffer,
+          sessionVersion: state.sessionVersion,
+          transportMode: state.transportMode,
         },
-      },
-      [analysisSamples.buffer],
-    );
+      }, [monoSamples.buffer]);
+    }
+
+    analysisWorker.postMessage({ type: 'buildWaveformPyramid' });
   } catch (error) {
     if (loadToken !== state.loadToken || controller.signal.aborted) {
       return;
@@ -538,44 +605,21 @@ async function startAnalysis(loadToken, payload) {
   }
 }
 
-async function setWaveformData(loadToken, samples, duration) {
-  state.waveformViewRange = normalizeWaveformRange(getWaveformRange(), duration);
-
-  if (state.waveformWorker) {
-    const workerSamples = samples.slice();
-
-    state.waveformWorker.postMessage(
-      {
-        type: 'setData',
-        payload: {
-          samplesBuffer: workerSamples.buffer,
-          duration,
-        },
-      },
-      [workerSamples.buffer],
-    );
-  } else {
-    state.waveformFallbackData = buildInteractiveWaveformData(samples);
-    renderWaveformFallback();
-  }
-
-  renderWaveformUi();
-  void syncWaveformView();
-}
-
 async function createAnalysisWorker(loadToken) {
-  const workerSource = await getAnalysisWorkerSource();
+  if (state.analysisWorker) {
+    return state.analysisWorker;
+  }
 
   if (loadToken !== state.loadToken) {
     return null;
   }
 
-  const workerBlob = new Blob([workerSource], { type: 'text/javascript' });
-  const workerBlobUrl = URL.createObjectURL(workerBlob);
-  const worker = new Worker(workerBlobUrl);
+  const worker = createModuleWorker(analysisWorkerScriptUri, 'analysisWorkerBootstrapUrl');
 
+  state.analysisRuntimeReadyPromise = new Promise((resolve) => {
+    state.resolveAnalysisRuntimeReady = resolve;
+  });
   state.analysisWorker = worker;
-  state.analysisWorkerBlobUrl = workerBlobUrl;
 
   worker.addEventListener('message', (event) => {
     handleAnalysisWorkerMessage(loadToken, event.data);
@@ -588,65 +632,54 @@ async function createAnalysisWorker(loadToken) {
     disposeAnalysisWorker();
     setAnalysisStatus(`Analysis failed: ${event.message || 'Unknown worker error.'}`, true);
   });
+  worker.postMessage({ type: 'bootstrapRuntime' });
 
   return worker;
 }
 
-async function getAnalysisWorkerSource() {
-  if (!state.analysisWorkerSourcePromise) {
-    state.analysisWorkerSourcePromise = fetch(analysisWorkerScriptUri).then(async (response) => {
-      if (!response.ok) {
-        throw new Error(`Worker fetch failed with ${response.status}.`);
-      }
-
-      return response.text();
-    });
-  }
-
-  return state.analysisWorkerSourcePromise;
-}
-
 async function createWaveformWorker(loadToken) {
-  const workerSource = await getWaveformWorkerSource();
+  if (state.waveformWorker) {
+    return state.waveformWorker;
+  }
 
   if (loadToken !== state.loadToken) {
     return null;
   }
 
-  const workerBlob = new Blob([workerSource], { type: 'text/javascript' });
-  const workerBlobUrl = URL.createObjectURL(workerBlob);
-  const worker = new Worker(workerBlobUrl);
-
+  const worker = createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl');
   state.waveformWorker = worker;
-  state.waveformWorkerBlobUrl = workerBlobUrl;
 
   worker.addEventListener('error', (event) => {
     if (loadToken !== state.loadToken) {
       return;
     }
 
-    console.warn('Interactive waveform worker crashed.', event.message);
+    setFatalStatus(`Waveform renderer failed: ${event.message || 'Unknown worker error.'}`);
   });
 
   return worker;
 }
 
-async function getWaveformWorkerSource() {
-  if (!state.waveformWorkerSourcePromise) {
-    state.waveformWorkerSourcePromise = fetch(waveformWorkerScriptUri).then(async (response) => {
-      if (!response.ok) {
-        throw new Error(`Waveform worker fetch failed with ${response.status}.`);
-      }
-
-      return response.text();
-    });
-  }
-
-  return state.waveformWorkerSourcePromise;
+function createModuleWorker(moduleUrl, bootstrapStateKey) {
+  const bootstrapSource = `import ${JSON.stringify(moduleUrl)};`;
+  const bootstrapBlob = new Blob([bootstrapSource], { type: 'text/javascript' });
+  const bootstrapUrl = URL.createObjectURL(bootstrapBlob);
+  state[bootstrapStateKey] = bootstrapUrl;
+  return new Worker(bootstrapUrl, { type: 'module' });
 }
 
 function handleAnalysisWorkerMessage(loadToken, message) {
-  if (loadToken !== state.loadToken || !state.analysis) {
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  if (message?.type === 'runtimeReady') {
+    state.resolveAnalysisRuntimeReady?.();
+    state.resolveAnalysisRuntimeReady = null;
+    return;
+  }
+
+  if (!state.analysis) {
     return;
   }
 
@@ -662,6 +695,16 @@ function handleAnalysisWorkerMessage(loadToken, message) {
 
     renderSpectrogramScale();
     requestOverviewSpectrogram();
+    return;
+  }
+
+  if (message?.type === 'waveformPyramidReady') {
+    void syncWaveformView();
+    return;
+  }
+
+  if (message?.type === 'waveformSliceReady') {
+    handleWaveformSliceReady(message.body);
     return;
   }
 
@@ -729,8 +772,9 @@ function renderSpectrogramBackground() {
   elements.spectrogram.height = pixelHeight;
 
   const background = spectrogramContext.createLinearGradient(0, 0, 0, elements.spectrogram.height);
-  background.addColorStop(0, '#ffffff');
-  background.addColorStop(1, '#edf4ff');
+  background.addColorStop(0, '#171127');
+  background.addColorStop(0.46, '#0d0b19');
+  background.addColorStop(1, '#04050c');
 
   spectrogramContext.fillStyle = background;
   spectrogramContext.fillRect(0, 0, elements.spectrogram.width, elements.spectrogram.height);
@@ -780,6 +824,113 @@ function createSpectrogramAnalysisState({ duration, quality, minFrequency, maxFr
 
 function normalizeSpectrogramQuality(value) {
   return value === 'balanced' || value === 'max' ? value : 'high';
+}
+
+function getQualityPreset(quality = state.analysis?.quality) {
+  return QUALITY_PRESETS[normalizeSpectrogramQuality(quality)];
+}
+
+function getWaveformSharedColumnCapacity() {
+  const { width } = getWaveformViewportSize();
+  return Math.max(256, Math.round(width * WAVEFORM_RENDER_SCALE));
+}
+
+function getSpectrogramSharedCapacity(quality = state.analysis?.quality) {
+  const preset = getQualityPreset(quality);
+  const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
+  const overviewSize = getOverviewSpectrogramRequestSize();
+  const visibleRows = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), SPECTROGRAM_ROW_BUCKET_SIZE);
+  const overviewRows = quantizeCeil(Math.ceil(overviewSize.pixelHeight * preset.rowsMultiplier), SPECTROGRAM_ROW_BUCKET_SIZE);
+  const visibleColumns = Math.max(
+    TILE_COLUMN_COUNT,
+    quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
+  );
+  const overviewColumns = Math.max(
+    TILE_COLUMN_COUNT,
+    quantizeCeil(Math.ceil(overviewSize.pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
+  );
+
+  return {
+    maxColumns: Math.max(visibleColumns, overviewColumns),
+    maxRows: Math.max(visibleRows, overviewRows),
+  };
+}
+
+function ensureSharedAudioBuffers(samples, sampleRate) {
+  const waveformMaxColumns = getWaveformSharedColumnCapacity();
+  const { maxColumns: spectrogramMaxColumns, maxRows: spectrogramMaxRows } = getSpectrogramSharedCapacity();
+
+  if (!state.controlSab) {
+    const controlState = createControlState();
+    state.controlSab = controlState.sab;
+    state.controlView = controlState.view;
+  }
+
+  if (!state.pcmSab || new Float32Array(state.pcmSab).length !== samples.length) {
+    state.pcmSab = new SharedArrayBuffer(samples.length * Float32Array.BYTES_PER_ELEMENT);
+  }
+
+  new Float32Array(state.pcmSab).set(samples);
+
+  if (!state.waveformSab || state.waveformMaxColumns !== waveformMaxColumns) {
+    state.waveformSab = new SharedArrayBuffer(getWaveformArenaByteLength(waveformMaxColumns));
+    state.waveformMaxColumns = waveformMaxColumns;
+  }
+
+  if (
+    !state.spectrogramSab
+    || state.spectrogramMaxColumns !== spectrogramMaxColumns
+    || state.spectrogramMaxRows !== spectrogramMaxRows
+  ) {
+    state.spectrogramSab = new SharedArrayBuffer(
+      getSpectrogramArenaByteLength(spectrogramMaxColumns, spectrogramMaxRows),
+    );
+    state.spectrogramMaxColumns = spectrogramMaxColumns;
+    state.spectrogramMaxRows = spectrogramMaxRows;
+  }
+
+  if (state.analysis) {
+    state.analysis.sampleRate = sampleRate;
+    state.analysis.sampleCount = samples.length;
+  }
+}
+
+function syncSharedBuffersToWorkers() {
+  if (state.transportMode !== 'shared') {
+    return;
+  }
+
+  if (state.waveformWorker && state.waveformSab && state.controlSab && state.waveformMaxColumns > 0) {
+    state.waveformWorker.postMessage({
+      type: 'attachSharedBuffers',
+      payload: {
+        controlSab: state.controlSab,
+        waveformMaxColumns: state.waveformMaxColumns,
+        waveformSab: state.waveformSab,
+      },
+    });
+  }
+
+  if (state.analysisWorker && state.analysis && state.pcmSab && state.controlSab && state.waveformSab && state.spectrogramSab) {
+    state.analysisWorker.postMessage({
+      type: 'attachAudioSession',
+      body: {
+        controlSab: state.controlSab,
+        duration: state.analysis.duration,
+        pcmSab: state.pcmSab,
+        quality: state.analysis.quality,
+        sampleCount: state.analysis.sampleCount,
+        sampleRate: state.analysis.sampleRate,
+        sessionVersion: state.sessionVersion,
+        spectrogramMaxColumns: state.spectrogramMaxColumns,
+        spectrogramMaxRows: state.spectrogramMaxRows,
+        spectrogramSab: state.spectrogramSab,
+        transportMode: state.transportMode,
+        waveformMaxColumns: state.waveformMaxColumns,
+        waveformSab: state.waveformSab,
+      },
+    });
+  }
 }
 
 function getSpectrogramCanvasTargetSize() {
@@ -939,6 +1090,45 @@ function isSameVisibleRequest(activeRequest, range, size) {
     && Math.abs(activeRequest.pixelHeight - size.pixelHeight) <= 1;
 }
 
+function handleWaveformSliceReady(body) {
+  if (!state.waveformWorker || body.generation !== state.waveformRequestGeneration) {
+    return;
+  }
+
+  const { width, height } = getWaveformViewportSize();
+
+  const payload = {
+    color: WAVEFORM_COLOR,
+    columnCount: body.columnCount,
+    generation: body.generation,
+    renderScale: WAVEFORM_RENDER_SCALE,
+    viewEnd: body.viewEnd,
+    viewStart: body.viewStart,
+    width,
+    height,
+  };
+
+  if (body.transportMode === 'shared') {
+    state.waveformWorker.postMessage({
+      type: 'renderWaveformSlice',
+      payload: {
+        ...payload,
+        sequence: body.sequence,
+        slotId: body.slotId,
+      },
+    });
+    return;
+  }
+
+  state.waveformWorker.postMessage({
+    type: 'renderWaveformSlice',
+    payload: {
+      ...payload,
+      sliceBuffer: body.sliceBuffer,
+    },
+  }, [body.sliceBuffer]);
+}
+
 function handleSpectrogramTileMessage(body) {
   if (!state.analysis) {
     return;
@@ -955,7 +1145,16 @@ function handleSpectrogramTileMessage(body) {
   }
 
   const tileCanvas = createSpectrogramTileCanvas({
-    batch: new Float32Array(body.spectrogramBuffer),
+    batch: body.transportMode === 'shared'
+      ? getSpectrogramSlotView(
+        state.spectrogramSab,
+        state.spectrogramMaxColumns,
+        state.spectrogramMaxRows,
+        body.slotId,
+        body.columnCount,
+        body.rowCount,
+      )
+      : new Uint8ClampedArray(body.rgbaBuffer),
     columnCount: body.columnCount,
     rowCount: body.rowCount,
   });
@@ -980,6 +1179,15 @@ function handleSpectrogramTileMessage(body) {
       tileStart: body.tileStart,
     });
     layer.ready = true;
+  }
+
+  if (body.transportMode === 'shared' && state.analysisWorker) {
+    state.analysisWorker.postMessage({
+      type: 'releaseSpectrogramSlot',
+      body: {
+        slotId: body.slotId,
+      },
+    });
   }
 
   state.analysis.tileCacheMeta.set(body.tileKey, {
@@ -1048,21 +1256,7 @@ function createSpectrogramTileCanvas({ batch, columnCount, rowCount }) {
   }
 
   const imageData = context.createImageData(columnCount, rowCount);
-  const pixels = imageData.data;
-
-  for (let column = 0; column < columnCount; column += 1) {
-    for (let row = 0; row < rowCount; row += 1) {
-      const intensity = clamp(batch[(column * rowCount) + row], 0, 1);
-      const colorOffset = Math.min(255, Math.round(intensity * 255)) * 4;
-      const pixelOffset = ((row * columnCount) + column) * 4;
-
-      pixels[pixelOffset] = spectrogramPalette[colorOffset];
-      pixels[pixelOffset + 1] = spectrogramPalette[colorOffset + 1];
-      pixels[pixelOffset + 2] = spectrogramPalette[colorOffset + 2];
-      pixels[pixelOffset + 3] = 255;
-    }
-  }
-
+  imageData.data.set(batch);
   context.putImageData(imageData, 0, 0);
   return tileCanvas;
 }
@@ -1188,8 +1382,8 @@ function ensureWaveformViewRange() {
   state.waveformViewRange = normalizeWaveformRange(state.waveformViewRange, duration);
 }
 
-function getWaveformPointerMetrics(clientX) {
-  const rect = (elements.waveformHitTarget ?? elements.waveformViewport).getBoundingClientRect();
+function getViewportPointerMetrics(targetElement, clientX) {
+  const rect = targetElement.getBoundingClientRect();
 
   return {
     offsetX: clamp(clientX - rect.left, 0, rect.width),
@@ -1197,38 +1391,54 @@ function getWaveformPointerMetrics(clientX) {
   };
 }
 
-function getWaveformPointerMetricsFromEvent(event) {
+function getViewportPointerMetricsFromEvent(targetElement, event) {
   if (!Number.isFinite(event.clientX)) {
     return { offsetX: 0, width: 0 };
   }
 
-  return getWaveformPointerMetrics(event.clientX);
+  return getViewportPointerMetrics(targetElement, event.clientX);
+}
+
+function getWaveformPointerMetrics(clientX) {
+  return getViewportPointerMetrics(elements.waveformHitTarget ?? elements.waveformViewport, clientX);
+}
+
+function getWaveformPointerMetricsFromEvent(event) {
+  return getViewportPointerMetricsFromEvent(elements.waveformHitTarget ?? elements.waveformViewport, event);
+}
+
+function getTimeAtViewportClientX(clientX, targetElement) {
+  const range = getWaveformRange();
+  const span = Math.max(0, range.end - range.start);
+  const { offsetX, width } = getViewportPointerMetrics(targetElement, clientX);
+
+  if (span <= 0 || width <= 0) {
+    return 0;
+  }
+
+  const ratio = offsetX / width;
+  return clamp(range.start + ratio * span, 0, getEffectiveDuration());
+}
+
+function getTimeAtViewportPointerEvent(event, targetElement) {
+  const range = getWaveformRange();
+  const span = Math.max(0, range.end - range.start);
+  const { offsetX, width } = getViewportPointerMetricsFromEvent(targetElement, event);
+
+  if (span <= 0 || width <= 0) {
+    return 0;
+  }
+
+  const ratio = offsetX / width;
+  return clamp(range.start + ratio * span, 0, getEffectiveDuration());
 }
 
 function getTimeAtWaveformClientX(clientX) {
-  const range = getWaveformRange();
-  const span = Math.max(0, range.end - range.start);
-  const { offsetX, width } = getWaveformPointerMetrics(clientX);
-
-  if (span <= 0 || width <= 0) {
-    return 0;
-  }
-
-  const ratio = offsetX / width;
-  return clamp(range.start + ratio * span, 0, getEffectiveDuration());
+  return getTimeAtViewportClientX(clientX, elements.waveformHitTarget ?? elements.waveformViewport);
 }
 
 function getTimeAtWaveformPointerEvent(event) {
-  const range = getWaveformRange();
-  const span = Math.max(0, range.end - range.start);
-  const { offsetX, width } = getWaveformPointerMetricsFromEvent(event);
-
-  if (span <= 0 || width <= 0) {
-    return 0;
-  }
-
-  const ratio = offsetX / width;
-  return clamp(range.start + ratio * span, 0, getEffectiveDuration());
+  return getTimeAtViewportPointerEvent(event, elements.waveformHitTarget ?? elements.waveformViewport);
 }
 
 function normalizeLoopRange(startTime, endTime) {
@@ -1389,9 +1599,9 @@ async function restartLoopPlayback(audio, loopStartTime) {
   syncTransport();
 }
 
-function getAdjustedLoopRange(baseRange, edge, clientX) {
+function getAdjustedLoopRange(baseRange, edge, clientX, targetElement = elements.waveformHitTarget ?? elements.waveformViewport) {
   const duration = getEffectiveDuration();
-  const nextTime = getTimeAtWaveformClientX(clientX);
+  const nextTime = getTimeAtViewportClientX(clientX, targetElement);
 
   if (edge === 'start') {
     return {
@@ -1411,14 +1621,20 @@ function syncWaveformSelection() {
   const range = getWaveformRange();
   const span = Math.max(0, range.end - range.start);
   const viewportWidth = getWaveformViewportWidth();
+  const spectrogramWidth = Math.max(0, elements.spectrogram.clientWidth);
 
   elements.waveformSelection.style.display = 'none';
   elements.waveformSelection.style.left = '0%';
   elements.waveformSelection.style.width = '0%';
+  elements.spectrogramSelection.style.display = 'none';
+  elements.spectrogramSelection.style.left = '0%';
+  elements.spectrogramSelection.style.width = '0%';
   elements.waveformLoopStart.style.display = 'none';
   elements.waveformLoopEnd.style.display = 'none';
+  elements.spectrogramLoopStart.style.display = 'none';
+  elements.spectrogramLoopEnd.style.display = 'none';
 
-  if (!activeSelection || span <= 0 || viewportWidth <= 0) {
+  if (!activeSelection || span <= 0) {
     return;
   }
 
@@ -1433,21 +1649,41 @@ function syncWaveformSelection() {
   const leftPercent = ((visibleSelection.start - range.start) / span) * 100;
   const widthPercent = Math.max(0, ((visibleSelection.end - visibleSelection.start) / span) * 100);
 
-  elements.waveformSelection.style.display = 'block';
-  elements.waveformSelection.style.left = `${leftPercent}%`;
-  elements.waveformSelection.style.width = `${widthPercent}%`;
+  if (viewportWidth > 0) {
+    elements.waveformSelection.style.display = 'block';
+    elements.waveformSelection.style.left = `${leftPercent}%`;
+    elements.waveformSelection.style.width = `${widthPercent}%`;
+  }
+
+  if (spectrogramWidth > 0) {
+    elements.spectrogramSelection.style.display = 'block';
+    elements.spectrogramSelection.style.left = `${leftPercent}%`;
+    elements.spectrogramSelection.style.width = `${widthPercent}%`;
+  }
 
   if (!state.loopRange) {
     return;
   }
 
-  const startPx = ((visibleSelection.start - range.start) / span) * viewportWidth;
-  const endPx = ((visibleSelection.end - range.start) / span) * viewportWidth;
+  if (viewportWidth > 0) {
+    const startPx = ((visibleSelection.start - range.start) / span) * viewportWidth;
+    const endPx = ((visibleSelection.end - range.start) / span) * viewportWidth;
 
-  elements.waveformLoopStart.style.display = 'block';
-  elements.waveformLoopStart.style.left = `${Math.max(0, startPx - LOOP_HANDLE_WIDTH_PX / 2)}px`;
-  elements.waveformLoopEnd.style.display = 'block';
-  elements.waveformLoopEnd.style.left = `${Math.max(0, endPx - LOOP_HANDLE_WIDTH_PX / 2)}px`;
+    elements.waveformLoopStart.style.display = 'block';
+    elements.waveformLoopStart.style.left = `${Math.max(0, startPx - LOOP_HANDLE_WIDTH_PX / 2)}px`;
+    elements.waveformLoopEnd.style.display = 'block';
+    elements.waveformLoopEnd.style.left = `${Math.max(0, endPx - LOOP_HANDLE_WIDTH_PX / 2)}px`;
+  }
+
+  if (spectrogramWidth > 0) {
+    const startPx = ((visibleSelection.start - range.start) / span) * spectrogramWidth;
+    const endPx = ((visibleSelection.end - range.start) / span) * spectrogramWidth;
+
+    elements.spectrogramLoopStart.style.display = 'block';
+    elements.spectrogramLoopStart.style.left = `${Math.max(0, startPx - LOOP_HANDLE_WIDTH_PX / 2)}px`;
+    elements.spectrogramLoopEnd.style.display = 'block';
+    elements.spectrogramLoopEnd.style.left = `${Math.max(0, endPx - LOOP_HANDLE_WIDTH_PX / 2)}px`;
+  }
 }
 
 function renderWaveformUi() {
@@ -1566,6 +1802,9 @@ function applyWaveformPlaybackTime(timeSeconds) {
     elements.waveformProgress.style.width = '0%';
     elements.waveformCursor.style.display = 'none';
     elements.waveformCursor.style.left = '0%';
+    elements.spectrogramProgress.style.width = '0%';
+    elements.spectrogramCursor.style.display = 'none';
+    elements.spectrogramCursor.style.left = '0%';
     return;
   }
 
@@ -1575,6 +1814,9 @@ function applyWaveformPlaybackTime(timeSeconds) {
   elements.waveformProgress.style.width = `${progressPercent}%`;
   elements.waveformCursor.style.left = `${progressPercent}%`;
   elements.waveformCursor.style.display = isCursorVisible ? 'block' : 'none';
+  elements.spectrogramProgress.style.width = `${progressPercent}%`;
+  elements.spectrogramCursor.style.left = `${progressPercent}%`;
+  elements.spectrogramCursor.style.display = isCursorVisible ? 'block' : 'none';
 }
 
 function syncFollowView(timeSeconds) {
@@ -1624,53 +1866,37 @@ function syncFollowView(timeSeconds) {
 async function syncWaveformView() {
   const duration = getEffectiveDuration();
   const range = getWaveformRange();
-  const { width, height } = getWaveformViewportSize();
+  const { width } = getWaveformViewportSize();
 
-  if (!state.waveformCanvas || duration <= 0 || range.end <= range.start) {
-    renderWaveformFallback();
+  if (!state.waveformCanvas || !state.analysisWorker || duration <= 0 || range.end <= range.start) {
     return;
   }
 
-  if (state.waveformWorker) {
-    state.waveformWorker.postMessage({
-      type: 'updateView',
-      payload: {
-        width,
-        height,
-        renderScale: WAVEFORM_RENDER_SCALE,
-        duration,
-        viewStart: range.start,
-        viewEnd: range.end,
-        color: WAVEFORM_COLOR,
-      },
-    });
-    return;
-  }
-
-  renderWaveformFallback();
-}
-
-function renderWaveformFallback() {
-  if (!state.waveformCanvas || !state.waveformFallbackContext) {
-    return;
-  }
-
-  const { width, height } = getWaveformViewportSize();
-  const duration = getEffectiveDuration();
-  const range = getWaveformRange();
-
-  resizeInteractiveWaveformSurface(state.waveformCanvas, width, height, WAVEFORM_RENDER_SCALE);
-  renderInteractiveWaveform(
-    state.waveformFallbackContext,
-    width,
-    height,
-    WAVEFORM_RENDER_SCALE,
-    duration,
-    range.start,
-    range.end,
-    WAVEFORM_COLOR,
-    state.waveformFallbackData,
+  const columnCount = Math.min(
+    state.waveformMaxColumns || Math.max(1, Math.round(width * WAVEFORM_RENDER_SCALE)),
+    Math.max(1, Math.round(width * WAVEFORM_RENDER_SCALE)),
   );
+
+  if (columnCount <= 0) {
+    return;
+  }
+
+  if (state.transportMode === 'shared' && state.analysis && !state.pcmSab) {
+    return;
+  }
+
+  state.waveformRequestGeneration += 1;
+  state.waveformSlotCursor = (state.waveformSlotCursor + 1) % WAVEFORM_SLOT_COUNT;
+  state.analysisWorker.postMessage({
+    type: 'requestWaveformSlice',
+    body: {
+      columnCount,
+      generation: state.waveformRequestGeneration,
+      slotId: state.waveformSlotCursor,
+      viewEnd: range.end,
+      viewStart: range.start,
+    },
+  });
 }
 
 function updateWaveformViewRange(updater) {
@@ -1772,6 +1998,167 @@ function seekWaveformTo(timeSeconds) {
 
 function seekWaveformAtClientX(clientX) {
   seekWaveformTo(getTimeAtWaveformClientX(clientX));
+}
+
+function beginSelectionDrag(event, targetElement) {
+  disableFollowPlayback();
+  event.preventDefault();
+  targetElement.setPointerCapture(event.pointerId);
+  state.selectionDrag = {
+    pointerId: event.pointerId,
+    anchorTime: getTimeAtViewportPointerEvent(event, targetElement),
+    anchorX: event.clientX,
+    moved: false,
+    targetElement,
+  };
+  state.selectionDraft = null;
+  syncWaveformSelection();
+}
+
+function updateSelectionDrag(event, targetElement) {
+  if (state.loopHandleDrag) {
+    return;
+  }
+
+  const selectionDrag = state.selectionDrag;
+
+  if (!selectionDrag || selectionDrag.pointerId !== event.pointerId || selectionDrag.targetElement !== targetElement) {
+    return;
+  }
+
+  const endTime = getTimeAtViewportPointerEvent(event, targetElement);
+  const pointerDelta = Math.abs(event.clientX - selectionDrag.anchorX);
+  const nextSelection = normalizeLoopRange(selectionDrag.anchorTime, endTime);
+
+  if (!selectionDrag.moved) {
+    const timeDelta = Math.abs(endTime - selectionDrag.anchorTime);
+
+    if (pointerDelta < LOOP_SELECTION_MIN_PIXELS && timeDelta < LOOP_SELECTION_MIN_SECONDS) {
+      return;
+    }
+
+    selectionDrag.moved = true;
+  }
+
+  state.selectionDraft = nextSelection ?? {
+    start: Math.min(selectionDrag.anchorTime, endTime),
+    end: Math.max(selectionDrag.anchorTime, endTime),
+  };
+  syncWaveformSelection();
+}
+
+function releaseSelectionDrag(event, targetElement, cancelled = false) {
+  const selectionDrag = state.selectionDrag;
+
+  if (!selectionDrag || selectionDrag.pointerId !== event.pointerId || selectionDrag.targetElement !== targetElement) {
+    return;
+  }
+
+  if (selectionDrag.targetElement.hasPointerCapture?.(event.pointerId)) {
+    selectionDrag.targetElement.releasePointerCapture(event.pointerId);
+  }
+
+  state.selectionDrag = null;
+
+  if (cancelled) {
+    state.selectionDraft = null;
+    syncWaveformSelection();
+    return;
+  }
+
+  const endTime = getTimeAtViewportPointerEvent(event, targetElement);
+  const nextSelection = normalizeLoopRange(selectionDrag.anchorTime, endTime);
+  state.selectionDraft = null;
+
+  if (selectionDrag.moved && nextSelection) {
+    state.loopRange = nextSelection;
+    if (
+      state.audio &&
+      state.audio.paused === false &&
+      (state.audio.currentTime < nextSelection.start || state.audio.currentTime >= nextSelection.end)
+    ) {
+      state.audio.currentTime = nextSelection.start;
+      state.pendingSeekTime = nextSelection.start;
+      syncTransport();
+    }
+    renderWaveformUi();
+    return;
+  }
+
+  if (!isTimeWithinLoopRange(state.loopRange, selectionDrag.anchorTime)) {
+    state.loopRange = null;
+  }
+
+  seekWaveformTo(selectionDrag.anchorTime);
+  renderWaveformUi();
+}
+
+function startLoopHandleDrag(event, edge, handleElement, targetElement) {
+  if (!state.loopRange) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  handleElement.setPointerCapture(event.pointerId);
+  state.loopHandleDrag = {
+    pointerId: event.pointerId,
+    edge,
+    baseRange: { ...state.loopRange },
+    handleElement,
+    targetElement,
+  };
+  state.selectionDraft = { ...state.loopRange };
+  syncWaveformSelection();
+}
+
+function moveLoopHandleDrag(event) {
+  const dragState = state.loopHandleDrag;
+
+  if (!dragState || dragState.pointerId !== event.pointerId) {
+    return;
+  }
+
+  event.stopPropagation();
+  state.selectionDraft = getAdjustedLoopRange(dragState.baseRange, dragState.edge, event.clientX, dragState.targetElement);
+  syncWaveformSelection();
+}
+
+function releaseLoopHandleDrag(event, cancelled = false) {
+  const dragState = state.loopHandleDrag;
+
+  if (!dragState || dragState.pointerId !== event.pointerId) {
+    return;
+  }
+
+  event.stopPropagation();
+
+  if (dragState.handleElement.hasPointerCapture?.(event.pointerId)) {
+    dragState.handleElement.releasePointerCapture(event.pointerId);
+  }
+
+  const nextRange = getAdjustedLoopRange(dragState.baseRange, dragState.edge, event.clientX, dragState.targetElement);
+  state.loopHandleDrag = null;
+  state.selectionDraft = null;
+
+  if (!cancelled) {
+    state.loopRange = nextRange;
+  }
+
+  renderWaveformUi();
+}
+
+function bindLoopHandle(handleElement, edge, targetElement) {
+  handleElement.addEventListener('pointerdown', (event) => {
+    startLoopHandleDrag(event, edge, handleElement, targetElement);
+  });
+  handleElement.addEventListener('pointermove', moveLoopHandleDrag);
+  handleElement.addEventListener('pointerup', (event) => {
+    releaseLoopHandleDrag(event);
+  });
+  handleElement.addEventListener('pointercancel', (event) => {
+    releaseLoopHandleDrag(event, true);
+  });
 }
 
 function handleSharedViewportWheel(event, targetElement) {
@@ -1892,180 +2279,26 @@ function attachUiEvents() {
       return;
     }
 
-    disableFollowPlayback();
-    elements.waveformHitTarget.setPointerCapture(event.pointerId);
-    state.selectionDrag = {
-      pointerId: event.pointerId,
-      anchorTime: getTimeAtWaveformPointerEvent(event),
-      anchorX: event.clientX,
-      moved: false,
-    };
-    state.selectionDraft = null;
-    syncWaveformSelection();
+    beginSelectionDrag(event, elements.waveformHitTarget);
   });
 
   elements.waveformHitTarget.addEventListener('pointermove', (event) => {
-    if (state.loopHandleDrag) {
-      return;
-    }
-
-    const selectionDrag = state.selectionDrag;
-
-    if (selectionDrag?.pointerId === event.pointerId) {
-      const endTime = getTimeAtWaveformPointerEvent(event);
-      const pointerDelta = Math.abs(event.clientX - selectionDrag.anchorX);
-      const nextSelection = normalizeLoopRange(selectionDrag.anchorTime, endTime);
-
-      if (!selectionDrag.moved) {
-        const timeDelta = Math.abs(endTime - selectionDrag.anchorTime);
-
-        if (pointerDelta < LOOP_SELECTION_MIN_PIXELS && timeDelta < LOOP_SELECTION_MIN_SECONDS) {
-          return;
-        }
-
-        selectionDrag.moved = true;
-      }
-
-      state.selectionDraft = nextSelection ?? {
-        start: Math.min(selectionDrag.anchorTime, endTime),
-        end: Math.max(selectionDrag.anchorTime, endTime),
-      };
-      syncWaveformSelection();
-      return;
-    }
-
+    updateSelectionDrag(event, elements.waveformHitTarget);
   });
 
   const releaseWaveformPointer = (event) => {
-    const selectionDrag = state.selectionDrag;
-
-    if (!selectionDrag || selectionDrag.pointerId !== event.pointerId) {
-      return;
-    }
-
-    const endTime = getTimeAtWaveformPointerEvent(event);
-    const nextSelection = normalizeLoopRange(selectionDrag.anchorTime, endTime);
-
-    state.selectionDrag = null;
-    state.selectionDraft = null;
-    elements.waveformHitTarget.releasePointerCapture(event.pointerId);
-
-    if (selectionDrag.moved && nextSelection) {
-      state.loopRange = nextSelection;
-      if (
-        state.audio &&
-        state.audio.paused === false &&
-        (state.audio.currentTime < nextSelection.start || state.audio.currentTime >= nextSelection.end)
-      ) {
-        state.audio.currentTime = nextSelection.start;
-        state.pendingSeekTime = nextSelection.start;
-        syncTransport();
-      }
-      renderWaveformUi();
-      return;
-    }
-
-    if (!isTimeWithinLoopRange(state.loopRange, selectionDrag.anchorTime)) {
-      state.loopRange = null;
-    }
-
-    seekWaveformTo(selectionDrag.anchorTime);
-    renderWaveformUi();
+    releaseSelectionDrag(event, elements.waveformHitTarget);
   };
 
   elements.waveformHitTarget.addEventListener('pointerup', releaseWaveformPointer);
   elements.waveformHitTarget.addEventListener('pointercancel', (event) => {
-    if (state.selectionDrag?.pointerId === event.pointerId) {
-      state.selectionDrag = null;
-      state.selectionDraft = null;
-      elements.waveformHitTarget.releasePointerCapture(event.pointerId);
-      syncWaveformSelection();
-      return;
-    }
+    releaseSelectionDrag(event, elements.waveformHitTarget, true);
   });
 
-  elements.waveformLoopStart.addEventListener('pointerdown', (event) => {
-    if (!state.loopRange) {
-      return;
-    }
-
-    event.preventDefault();
-    event.stopPropagation();
-    elements.waveformLoopStart.setPointerCapture(event.pointerId);
-    state.loopHandleDrag = {
-      pointerId: event.pointerId,
-      edge: 'start',
-      baseRange: { ...state.loopRange },
-    };
-    state.selectionDraft = { ...state.loopRange };
-    syncWaveformSelection();
-  });
-
-  elements.waveformLoopEnd.addEventListener('pointerdown', (event) => {
-    if (!state.loopRange) {
-      return;
-    }
-
-    event.preventDefault();
-    event.stopPropagation();
-    elements.waveformLoopEnd.setPointerCapture(event.pointerId);
-    state.loopHandleDrag = {
-      pointerId: event.pointerId,
-      edge: 'end',
-      baseRange: { ...state.loopRange },
-    };
-    state.selectionDraft = { ...state.loopRange };
-    syncWaveformSelection();
-  });
-
-  const moveLoopHandle = (event) => {
-    const dragState = state.loopHandleDrag;
-
-    if (!dragState || dragState.pointerId !== event.pointerId) {
-      return;
-    }
-
-    event.stopPropagation();
-    state.selectionDraft = getAdjustedLoopRange(dragState.baseRange, dragState.edge, event.clientX);
-    syncWaveformSelection();
-  };
-
-  const releaseLoopHandle = (event, cancelled = false) => {
-    const dragState = state.loopHandleDrag;
-
-    if (!dragState || dragState.pointerId !== event.pointerId) {
-      return;
-    }
-
-    event.stopPropagation();
-    const target = dragState.edge === 'start' ? elements.waveformLoopStart : elements.waveformLoopEnd;
-    target.releasePointerCapture(event.pointerId);
-
-    const nextRange = getAdjustedLoopRange(dragState.baseRange, dragState.edge, event.clientX);
-    state.loopHandleDrag = null;
-    state.selectionDraft = null;
-
-    if (!cancelled) {
-      state.loopRange = nextRange;
-    }
-
-    renderWaveformUi();
-  };
-
-  elements.waveformLoopStart.addEventListener('pointermove', moveLoopHandle);
-  elements.waveformLoopEnd.addEventListener('pointermove', moveLoopHandle);
-  elements.waveformLoopStart.addEventListener('pointerup', (event) => {
-    releaseLoopHandle(event);
-  });
-  elements.waveformLoopEnd.addEventListener('pointerup', (event) => {
-    releaseLoopHandle(event);
-  });
-  elements.waveformLoopStart.addEventListener('pointercancel', (event) => {
-    releaseLoopHandle(event, true);
-  });
-  elements.waveformLoopEnd.addEventListener('pointercancel', (event) => {
-    releaseLoopHandle(event, true);
-  });
+  bindLoopHandle(elements.waveformLoopStart, 'start', elements.waveformHitTarget);
+  bindLoopHandle(elements.waveformLoopEnd, 'end', elements.waveformHitTarget);
+  bindLoopHandle(elements.spectrogramLoopStart, 'start', elements.spectrogramHitTarget);
+  bindLoopHandle(elements.spectrogramLoopEnd, 'end', elements.spectrogramHitTarget);
 
   elements.waveformOverview.addEventListener('pointerdown', (event) => {
     if (event.target === elements.waveformOverviewThumb) {
@@ -2095,29 +2328,45 @@ function attachUiEvents() {
     };
   });
 
-  elements.spectrogram.addEventListener('click', (event) => {
-    if (!state.audio) {
+  elements.spectrogramHitTarget.addEventListener('pointerdown', (event) => {
+    const duration = getEffectiveDuration();
+    const range = getWaveformRange();
+
+    if (!state.audio || duration <= 0 || range.end <= range.start) {
       return;
     }
 
-    const rect = elements.spectrogram.getBoundingClientRect();
-    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-    const range = getWaveformRange();
-    const nextTime = range.start + ratio * Math.max(0, range.end - range.start);
-    seekWaveformTo(nextTime);
+    beginSelectionDrag(event, elements.spectrogramHitTarget);
   });
 
-  elements.spectrogram.addEventListener('wheel', (event) => {
-    handleSharedViewportWheel(event, elements.spectrogram);
+  elements.spectrogramHitTarget.addEventListener('pointermove', (event) => {
+    updateSelectionDrag(event, elements.spectrogramHitTarget);
+  });
+
+  elements.spectrogramHitTarget.addEventListener('pointerup', (event) => {
+    releaseSelectionDrag(event, elements.spectrogramHitTarget);
+  });
+
+  elements.spectrogramHitTarget.addEventListener('pointercancel', (event) => {
+    releaseSelectionDrag(event, elements.spectrogramHitTarget, true);
+  });
+
+  elements.spectrogramHitTarget.addEventListener('wheel', (event) => {
+    handleSharedViewportWheel(event, elements.spectrogramHitTarget);
   }, { passive: false });
 
-  elements.spectrogram.addEventListener('dblclick', () => {
+  elements.spectrogramHitTarget.addEventListener('dblclick', () => {
     void togglePlayback();
   });
 }
 
 function attachResizeObservers() {
   const resizeObserver = new ResizeObserver(() => {
+    if (state.transportMode === 'shared' && state.analysis && state.pcmSab) {
+      ensureSharedAudioBuffers(new Float32Array(state.pcmSab), state.analysis.sampleRate);
+      syncSharedBuffersToWorkers();
+    }
+
     renderWaveformUi();
     void syncWaveformView();
     renderSpectrogramScale();
@@ -2189,7 +2438,16 @@ function destroySession() {
     state.audioBlobUrl = null;
   }
 
-  state.waveformFallbackData = null;
+  state.controlSab = null;
+  state.controlView = null;
+  state.pcmSab = null;
+  state.waveformSab = null;
+  state.waveformMaxColumns = 0;
+  state.waveformRequestGeneration = 0;
+  state.waveformSlotCursor = 0;
+  state.spectrogramSab = null;
+  state.spectrogramMaxColumns = 0;
+  state.spectrogramMaxRows = 0;
   state.sourceArrayBuffer = null;
   state.waveformViewRange = { start: 0, end: 0 };
   state.waveformThumbDrag = null;
@@ -2200,36 +2458,40 @@ function destroySession() {
   state.loopRange = null;
   state.pendingSeekTime = 0;
   state.analysisStartedForLoadToken = 0;
+  state.sessionVersion = 0;
   state.analysis = null;
   renderWaveformUi();
 }
 
 function disposeAnalysisWorker() {
   if (state.analysisWorker) {
+    state.analysisWorker.postMessage({ type: 'disposeSession' });
     state.analysisWorker.terminate();
     state.analysisWorker = null;
   }
 
-  if (state.analysisWorkerBlobUrl) {
-    URL.revokeObjectURL(state.analysisWorkerBlobUrl);
-    state.analysisWorkerBlobUrl = null;
+  state.analysisRuntimeReadyPromise = null;
+  state.resolveAnalysisRuntimeReady = null;
+
+  if (state.analysisWorkerBootstrapUrl) {
+    URL.revokeObjectURL(state.analysisWorkerBootstrapUrl);
+    state.analysisWorkerBootstrapUrl = null;
   }
 }
 
 function disposeWaveformRenderer() {
   if (state.waveformWorker) {
-    state.waveformWorker.postMessage({ type: 'stop' });
+    state.waveformWorker.postMessage({ type: 'dispose' });
     state.waveformWorker.terminate();
     state.waveformWorker = null;
   }
 
-  if (state.waveformWorkerBlobUrl) {
-    URL.revokeObjectURL(state.waveformWorkerBlobUrl);
-    state.waveformWorkerBlobUrl = null;
+  if (state.waveformWorkerBootstrapUrl) {
+    URL.revokeObjectURL(state.waveformWorkerBootstrapUrl);
+    state.waveformWorkerBootstrapUrl = null;
   }
 
   state.waveformCanvas = null;
-  state.waveformFallbackContext = null;
   elements.waveformCanvasHost.replaceChildren();
 }
 
@@ -2492,41 +2754,6 @@ function formatFrequencyLabel(frequency) {
   }
 
   return `${Math.round(frequency)} Hz`;
-}
-
-function buildSpectrogramPalette() {
-  const palette = new Uint8ClampedArray(256 * 4);
-
-  for (let index = 0; index < 256; index += 1) {
-    const t = index / 255;
-    let color;
-
-    if (t < 0.18) {
-      color = interpolateColor([248, 251, 255], [226, 237, 255], t / 0.18);
-    } else if (t < 0.45) {
-      color = interpolateColor([226, 237, 255], [121, 169, 255], (t - 0.18) / 0.27);
-    } else if (t < 0.78) {
-      color = interpolateColor([121, 169, 255], [36, 92, 223], (t - 0.45) / 0.33);
-    } else {
-      color = interpolateColor([36, 92, 223], [245, 122, 32], (t - 0.78) / 0.22);
-    }
-
-    const offset = index * 4;
-    palette[offset] = color[0];
-    palette[offset + 1] = color[1];
-    palette[offset + 2] = color[2];
-    palette[offset + 3] = 255;
-  }
-
-  return palette;
-}
-
-function interpolateColor(start, end, amount) {
-  return [
-    Math.round(start[0] + (end[0] - start[0]) * amount),
-    Math.round(start[1] + (end[1] - start[1]) * amount),
-    Math.round(start[2] + (end[2] - start[2]) * amount),
-  ];
 }
 
 function clamp(value, min, max) {
