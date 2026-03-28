@@ -1,0 +1,97 @@
+{
+  "name": "wave-preview",
+  "displayName": "Wave Preview",
+  "description": "VS Code custom audio editor with waveform, spectrogram, and playback controls.",
+  "version": "0.0.1",
+  "publisher": "local-dev",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:wavePreview.openActiveAudioPreview",
+    "onCustomEditor:wavePreview.audioPreview"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Wave Preview",
+      "properties": {
+        "wavePreview.openSampleOnStartupInDevelopment": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open the bundled sample audio file in Wave Preview when the extension runs in development mode."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "wavePreview.openActiveAudioPreview",
+        "title": "Open Active Audio File in Wave Preview",
+        "category": "Wave Preview"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "wavePreview.audioPreview",
+        "displayName": "Wave Preview",
+        "selector": [
+          {
+            "filenamePattern": "*.wav"
+          },
+          {
+            "filenamePattern": "*.wave"
+          },
+          {
+            "filenamePattern": "*.mp3"
+          },
+          {
+            "filenamePattern": "*.ogg"
+          },
+          {
+            "filenamePattern": "*.oga"
+          },
+          {
+            "filenamePattern": "*.flac"
+          },
+          {
+            "filenamePattern": "*.m4a"
+          },
+          {
+            "filenamePattern": "*.aac"
+          },
+          {
+            "filenamePattern": "*.opus"
+          },
+          {
+            "filenamePattern": "*.aif"
+          },
+          {
+            "filenamePattern": "*.aiff"
+          }
+        ],
+        "priority": "default"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "build:webview": "node ./scripts/build-webview.mjs",
+    "compile": "tsc -p ./ && npm run build:webview",
+    "watch": "tsc -w -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@types/vscode": "^1.100.0",
+    "esbuild": "^0.27.4",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@echogarden/pffft-wasm": "^0.4.2"
+  }
+}
