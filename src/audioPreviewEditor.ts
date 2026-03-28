@@ -5,6 +5,7 @@ interface AudioPreviewPayload {
   fileExtension: string;
   fileName: string;
   fileSize: number | null;
+  spectrogramQuality: 'balanced' | 'high' | 'max';
   sourceUri: string;
 }
 
@@ -105,10 +106,15 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
       fileSize = null;
     }
 
+    const spectrogramQuality = vscode.workspace
+      .getConfiguration('wavePreview', document.uri)
+      .get<'balanced' | 'high' | 'max'>('spectrogramQuality', 'high');
+
     return {
       fileExtension: path.posix.extname(document.uri.path).replace(/^\./, '').toLowerCase(),
       fileName: path.posix.basename(document.uri.path),
       fileSize,
+      spectrogramQuality,
       sourceUri: webview.asWebviewUri(document.uri).toString(),
     };
   }

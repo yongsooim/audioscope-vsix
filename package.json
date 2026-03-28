@@ -26,6 +26,17 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically open the bundled sample audio file in Wave Preview when the extension runs in development mode."
+        },
+        "wavePreview.spectrogramQuality": {
+          "type": "string",
+          "enum": [
+            "balanced",
+            "high",
+            "max"
+          ],
+          "default": "high",
+          "scope": "resource",
+          "description": "Controls spectrogram analysis quality for Wave Preview. Higher presets request denser time/frequency detail."
         }
       }
     },
