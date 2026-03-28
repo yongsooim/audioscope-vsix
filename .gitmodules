@@ -1,0 +1,3 @@
+[submodule "native/third_party/pffft"]
+	path = native/third_party/pffft
+	url = https://bitbucket.org/jpommier/pffft.git

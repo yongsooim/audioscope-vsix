@@ -290,38 +290,6 @@ body {
   white-space: nowrap;
 }
 
-.viewport-overview-shell {
-  margin: 0;
-  padding: 10px var(--surface-inline-padding) 12px;
-  border-top: 1px solid rgba(116, 143, 189, 0.12);
-  background: var(--overview-shell);
-}
-
-.waveform-overview {
-  position: relative;
-  height: 14px;
-  margin: 0;
-  overflow: hidden;
-  border-radius: 999px;
-  background: linear-gradient(180deg, #202c48 0%, var(--overview-track) 100%);
-  box-shadow:
-    inset 0 0 0 1px var(--overview-track-border),
-    inset 0 1px 3px rgba(96, 165, 250, 0.05);
-  cursor: pointer;
-}
-
-.waveform-overview-thumb {
-  position: absolute;
-  inset-block: 0;
-  inset-inline-start: 0;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--overview-thumb-start) 0%, var(--overview-thumb-end) 100%);
-  box-shadow:
-    inset 0 0 0 1px rgba(191, 219, 254, 0.2),
-    0 0 0 1px rgba(37, 99, 235, 0.16);
-  will-change: transform;
-}
-
 .spectrogram-panel {
   position: relative;
   display: block;
@@ -509,12 +477,85 @@ body {
   --seek-progress: 0%;
   --seek-track: rgba(30, 41, 59, 0.88);
   --seek-fill: #2563eb;
+  position: relative;
+  z-index: 2;
   width: 100%;
   margin: 0;
-  height: 24px;
+  height: 28px;
   appearance: none;
   background: transparent;
   cursor: pointer;
+}
+
+.timeline-shell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  width: 100%;
+  height: 28px;
+}
+
+.timeline-viewport {
+  position: absolute;
+  inset-block: 3px;
+  inset-inline-start: 0;
+  z-index: 1;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(79, 140, 255, 0.32) 0%, rgba(191, 219, 254, 0.22) 100%);
+  border: 1px solid rgba(191, 219, 254, 0.32);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(79, 140, 255, 0.16),
+    0 8px 22px rgba(37, 99, 235, 0.16);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.timeline-viewport::before,
+.timeline-viewport::after {
+  content: "";
+  position: absolute;
+  inset-block: 2px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(219, 234, 254, 0.95);
+  box-shadow: 0 0 10px rgba(147, 197, 253, 0.35);
+}
+
+.timeline-viewport::before {
+  left: 3px;
+}
+
+.timeline-viewport::after {
+  right: 3px;
+}
+
+.timeline-hover-tooltip {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 4;
+  padding: 4px 8px;
+  border: 1px solid rgba(191, 219, 254, 0.16);
+  border-radius: 999px;
+  background: rgba(7, 11, 22, 0.94);
+  color: #eff6ff;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate3d(-50%, 4px, 0);
+  transition: opacity 120ms ease, transform 120ms ease;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24);
+}
+
+.timeline-hover-tooltip.visible {
+  opacity: 1;
+  transform: translate3d(-50%, 0, 0);
 }
 
 .timeline:focus,
@@ -532,7 +573,7 @@ body {
 }
 
 .timeline::-webkit-slider-runnable-track {
-  height: 10px;
+  height: 12px;
   border: 1px solid rgba(116, 143, 189, 0.18);
   border-radius: 999px;
   background:
@@ -543,7 +584,7 @@ body {
 .timeline::-webkit-slider-thumb {
   width: 22px;
   height: 22px;
-  margin-top: -7px;
+  margin-top: -6px;
   appearance: none;
   border: 2px solid #0f172a;
   border-radius: 50%;
@@ -565,7 +606,7 @@ body {
 }
 
 .timeline::-moz-range-track {
-  height: 10px;
+  height: 12px;
   border: 1px solid rgba(116, 143, 189, 0.18);
   border-radius: 999px;
   background: var(--seek-track);
@@ -573,7 +614,7 @@ body {
 }
 
 .timeline::-moz-range-progress {
-  height: 10px;
+  height: 12px;
   border-radius: 999px;
   background: var(--seek-fill);
 }
@@ -652,7 +693,7 @@ body {
     grid-area: end;
   }
 
-  #timeline {
+  #waveform-overview {
     grid-area: slider;
   }
 
@@ -681,9 +722,6 @@ body {
     width: 60px;
   }
 
-  .viewport-overview-shell {
-    padding: 8px var(--surface-inline-padding) 10px;
-  }
 }
 
 .status-overlay {

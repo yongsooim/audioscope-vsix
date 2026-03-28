@@ -1,0 +1,6 @@
+#ifndef WAVE_PREVIEW_FREESTANDING_STDIO_H
+#define WAVE_PREVIEW_FREESTANDING_STDIO_H
+
+#define printf(...) 0
+
+#endif

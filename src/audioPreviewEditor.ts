@@ -181,11 +181,6 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
             <div id="spectrogram-hit-target" class="spectrogram-hit-target" aria-hidden="true"></div>
           </div>
         </div>
-        <div class="viewport-overview-shell">
-          <div id="waveform-overview" class="waveform-overview" aria-hidden="true">
-            <div id="waveform-overview-thumb" class="waveform-overview-thumb"></div>
-          </div>
-        </div>
       </section>
       <footer class="transport" aria-label="Playback controls">
         <button id="jump-start" class="transport-button" type="button" disabled>Start</button>
@@ -193,7 +188,11 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         <button id="play-toggle" class="play-toggle" type="button" disabled>Play</button>
         <button id="seek-forward" class="transport-button" type="button" disabled>+5s</button>
         <button id="jump-end" class="transport-button" type="button" disabled>End</button>
-        <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.001" value="0" disabled />
+        <div id="waveform-overview" class="timeline-shell">
+          <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>
+          <div id="timeline-hover-tooltip" class="timeline-hover-tooltip" aria-hidden="true"></div>
+          <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.001" value="0" disabled />
+        </div>
         <div id="time-readout" class="time-readout">0:00 / --:--</div>
         <div id="analysis-status" class="analysis-status">Preparing preview…</div>
       </footer>
