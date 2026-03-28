@@ -24,9 +24,7 @@ const SPECTROGRAM_ROW_BUCKET_SIZE = 32;
 
 const WAVEFORM_COLOR = '#7dd3fc';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
-const WAVEFORM_MAX_ZOOM_FACTOR = 1000;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
-const WAVEFORM_WHEEL_ZOOM_TARGET_RATIO = 0.5;
 const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2.25;
 const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.18;
 const WAVEFORM_FOLLOW_LEFT_THRESHOLD_RATIO = 0.25;
@@ -1270,6 +1268,16 @@ function getViewportPointerMetricsFromEvent(targetElement, event) {
   return getViewportPointerMetrics(targetElement, event.clientX);
 }
 
+function getViewportPointerRatio(clientX, targetElement) {
+  const { offsetX, width } = getViewportPointerMetrics(targetElement, clientX);
+
+  if (width <= 0) {
+    return 0.5;
+  }
+
+  return clamp(offsetX / width, 0, 1);
+}
+
 function getWaveformPointerMetrics(clientX) {
   return getViewportPointerMetrics(elements.waveformHitTarget ?? elements.waveformViewport, clientX);
 }
@@ -2221,6 +2229,7 @@ function handleSharedViewportWheel(event, targetElement) {
   const verticalMagnitude = Math.abs(deltaY);
   const intent = verticalMagnitude >= horizontalMagnitude ? 'zoom' : 'pan';
   const shouldPreserveFollowZoom = state.followPlayback && intent === 'zoom' && verticalMagnitude > 0.01;
+  const pointerRatio = getViewportPointerRatio(event.clientX, targetElement);
   const anchorTime = shouldPreserveFollowZoom && Number.isFinite(state.audio?.currentTime)
     ? clamp(state.audio.currentTime, 0, duration)
     : getTimeAtViewportClientX(event.clientX, targetElement);
@@ -2246,11 +2255,11 @@ function handleSharedViewportWheel(event, targetElement) {
         return current;
       }
 
-      nextStart = anchorTime - nextSpan * (
-        shouldPreserveFollowZoom
-          ? WAVEFORM_FOLLOW_TARGET_RATIO
-          : WAVEFORM_WHEEL_ZOOM_TARGET_RATIO
-      );
+      const anchorRatio = shouldPreserveFollowZoom
+        ? clamp((anchorTime - current.start) / currentSpan, 0, 1)
+        : pointerRatio;
+
+      nextStart = anchorTime - nextSpan * anchorRatio;
     }
 
     if (intent === 'pan' && horizontalMagnitude > 0.01) {
@@ -3029,7 +3038,17 @@ function getMinVisibleDuration(duration) {
     return 0.001;
   }
 
-  return Math.min(duration, Math.max(0.001, duration / WAVEFORM_MAX_ZOOM_FACTOR));
+  const sampleRate = Number(state.analysis?.sampleRate);
+  const viewportColumns = Math.max(1, Math.round(getWaveformViewportWidth() * WAVEFORM_RENDER_SCALE));
+
+  if (Number.isFinite(sampleRate) && sampleRate > 0) {
+    return Math.min(
+      duration,
+      Math.max(1 / sampleRate, viewportColumns / sampleRate),
+    );
+  }
+
+  return Math.min(duration, 0.001);
 }
 
 function getEffectiveDuration() {

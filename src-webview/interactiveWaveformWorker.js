@@ -4,6 +4,9 @@ const TOP_PADDING = 10;
 const BOTTOM_PADDING = 10;
 const CENTER_LINE_ALPHA = 0.14;
 const SYMMETRIC_ENVELOPE_GAIN = 0.76;
+const SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 8;
+const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
+const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
 
 let runtimePromise = null;
 let requestQueue = Promise.resolve();
@@ -284,6 +287,10 @@ function renderWaveform(runtime, request) {
     : surfaceState.color;
   const visibleSpan = Number.isFinite(request?.visibleSpan) ? Number(request.visibleSpan) : Math.max(0, viewEnd - viewStart);
   const columnCount = Math.max(1, Math.round(width * renderScale));
+  const renderSpan = Math.max(1 / analysisState.sampleRate, viewEnd - viewStart);
+  const samplesPerPixel = (renderSpan * analysisState.sampleRate) / columnCount;
+  const pixelsPerSample = columnCount / Math.max(1, renderSpan * analysisState.sampleRate);
+  const samplePlotMode = samplesPerPixel <= SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
 
   surfaceState.width = width;
   surfaceState.height = height;
@@ -305,7 +312,7 @@ function renderWaveform(runtime, request) {
   }
 
   const slice = getHeapF32View(module, analysisState.waveformOutputPointer, columnCount * 2);
-  drawFrame(slice, columnCount, color);
+  drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample);
 
   self.postMessage({
     type: 'waveformReady',
@@ -321,7 +328,7 @@ function renderWaveform(runtime, request) {
   });
 }
 
-function drawFrame(slice, columnCount, color) {
+function drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample) {
   const context = surfaceState.context;
   const canvas = surfaceState.canvas;
 
@@ -346,6 +353,11 @@ function drawFrame(slice, columnCount, color) {
 
   const drawColumns = Math.min(columnCount, deviceWidth);
 
+  if (samplePlotMode) {
+    drawSamplePlot(slice, drawColumns, color, midY, amplitudeHeight, chartTop, chartBottom, pixelsPerSample);
+    return;
+  }
+
   for (let x = 0; x < drawColumns; x += 1) {
     const sourceIndex = x * 2;
     const minValue = slice[sourceIndex] ?? 0;
@@ -355,6 +367,62 @@ function drawFrame(slice, columnCount, color) {
     const bottom = clamp(Math.round(midY + symmetricPeak * amplitudeHeight), chartTop, chartBottom);
     context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));
   }
+}
+
+function drawSamplePlot(slice, drawColumns, color, midY, amplitudeHeight, chartTop, chartBottom, pixelsPerSample) {
+  const context = surfaceState.context;
+
+  if (!context || drawColumns <= 0) {
+    return;
+  }
+
+  context.strokeStyle = color;
+  context.fillStyle = color;
+  context.lineWidth = Math.max(1, surfaceState.renderScale * SAMPLE_PLOT_LINE_WIDTH_SCALE);
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.beginPath();
+
+  for (let x = 0; x < drawColumns; x += 1) {
+    const sampleValue = getRepresentativeSampleValue(slice, x);
+    const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
+
+    if (x === 0) {
+      context.moveTo(x + 0.5, y);
+      continue;
+    }
+
+    context.lineTo(x + 0.5, y);
+  }
+
+  context.stroke();
+
+  if (pixelsPerSample >= SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE) {
+    const pointSize = Math.max(1.5, surfaceState.renderScale * 1.1);
+
+    for (let x = 0; x < drawColumns; x += 1) {
+      const sampleValue = getRepresentativeSampleValue(slice, x);
+      const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
+      context.fillRect(
+        Math.round(x - pointSize * 0.5),
+        Math.round(y - pointSize * 0.5),
+        Math.max(1, Math.round(pointSize)),
+        Math.max(1, Math.round(pointSize)),
+      );
+    }
+  }
+}
+
+function getRepresentativeSampleValue(slice, columnIndex) {
+  const sourceIndex = columnIndex * 2;
+  const minValue = slice[sourceIndex] ?? 0;
+  const maxValue = slice[sourceIndex + 1] ?? 0;
+
+  if (Math.abs(maxValue - minValue) <= 1e-6) {
+    return clamp(minValue, -1, 1);
+  }
+
+  return clamp((minValue + maxValue) * 0.5, -1, 1);
 }
 
 function ensureWaveformOutputCapacity(module, floatCount) {
