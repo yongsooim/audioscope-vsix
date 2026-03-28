@@ -32,9 +32,13 @@ const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
 const WAVEFORM_MAX_ZOOM_FACTOR = 100;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 const WAVEFORM_WHEEL_ZOOM_TARGET_RATIO = 0.5;
+const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2.25;
+const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.18;
 const WAVEFORM_FOLLOW_LEFT_THRESHOLD_RATIO = 0.25;
 const WAVEFORM_FOLLOW_RIGHT_THRESHOLD_RATIO = 0.75;
 const WAVEFORM_FOLLOW_TARGET_RATIO = 0.5;
+const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.25;
+const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.18;
 const LOOP_SELECTION_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const LOOP_HANDLE_WIDTH_PX = 12;
@@ -137,6 +141,12 @@ const state = {
   waveformMaxColumns: 0,
   waveformRequestGeneration: 0,
   waveformSlotCursor: 0,
+  waveformPendingRequest: null,
+  waveformRenderRange: { start: 0, end: 0 },
+  waveformRenderWidth: 0,
+  waveformRenderHeight: 0,
+  waveformAxisRenderRange: { start: 0, end: 0 },
+  waveformAxisRenderWidth: 0,
   spectrogramSab: null,
   spectrogramMaxColumns: 0,
   spectrogramMaxRows: 0,
@@ -425,6 +435,8 @@ async function initializeWaveformSurface(loadToken) {
   canvas.className = 'waveform-canvas';
   canvas.style.width = '100%';
   canvas.style.height = '100%';
+  elements.waveformCanvasHost.style.width = '100%';
+  elements.waveformCanvasHost.style.transform = 'translate3d(0px, 0, 0)';
   elements.waveformCanvasHost.replaceChildren(canvas);
   state.waveformCanvas = canvas;
 
@@ -861,18 +873,22 @@ function getQualityPreset(quality = state.analysis?.quality) {
 
 function getWaveformSharedColumnCapacity() {
   const { width } = getWaveformViewportSize();
-  return Math.max(256, Math.round(width * WAVEFORM_RENDER_SCALE));
+  return Math.max(256, Math.round(width * WAVEFORM_RENDER_SCALE * WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR));
 }
 
 function getSpectrogramSharedCapacity(quality = state.analysis?.quality) {
   const preset = getQualityPreset(quality);
   const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
   const overviewSize = getOverviewSpectrogramRequestSize();
+  const bufferedVisibleWidth = Math.max(
+    TILE_COLUMN_COUNT,
+    Math.ceil(pixelWidth * SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR),
+  );
   const visibleRows = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), SPECTROGRAM_ROW_BUCKET_SIZE);
   const overviewRows = quantizeCeil(Math.ceil(overviewSize.pixelHeight * preset.rowsMultiplier), SPECTROGRAM_ROW_BUCKET_SIZE);
   const visibleColumns = Math.max(
     TILE_COLUMN_COUNT,
-    quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
+    quantizeCeil(Math.ceil(bufferedVisibleWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
   );
   const overviewColumns = Math.max(
     TILE_COLUMN_COUNT,
@@ -1024,6 +1040,11 @@ function queueVisibleSpectrogramRequest({ force = false } = {}) {
     return;
   }
 
+  if (!force && hasBufferedVisibleSpectrogramCoverage()) {
+    state.analysis.visibleRequestQueued = false;
+    return;
+  }
+
   state.analysis.visibleRequestQueued = true;
 
   if (!state.analysis.overview.ready || !state.analysisWorker) {
@@ -1050,14 +1071,13 @@ function requestVisibleSpectrogram({ force = false } = {}) {
     return;
   }
 
-  const range = getWaveformRange();
-  const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
+  const { displayRange, pixelHeight, pixelWidth, requestRange } = getVisibleSpectrogramRequestMetrics();
 
-  if (range.end <= range.start) {
+  if (displayRange.end <= displayRange.start) {
     return;
   }
 
-  if (!force && isSameVisibleRequest(state.analysis.activeVisibleRequest, range, { pixelHeight, pixelWidth })) {
+  if (!force && isSameVisibleRequest(state.analysis.activeVisibleRequest, requestRange, { pixelHeight, pixelWidth })) {
     state.analysis.visibleRequestQueued = false;
     return;
   }
@@ -1071,8 +1091,8 @@ function requestVisibleSpectrogram({ force = false } = {}) {
     generation: nextGeneration,
     pixelHeight,
     pixelWidth,
-    viewEnd: range.end,
-    viewStart: range.start,
+    viewEnd: requestRange.end,
+    viewStart: requestRange.start,
   };
   state.analysis.visible = {
     ...createSpectrogramLayerState('visible'),
@@ -1081,8 +1101,8 @@ function requestVisibleSpectrogram({ force = false } = {}) {
     pixelHeight,
     pixelWidth,
     requestPending: true,
-    viewEnd: range.end,
-    viewStart: range.start,
+    viewEnd: requestRange.end,
+    viewStart: requestRange.start,
   };
 
   if (previousGeneration > 0) {
@@ -1101,8 +1121,8 @@ function requestVisibleSpectrogram({ force = false } = {}) {
       pixelHeight,
       pixelWidth,
       requestKind: 'visible',
-      viewEnd: range.end,
-      viewStart: range.start,
+      viewEnd: requestRange.end,
+      viewStart: requestRange.start,
     },
   });
   scheduleSpectrogramRender();
@@ -1124,7 +1144,21 @@ function handleWaveformSliceReady(body) {
     return;
   }
 
-  const { width, height } = getWaveformViewportSize();
+  const pendingRequest = state.waveformPendingRequest?.generation === body.generation
+    ? state.waveformPendingRequest
+    : null;
+  const { width: fallbackWidth, height: fallbackHeight } = getWaveformViewportSize();
+  const width = pendingRequest?.width ?? fallbackWidth;
+  const height = pendingRequest?.height ?? fallbackHeight;
+
+  state.waveformRenderRange = {
+    end: body.viewEnd,
+    start: body.viewStart,
+  };
+  state.waveformRenderWidth = width;
+  state.waveformRenderHeight = height;
+  state.waveformPendingRequest = null;
+  applyWaveformCanvasTransform();
 
   const payload = {
     color: WAVEFORM_COLOR,
@@ -1302,11 +1336,11 @@ function getRenderableVisibleSpectrogramLayer(range) {
     return null;
   }
 
-  if (!isSameVisibleRequest(layer, range, { pixelHeight, pixelWidth })) {
+  if (layer.pixelWidth < pixelWidth || layer.pixelHeight < pixelHeight) {
     return null;
   }
 
-  if (layer.pixelWidth < pixelWidth || layer.pixelHeight < pixelHeight) {
+  if (layer.viewEnd <= range.start || layer.viewStart >= range.end) {
     return null;
   }
 
@@ -1513,6 +1547,7 @@ function getSeekableEndTime(duration = getEffectiveDuration()) {
 
 function getPreferredPlaybackTime() {
   const duration = getEffectiveDuration();
+  const seekableEndTime = getSeekableEndTime(duration);
   const audioTime = state.audio?.currentTime;
   const isPlaying = state.audio?.paused === false;
   const baseTime = isPlaying && Number.isFinite(audioTime)
@@ -1522,6 +1557,10 @@ function getPreferredPlaybackTime() {
       : Number.isFinite(audioTime)
         ? audioTime
         : 0;
+  const shouldRestartFromStart = !isPlaying && (
+    state.audio?.ended === true
+    || baseTime >= (seekableEndTime - SEEK_COMMIT_TOLERANCE_SECONDS)
+  );
 
   if (state.loopRange && state.loopRange.end > state.loopRange.start) {
     if (baseTime < state.loopRange.start || shouldWrapLoop(state.loopRange, baseTime)) {
@@ -1529,6 +1568,10 @@ function getPreferredPlaybackTime() {
     }
 
     return clamp(baseTime, state.loopRange.start, getSeekableEndTime(state.loopRange.end));
+  }
+
+  if (shouldRestartFromStart) {
+    return 0;
   }
 
   return clamp(baseTime, 0, getSeekableEndTime(duration));
@@ -1737,40 +1780,49 @@ function renderWaveformUi() {
   applyWaveformOverviewThumb();
   syncWaveformSelection();
   applyWaveformPlaybackTime(state.audio?.currentTime ?? 0);
+  applyWaveformCanvasTransform(range);
   scheduleSpectrogramRender();
 }
 
 function renderWaveformAxis() {
-  const range = getWaveformRange();
-  const width = getWaveformViewportWidth();
-  const span = range.end - range.start;
+  const { displayRange, renderRange, renderWidth, viewportWidth } = getWaveformAxisRenderMetrics();
+  const span = renderRange.end - renderRange.start;
 
   elements.waveformAxis.replaceChildren();
 
-  if (span <= 0 || width <= 0) {
+  if (span <= 0 || viewportWidth <= 0) {
+    state.waveformAxisRenderRange = { start: 0, end: 0 };
+    state.waveformAxisRenderWidth = 0;
     return;
   }
 
-  const tickCount = Math.max(12, Math.min(28, Math.floor(width / 48)));
+  state.waveformAxisRenderRange = renderRange;
+  state.waveformAxisRenderWidth = renderWidth;
+
+  const axisContent = document.createElement('div');
+  axisContent.className = 'waveform-axis-content';
+  axisContent.style.width = `${renderWidth}px`;
+
+  const tickCount = Math.max(12, Math.min(28, Math.floor(viewportWidth / 48)));
   const step = getNiceTimeStep(span / tickCount);
   const ticks = [];
-  const firstTick = Math.ceil(range.start / step) * step;
+  const firstTick = Math.ceil(renderRange.start / step) * step;
 
-  for (let tick = firstTick; tick <= range.end + step * 0.25; tick += step) {
+  for (let tick = firstTick; tick <= renderRange.end + step * 0.25; tick += step) {
     ticks.push(Number(tick.toFixed(6)));
   }
 
-  if (ticks.length === 0 || Math.abs(ticks[0] - range.start) > step * 0.35) {
-    ticks.unshift(range.start);
+  if (ticks.length === 0 || Math.abs(ticks[0] - renderRange.start) > step * 0.35) {
+    ticks.unshift(renderRange.start);
   }
 
   const lastTick = ticks[ticks.length - 1];
-  if (Math.abs(lastTick - range.end) > step * 0.35) {
-    ticks.push(range.end);
+  if (Math.abs(lastTick - renderRange.end) > step * 0.35) {
+    ticks.push(renderRange.end);
   }
 
   ticks.forEach((tick, index) => {
-    const position = ((tick - range.start) / span) * 100;
+    const position = ((tick - renderRange.start) / span) * 100;
     const align = index === 0 ? 'start' : index === ticks.length - 1 ? 'end' : 'center';
     const transform =
       align === 'start'
@@ -1792,8 +1844,11 @@ function renderWaveformAxis() {
     label.textContent = formatAxisLabel(tick);
 
     tickElement.append(mark, label);
-    elements.waveformAxis.append(tickElement);
+    axisContent.append(tickElement);
   });
+
+  elements.waveformAxis.append(axisContent);
+  applyWaveformAxisTransform(displayRange);
 }
 
 function applyWaveformOverviewThumb() {
@@ -1853,10 +1908,31 @@ function syncFollowView(timeSeconds) {
     !state.followPlayback ||
     !Number.isFinite(timeSeconds) ||
     timeSeconds < 0 ||
-    state.waveformSeekPointerId !== null ||
-    state.selectionDrag ||
-    state.loopHandleDrag
+    isFollowPlaybackInteractionActive()
   ) {
+    return;
+  }
+
+  if (isSmoothFollowPlaybackActive()) {
+    const range = getWaveformRange();
+    applyWaveformOverviewThumb();
+    syncWaveformSelection();
+    applyWaveformCanvasTransform(range);
+    applyWaveformAxisTransform(range);
+
+    if (!hasWaveformAxisRenderCoverage(range)) {
+      renderWaveformAxis();
+    }
+
+    if (!hasWaveformRenderCoverage(range)) {
+      void syncWaveformView();
+    }
+
+    if (!hasBufferedVisibleSpectrogramCoverage(range)) {
+      queueVisibleSpectrogramRequest();
+    }
+
+    scheduleSpectrogramRender();
     return;
   }
 
@@ -1896,16 +1972,20 @@ function syncFollowView(timeSeconds) {
 
 async function syncWaveformView() {
   const duration = getEffectiveDuration();
-  const range = getWaveformRange();
-  const { width } = getWaveformViewportSize();
+  const { displayRange, height, renderRange, renderWidth } = getWaveformRenderRequestMetrics();
 
-  if (!state.waveformCanvas || !state.analysisWorker || duration <= 0 || range.end <= range.start) {
+  if (!state.waveformCanvas || !state.analysisWorker || duration <= 0 || displayRange.end <= displayRange.start) {
+    return;
+  }
+
+  if (hasWaveformRenderCoverage(displayRange)) {
+    applyWaveformCanvasTransform(displayRange);
     return;
   }
 
   const columnCount = Math.min(
-    state.waveformMaxColumns || Math.max(1, Math.round(width * WAVEFORM_RENDER_SCALE)),
-    Math.max(1, Math.round(width * WAVEFORM_RENDER_SCALE)),
+    state.waveformMaxColumns || Math.max(1, Math.round(renderWidth * WAVEFORM_RENDER_SCALE)),
+    Math.max(1, Math.round(renderWidth * WAVEFORM_RENDER_SCALE)),
   );
 
   if (columnCount <= 0) {
@@ -1918,14 +1998,21 @@ async function syncWaveformView() {
 
   state.waveformRequestGeneration += 1;
   state.waveformSlotCursor = (state.waveformSlotCursor + 1) % WAVEFORM_SLOT_COUNT;
+  state.waveformPendingRequest = {
+    end: renderRange.end,
+    generation: state.waveformRequestGeneration,
+    height,
+    start: renderRange.start,
+    width: renderWidth,
+  };
   state.analysisWorker.postMessage({
     type: 'requestWaveformSlice',
     body: {
       columnCount,
       generation: state.waveformRequestGeneration,
       slotId: state.waveformSlotCursor,
-      viewEnd: range.end,
-      viewStart: range.start,
+      viewEnd: renderRange.end,
+      viewStart: renderRange.start,
     },
   });
 }
@@ -2228,9 +2315,12 @@ function handleSharedViewportWheel(event, targetElement) {
   const horizontalMagnitude = Math.abs(deltaX);
   const verticalMagnitude = Math.abs(deltaY);
   const intent = verticalMagnitude >= horizontalMagnitude ? 'zoom' : 'pan';
-  const anchorTime = getTimeAtViewportClientX(event.clientX, targetElement);
+  const shouldPreserveFollowZoom = state.followPlayback && intent === 'zoom' && verticalMagnitude > 0.01;
+  const anchorTime = shouldPreserveFollowZoom && Number.isFinite(state.audio?.currentTime)
+    ? clamp(state.audio.currentTime, 0, duration)
+    : getTimeAtViewportClientX(event.clientX, targetElement);
 
-  if ((intent === 'zoom' && verticalMagnitude > 0.01) || (intent === 'pan' && horizontalMagnitude > 0.01)) {
+  if (intent === 'pan' && horizontalMagnitude > 0.01) {
     disableFollowPlayback();
   }
 
@@ -2245,7 +2335,11 @@ function handleSharedViewportWheel(event, targetElement) {
         getMinVisibleDuration(duration),
         Math.max(getMinVisibleDuration(duration), duration),
       );
-      nextStart = anchorTime - nextSpan * WAVEFORM_WHEEL_ZOOM_TARGET_RATIO;
+      nextStart = anchorTime - nextSpan * (
+        shouldPreserveFollowZoom
+          ? WAVEFORM_FOLLOW_TARGET_RATIO
+          : WAVEFORM_WHEEL_ZOOM_TARGET_RATIO
+      );
     }
 
     if (intent === 'pan' && horizontalMagnitude > 0.01) {
@@ -2447,6 +2541,12 @@ function destroySession() {
   state.waveformMaxColumns = 0;
   state.waveformRequestGeneration = 0;
   state.waveformSlotCursor = 0;
+  state.waveformPendingRequest = null;
+  state.waveformRenderRange = { start: 0, end: 0 };
+  state.waveformRenderWidth = 0;
+  state.waveformRenderHeight = 0;
+  state.waveformAxisRenderRange = { start: 0, end: 0 };
+  state.waveformAxisRenderWidth = 0;
   state.spectrogramSab = null;
   state.spectrogramMaxColumns = 0;
   state.spectrogramMaxRows = 0;
@@ -2493,7 +2593,16 @@ function disposeWaveformRenderer() {
   }
 
   state.waveformCanvas = null;
+  state.waveformPendingRequest = null;
+  state.waveformRenderRange = { start: 0, end: 0 };
+  state.waveformRenderWidth = 0;
+  state.waveformRenderHeight = 0;
+  state.waveformAxisRenderRange = { start: 0, end: 0 };
+  state.waveformAxisRenderWidth = 0;
   elements.waveformCanvasHost.replaceChildren();
+  elements.waveformCanvasHost.style.width = '100%';
+  elements.waveformCanvasHost.style.transform = 'translate3d(0px, 0, 0)';
+  elements.waveformAxis.replaceChildren();
 }
 
 async function togglePlayback() {
@@ -2623,6 +2732,22 @@ function getWaveformViewportWidth() {
 
 function getWaveformRange() {
   const duration = getEffectiveDuration();
+  const storedRange = getStoredWaveformRange(duration);
+
+  if (!isSmoothFollowPlaybackActive()) {
+    return storedRange;
+  }
+
+  const timeSeconds = clamp(
+    Number.isFinite(state.audio?.currentTime) ? state.audio.currentTime : getPreferredPlaybackTime(),
+    0,
+    duration,
+  );
+
+  return centerWaveformRangeOnTime(storedRange, timeSeconds, duration);
+}
+
+function getStoredWaveformRange(duration = getEffectiveDuration()) {
   const current = {
     start: Number.isFinite(state.waveformViewRange.start) ? state.waveformViewRange.start : 0,
     end: Number.isFinite(state.waveformViewRange.end) ? state.waveformViewRange.end : 0,
@@ -2637,6 +2762,260 @@ function getWaveformRange() {
   }
 
   return normalizeWaveformRange(current, duration);
+}
+
+function centerWaveformRangeOnTime(range, timeSeconds, duration = getEffectiveDuration()) {
+  const normalizedRange = normalizeWaveformRange(range, duration);
+  const span = Math.max(0, normalizedRange.end - normalizedRange.start);
+
+  if (span <= 0 || duration <= 0) {
+    return normalizedRange;
+  }
+
+  const nextStart = clamp(timeSeconds - span * 0.5, 0, Math.max(0, duration - span));
+
+  return {
+    start: nextStart,
+    end: nextStart + span,
+  };
+}
+
+function expandWaveformRange(range, duration, factor) {
+  const normalizedRange = normalizeWaveformRange(range, duration);
+  const span = Math.max(0, normalizedRange.end - normalizedRange.start);
+
+  if (span <= 0 || duration <= 0) {
+    return normalizedRange;
+  }
+
+  const nextSpan = clamp(span * Math.max(1, factor), span, Math.max(span, duration));
+  const extraSpan = nextSpan - span;
+  const nextStart = clamp(
+    normalizedRange.start - extraSpan * 0.5,
+    0,
+    Math.max(0, duration - nextSpan),
+  );
+
+  return {
+    start: nextStart,
+    end: nextStart + nextSpan,
+  };
+}
+
+function isFollowPlaybackInteractionActive() {
+  return state.waveformSeekPointerId !== null || Boolean(state.selectionDrag) || Boolean(state.loopHandleDrag);
+}
+
+function isSmoothFollowPlaybackActive() {
+  return Boolean(
+    state.followPlayback
+      && state.audio?.paused === false
+      && Number.isFinite(state.audio?.currentTime)
+      && !isFollowPlaybackInteractionActive()
+  );
+}
+
+function isRangeBuffered(targetRange, bufferRange, marginRatio = 0) {
+  if (
+    !targetRange
+    || !bufferRange
+    || !(targetRange.end > targetRange.start)
+    || !(bufferRange.end > bufferRange.start)
+  ) {
+    return false;
+  }
+
+  const targetSpan = targetRange.end - targetRange.start;
+  const bufferSpan = bufferRange.end - bufferRange.start;
+  const availablePadding = Math.max(0, (bufferSpan - targetSpan) * 0.5);
+  const requestedPadding = Math.max(0, bufferSpan * Math.max(0, marginRatio));
+  const effectivePadding = Math.min(availablePadding, requestedPadding);
+
+  return targetRange.start >= (bufferRange.start + effectivePadding - SPECTROGRAM_RANGE_EPSILON_SECONDS)
+    && targetRange.end <= (bufferRange.end - effectivePadding + SPECTROGRAM_RANGE_EPSILON_SECONDS);
+}
+
+function getWaveformRenderRequestMetrics(displayRange = getWaveformRange()) {
+  const duration = getEffectiveDuration();
+  const { height, width } = getWaveformViewportSize();
+  const visibleSpan = Math.max(0, displayRange.end - displayRange.start);
+  let renderRange = displayRange;
+  let renderWidth = width;
+
+  if (duration > 0 && visibleSpan > 0 && isSmoothFollowPlaybackActive()) {
+    renderRange = expandWaveformRange(displayRange, duration, WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR);
+    renderWidth = Math.max(
+      width,
+      Math.ceil(width * ((renderRange.end - renderRange.start) / visibleSpan)),
+    );
+  }
+
+  return {
+    displayRange,
+    height,
+    renderRange,
+    renderWidth: Math.max(1, renderWidth),
+  };
+}
+
+function getWaveformAxisRenderMetrics(displayRange = getWaveformRange()) {
+  const viewportWidth = Math.max(1, elements.waveformAxis.clientWidth || getWaveformViewportWidth());
+  const duration = getEffectiveDuration();
+  const visibleSpan = Math.max(0, displayRange.end - displayRange.start);
+  let renderRange = displayRange;
+  let renderWidth = viewportWidth;
+
+  if (duration > 0 && visibleSpan > 0 && isSmoothFollowPlaybackActive()) {
+    renderRange = expandWaveformRange(displayRange, duration, WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR);
+    renderWidth = Math.max(
+      viewportWidth,
+      Math.ceil(viewportWidth * ((renderRange.end - renderRange.start) / visibleSpan)),
+    );
+  }
+
+  return {
+    displayRange,
+    renderRange,
+    renderWidth: Math.max(1, renderWidth),
+    viewportWidth,
+  };
+}
+
+function hasWaveformRenderCoverage(displayRange = getWaveformRange()) {
+  const { height, renderWidth } = getWaveformRenderRequestMetrics(displayRange);
+  const candidates = [];
+
+  if (state.waveformPendingRequest) {
+    candidates.push(state.waveformPendingRequest);
+  }
+
+  if (state.waveformRenderRange.end > state.waveformRenderRange.start && state.waveformRenderWidth > 0) {
+    candidates.push({
+      end: state.waveformRenderRange.end,
+      height: state.waveformRenderHeight,
+      start: state.waveformRenderRange.start,
+      width: state.waveformRenderWidth,
+    });
+  }
+
+  return candidates.some((candidate) => {
+    if (!candidate || Math.abs((candidate.height ?? height) - height) > 1 || (candidate.width ?? 0) < (renderWidth - 1)) {
+      return false;
+    }
+
+    if (isSmoothFollowPlaybackActive()) {
+      return isRangeBuffered(displayRange, candidate, WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO);
+    }
+
+    return Math.abs(candidate.start - displayRange.start) <= SPECTROGRAM_RANGE_EPSILON_SECONDS
+      && Math.abs(candidate.end - displayRange.end) <= SPECTROGRAM_RANGE_EPSILON_SECONDS;
+  });
+}
+
+function hasWaveformAxisRenderCoverage(displayRange = getWaveformRange()) {
+  if (state.waveformAxisRenderRange.end <= state.waveformAxisRenderRange.start || state.waveformAxisRenderWidth <= 0) {
+    return false;
+  }
+
+  const { renderWidth } = getWaveformAxisRenderMetrics(displayRange);
+
+  if (state.waveformAxisRenderWidth < (renderWidth - 1)) {
+    return false;
+  }
+
+  if (isSmoothFollowPlaybackActive()) {
+    return isRangeBuffered(displayRange, state.waveformAxisRenderRange, WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO);
+  }
+
+  return Math.abs(state.waveformAxisRenderRange.start - displayRange.start) <= SPECTROGRAM_RANGE_EPSILON_SECONDS
+    && Math.abs(state.waveformAxisRenderRange.end - displayRange.end) <= SPECTROGRAM_RANGE_EPSILON_SECONDS;
+}
+
+function applyWaveformCanvasTransform(displayRange = getWaveformRange()) {
+  const renderRange = state.waveformRenderRange;
+  const viewportWidth = getWaveformViewportWidth();
+  const renderWidth = Math.max(0, state.waveformRenderWidth);
+  const renderSpan = Math.max(0, renderRange.end - renderRange.start);
+
+  if (!(displayRange.end > displayRange.start) || renderWidth <= 0 || renderSpan <= 0) {
+    elements.waveformCanvasHost.style.width = '100%';
+    elements.waveformCanvasHost.style.transform = 'translate3d(0px, 0, 0)';
+    return;
+  }
+
+  const secondsPerPixel = renderSpan / renderWidth;
+  const unclampedOffset = -((displayRange.start - renderRange.start) / secondsPerPixel);
+  const minOffset = Math.min(0, viewportWidth - renderWidth);
+  const translateX = clamp(unclampedOffset, minOffset, 0);
+
+  elements.waveformCanvasHost.style.width = `${renderWidth}px`;
+  elements.waveformCanvasHost.style.transform = `translate3d(${translateX}px, 0, 0)`;
+}
+
+function applyWaveformAxisTransform(displayRange = getWaveformRange()) {
+  const axisContent = elements.waveformAxis.firstElementChild;
+  const renderRange = state.waveformAxisRenderRange;
+  const viewportWidth = Math.max(1, elements.waveformAxis.clientWidth || getWaveformViewportWidth());
+  const renderWidth = Math.max(0, state.waveformAxisRenderWidth);
+  const renderSpan = Math.max(0, renderRange.end - renderRange.start);
+
+  if (!(axisContent instanceof HTMLElement)) {
+    return;
+  }
+
+  if (!(displayRange.end > displayRange.start) || renderWidth <= 0 || renderSpan <= 0) {
+    axisContent.style.transform = 'translate3d(0px, 0, 0)';
+    return;
+  }
+
+  const secondsPerPixel = renderSpan / renderWidth;
+  const unclampedOffset = -((displayRange.start - renderRange.start) / secondsPerPixel);
+  const minOffset = Math.min(0, viewportWidth - renderWidth);
+  const translateX = clamp(unclampedOffset, minOffset, 0);
+
+  axisContent.style.transform = `translate3d(${translateX}px, 0, 0)`;
+}
+
+function getVisibleSpectrogramRequestMetrics(displayRange = getWaveformRange()) {
+  const duration = getEffectiveDuration();
+  const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
+  const visibleSpan = Math.max(0, displayRange.end - displayRange.start);
+  let requestRange = displayRange;
+  let requestPixelWidth = pixelWidth;
+
+  if (duration > 0 && visibleSpan > 0 && isSmoothFollowPlaybackActive()) {
+    requestRange = expandWaveformRange(displayRange, duration, SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR);
+    requestPixelWidth = Math.max(
+      pixelWidth,
+      Math.ceil(pixelWidth * ((requestRange.end - requestRange.start) / visibleSpan)),
+    );
+  }
+
+  return {
+    displayRange,
+    pixelHeight,
+    pixelWidth: Math.max(1, requestPixelWidth),
+    requestRange,
+  };
+}
+
+function hasBufferedVisibleSpectrogramCoverage(displayRange = getWaveformRange()) {
+  if (!state.analysis?.activeVisibleRequest) {
+    return false;
+  }
+
+  const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
+  const activeRequest = state.analysis.activeVisibleRequest;
+
+  if (activeRequest.pixelHeight < pixelHeight || activeRequest.pixelWidth < pixelWidth) {
+    return false;
+  }
+
+  if (isSmoothFollowPlaybackActive()) {
+    return isRangeBuffered(displayRange, activeRequest, SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO);
+  }
+
+  return isSameVisibleRequest(activeRequest, displayRange, { pixelHeight, pixelWidth });
 }
 
 function normalizeWaveformRange(range, duration) {
