@@ -12,14 +12,11 @@ await build({
   ],
   outdir: path.join(projectRoot, 'media'),
   bundle: true,
-  format: 'iife',
+  format: 'esm',
   platform: 'browser',
   target: ['es2022'],
   entryNames: '[name]',
   sourcemap: false,
-  external: ['module'],
-  loader: {
-    '.wasm': 'binary',
-  },
+  external: ['module', '../media/wave_core.js'],
   logLevel: 'silent',
 });

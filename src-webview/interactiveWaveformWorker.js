@@ -1,187 +1,140 @@
-import {
-  buildInteractiveWaveformLevel,
-  createInteractiveWaveformData,
-  getInteractiveWaveformBlockSizes,
-  renderInteractiveWaveform,
-  resizeInteractiveWaveformSurface,
-} from './interactiveWaveformRenderer.js';
+import { readWaveformSlotSequence } from './sharedBuffers.js';
+
+const TOP_PADDING = 10;
+const BOTTOM_PADDING = 10;
+const CENTER_LINE_ALPHA = 0.14;
+const SYMMETRIC_ENVELOPE_GAIN = 0.76;
 
 let canvas = null;
 let context = null;
-let waveformData = null;
+let waveformSab = null;
+let controlView = null;
+let waveformMaxColumns = 0;
 let width = 0;
 let height = 0;
 let renderScale = 2;
-let duration = 0;
-let viewStart = 0;
-let viewEnd = 0;
-let color = '#3b82f6';
-let renderQueued = false;
-let waveformLoadGeneration = 0;
+let color = '#7dd3fc';
+let latestSlice = null;
 
 self.onmessage = (event) => {
   const { type, payload } = event.data ?? {};
 
   switch (type) {
-    case 'init': {
+    case 'initCanvas':
       canvas = payload?.offscreenCanvas ?? null;
       width = payload?.width ?? width;
       height = payload?.height ?? height;
       renderScale = payload?.renderScale ?? renderScale;
-      duration = payload?.duration ?? duration;
-      viewStart = payload?.viewStart ?? viewStart;
-      viewEnd = payload?.viewEnd ?? viewEnd;
       color = payload?.color ?? color;
 
       if (canvas) {
-        resizeInteractiveWaveformSurface(canvas, width, height, renderScale);
+        resizeSurface(canvas, width, height, renderScale);
         context = canvas.getContext('2d');
       }
-
-      queueRender();
-      break;
-    }
-
-    case 'setData': {
-      const samplesBuffer = payload?.samplesBuffer;
-      waveformLoadGeneration += 1;
-      const currentGeneration = waveformLoadGeneration;
-      duration = payload?.duration ?? duration;
-
-      if (!samplesBuffer) {
-        waveformData = null;
-        queueRender();
-        break;
-      }
-
-      const samples = new Float32Array(samplesBuffer);
-      waveformData = createInteractiveWaveformData(samples, []);
-      queueRender();
-      void buildLevelsProgressively(currentGeneration, samples);
-      break;
-    }
-
-    case 'updateView': {
+      return;
+    case 'attachSharedBuffers':
+      waveformSab = payload?.waveformSab ?? waveformSab;
+      controlView = payload?.controlSab ? new Int32Array(payload.controlSab) : controlView;
+      waveformMaxColumns = payload?.waveformMaxColumns ?? waveformMaxColumns;
+      return;
+    case 'renderWaveformSlice':
       width = payload?.width ?? width;
       height = payload?.height ?? height;
       renderScale = payload?.renderScale ?? renderScale;
-      duration = payload?.duration ?? duration;
-      viewStart = payload?.viewStart ?? viewStart;
-      viewEnd = payload?.viewEnd ?? viewEnd;
       color = payload?.color ?? color;
+      latestSlice = payload;
 
       if (canvas) {
-        resizeInteractiveWaveformSurface(canvas, width, height, renderScale);
+        resizeSurface(canvas, width, height, renderScale);
       }
 
-      queueRender();
-      break;
-    }
-
-    case 'clear': {
-      waveformLoadGeneration += 1;
-      waveformData = null;
-      queueRender();
-      break;
-    }
-
-    case 'stop': {
-      waveformLoadGeneration += 1;
-      renderQueued = false;
-      waveformData = null;
+      drawFrame();
+      return;
+    case 'clear':
+      latestSlice = null;
+      clearCanvas();
+      return;
+    case 'dispose':
+      latestSlice = null;
+      waveformSab = null;
+      controlView = null;
+      waveformMaxColumns = 0;
       context = null;
       canvas = null;
-      break;
-    }
+      return;
+    default:
+      return;
   }
 };
 
-function queueRender() {
-  if (renderQueued) {
+function resizeSurface(surface, nextWidth, nextHeight, nextRenderScale) {
+  surface.width = Math.max(1, Math.round(nextWidth * nextRenderScale));
+  surface.height = Math.max(1, Math.round(nextHeight * nextRenderScale));
+}
+
+function clearCanvas() {
+  if (!context || !canvas) {
     return;
   }
 
-  renderQueued = true;
-
-  if (typeof self.requestAnimationFrame === 'function') {
-    self.requestAnimationFrame(drawFrame);
-    return;
-  }
-
-  setTimeout(drawFrame, 16);
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvas.width, canvas.height);
 }
 
 function drawFrame() {
-  renderQueued = false;
-
-  if (!context) {
+  if (!context || !canvas || !latestSlice || !waveformSab || !controlView || waveformMaxColumns <= 0) {
+    clearCanvas();
     return;
   }
 
-  renderInteractiveWaveform(
-    context,
-    width,
-    height,
-    renderScale,
-    duration,
-    viewStart,
-    viewEnd,
-    color,
-    waveformData,
-  );
-}
+  const {
+    slotId,
+    sequence,
+    columnCount,
+  } = latestSlice;
 
-async function buildLevelsProgressively(generation, samples) {
-  const blockSizes = getInteractiveWaveformBlockSizes(samples.length);
-
-  if (!waveformData || generation !== waveformLoadGeneration) {
+  if (readWaveformSlotSequence(controlView, slotId) !== sequence) {
     return;
   }
 
-  const descendingBlockSizes = blockSizes.slice().reverse();
+  const slotByteOffset = Float32Array.BYTES_PER_ELEMENT * waveformMaxColumns * 2 * slotId;
+  const slice = new Float32Array(waveformSab, slotByteOffset, waveformMaxColumns * 2);
+  const deviceWidth = Math.max(1, Math.round(width * renderScale));
+  const deviceHeight = Math.max(1, Math.round(height * renderScale));
+  const chartTop = Math.round(TOP_PADDING * renderScale);
+  const chartBottom = Math.max(chartTop + 1, Math.round((height - BOTTOM_PADDING) * renderScale));
+  const chartHeight = Math.max(1, chartBottom - chartTop);
+  const midY = chartTop + chartHeight * 0.5;
+  const amplitudeHeight = chartHeight * 0.38;
 
-  for (let index = 0; index < descendingBlockSizes.length; index += 1) {
-    if (generation !== waveformLoadGeneration || !waveformData) {
-      return;
-    }
+  context.imageSmoothingEnabled = true;
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, deviceWidth, deviceHeight);
+  context.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;
+  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, renderScale));
+  context.fillStyle = color;
 
-    const blockSize = descendingBlockSizes[index];
-    const level = buildInteractiveWaveformLevel(samples, blockSize);
-    insertLevelSorted(waveformData.levels, level);
-    queueRender();
+  const drawColumns = Math.min(columnCount, deviceWidth);
 
-    self.postMessage({
-      type: 'waveformProgress',
-      payload: {
-        progress: (index + 1) / descendingBlockSizes.length,
-      },
-    });
-
-    await yieldToWorker();
-  }
-
-  if (generation !== waveformLoadGeneration) {
-    return;
+  for (let x = 0; x < drawColumns; x += 1) {
+    const sourceIndex = x * 2;
+    const minValue = slice[sourceIndex] ?? 0;
+    const maxValue = slice[sourceIndex + 1] ?? 0;
+    const symmetricPeak = Math.max(Math.abs(minValue), Math.abs(maxValue)) * SYMMETRIC_ENVELOPE_GAIN;
+    const top = clamp(Math.round(midY - symmetricPeak * amplitudeHeight), chartTop, chartBottom);
+    const bottom = clamp(Math.round(midY + symmetricPeak * amplitudeHeight), chartTop, chartBottom);
+    context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));
   }
 
   self.postMessage({
-    type: 'waveformReady',
+    type: 'waveformRendered',
+    payload: {
+      generation: latestSlice.generation,
+      slotId,
+    },
   });
 }
 
-function insertLevelSorted(levels, level) {
-  const existingIndex = levels.findIndex((entry) => entry.blockSize === level.blockSize);
-
-  if (existingIndex >= 0) {
-    levels[existingIndex] = level;
-  } else {
-    levels.push(level);
-    levels.sort((left, right) => left.blockSize - right.blockSize);
-  }
-}
-
-function yieldToWorker() {
-  return new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
