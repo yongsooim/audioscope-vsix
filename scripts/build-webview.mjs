@@ -17,6 +17,5 @@ await build({
   target: ['es2022'],
   entryNames: '[name]',
   sourcemap: false,
-  external: ['module', '../media/wave_core.js'],
   logLevel: 'silent',
 });

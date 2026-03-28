@@ -31,7 +31,10 @@ const WAVEFORM_COLOR = '#7dd3fc';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
 const WAVEFORM_MAX_ZOOM_FACTOR = 100;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
-const WAVEFORM_FOLLOW_DEADBAND_PX = 0.75;
+const WAVEFORM_WHEEL_ZOOM_TARGET_RATIO = 0.5;
+const WAVEFORM_FOLLOW_LEFT_THRESHOLD_RATIO = 0.25;
+const WAVEFORM_FOLLOW_RIGHT_THRESHOLD_RATIO = 0.75;
+const WAVEFORM_FOLLOW_TARGET_RATIO = 0.5;
 const LOOP_SELECTION_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const LOOP_HANDLE_WIDTH_PX = 12;
@@ -91,6 +94,7 @@ const elements = {
   seekForward: document.getElementById('seek-forward'),
   jumpEnd: document.getElementById('jump-end'),
   timeline: document.getElementById('timeline'),
+  timelineHoverTooltip: document.getElementById('timeline-hover-tooltip'),
   timeReadout: document.getElementById('time-readout'),
   analysisStatus: document.getElementById('analysis-status'),
   status: document.getElementById('status'),
@@ -116,7 +120,6 @@ const state = {
   waveformSurfaceReadyPromise: null,
   waveformCanvas: null,
   waveformViewRange: { start: 0, end: 0 },
-  waveformThumbDrag: null,
   waveformSeekPointerId: null,
   selectionDrag: null,
   selectionDraft: null,
@@ -147,10 +150,10 @@ const spectrogramContext = elements.spectrogram.getContext('2d', { alpha: false 
 if (!spectrogramContext) {
   setFatalStatus('Canvas initialization failed.');
 } else {
+  initializeKeyboardFocus();
   state.followPlayback = elements.waveFollow.checked;
   attachUiEvents();
   attachResizeObservers();
-  attachWindowPointerHandlers();
   renderWaveformUi();
   renderSpectrogramScale();
   vscode.postMessage({ type: 'ready' });
@@ -164,6 +167,32 @@ window.addEventListener('message', (event) => {
     void loadAudioFile(message.body);
   }
 });
+
+function initializeKeyboardFocus() {
+  document.body.tabIndex = -1;
+
+  const focusKeyboardSurface = () => {
+    if (document.visibilityState !== 'visible') {
+      return;
+    }
+
+    window.focus();
+
+    if (document.activeElement !== document.body) {
+      document.body.focus({ preventScroll: true });
+    }
+  };
+
+  queueMicrotask(focusKeyboardSurface);
+  window.requestAnimationFrame(focusKeyboardSurface);
+  window.setTimeout(focusKeyboardSurface, 120);
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      window.requestAnimationFrame(focusKeyboardSurface);
+    }
+  });
+}
 
 window.addEventListener('keydown', (event) => {
   if (!state.audio || event.defaultPrevented) {
@@ -1824,7 +1853,6 @@ function syncFollowView(timeSeconds) {
     !state.followPlayback ||
     !Number.isFinite(timeSeconds) ||
     timeSeconds < 0 ||
-    state.waveformThumbDrag ||
     state.waveformSeekPointerId !== null ||
     state.selectionDrag ||
     state.loopHandleDrag
@@ -1833,22 +1861,25 @@ function syncFollowView(timeSeconds) {
   }
 
   const duration = getEffectiveDuration();
-  const width = getWaveformViewportWidth();
   const range = getWaveformRange();
   const span = Math.max(0, range.end - range.start);
 
-  if (duration <= 0 || width <= 0 || span <= 0) {
+  if (duration <= 0 || span <= 0) {
     return;
   }
 
-  const center = range.start + span * 0.5;
-  const deadbandSeconds = (span / Math.max(1, width)) * WAVEFORM_FOLLOW_DEADBAND_PX;
+  const leftThresholdTime = range.start + span * WAVEFORM_FOLLOW_LEFT_THRESHOLD_RATIO;
+  const rightThresholdTime = range.start + span * WAVEFORM_FOLLOW_RIGHT_THRESHOLD_RATIO;
 
-  if (Math.abs(timeSeconds - center) <= deadbandSeconds) {
+  if (timeSeconds >= leftThresholdTime && timeSeconds <= rightThresholdTime) {
     return;
   }
 
-  const nextStart = clamp(timeSeconds - span * 0.5, 0, Math.max(0, duration - span));
+  const nextStart = clamp(
+    timeSeconds - span * WAVEFORM_FOLLOW_TARGET_RATIO,
+    0,
+    Math.max(0, duration - span),
+  );
 
   if (Math.abs(nextStart - range.start) < 0.001) {
     return;
@@ -1937,17 +1968,6 @@ function zoomAroundTime(anchorTime, requestedSpan) {
   }));
 }
 
-function scrollWaveformTo(startTime) {
-  updateWaveformViewRange((current) => {
-    const span = Math.max(getMinVisibleDuration(getEffectiveDuration()), current.end - current.start);
-
-    return {
-      start: startTime,
-      end: startTime + span,
-    };
-  });
-}
-
 function zoomWaveformIn() {
   const range = getWaveformRange();
   const span = range.end - range.start;
@@ -1990,6 +2010,29 @@ function disableFollowPlayback() {
 
   state.followPlayback = false;
   elements.waveFollow.checked = false;
+}
+
+function updateTimelineHoverTooltip(event) {
+  const duration = getEffectiveDuration();
+  const rect = elements.waveformOverview.getBoundingClientRect();
+
+  if (!Number.isFinite(duration) || duration <= 0 || rect.width <= 0) {
+    hideTimelineHoverTooltip();
+    return;
+  }
+
+  const offsetX = clamp(event.clientX - rect.left, 0, rect.width);
+  const ratio = offsetX / rect.width;
+  const timeSeconds = clamp(ratio * duration, 0, duration);
+  const tooltipX = clamp(offsetX, 18, Math.max(18, rect.width - 18));
+
+  elements.timelineHoverTooltip.textContent = formatAxisLabel(timeSeconds);
+  elements.timelineHoverTooltip.style.left = `${tooltipX}px`;
+  elements.timelineHoverTooltip.classList.add('visible');
+}
+
+function hideTimelineHoverTooltip() {
+  elements.timelineHoverTooltip.classList.remove('visible');
 }
 
 function seekWaveformTo(timeSeconds) {
@@ -2185,7 +2228,11 @@ function handleSharedViewportWheel(event, targetElement) {
   const horizontalMagnitude = Math.abs(deltaX);
   const verticalMagnitude = Math.abs(deltaY);
   const intent = verticalMagnitude >= horizontalMagnitude ? 'zoom' : 'pan';
-  const anchorRatio = rect.width > 0 ? clamp((event.clientX - rect.left) / rect.width, 0, 1) : 0.5;
+  const anchorTime = getTimeAtViewportClientX(event.clientX, targetElement);
+
+  if ((intent === 'zoom' && verticalMagnitude > 0.01) || (intent === 'pan' && horizontalMagnitude > 0.01)) {
+    disableFollowPlayback();
+  }
 
   updateWaveformViewRange((current) => {
     let nextSpan = Math.max(getMinVisibleDuration(duration), current.end - current.start);
@@ -2198,12 +2245,10 @@ function handleSharedViewportWheel(event, targetElement) {
         getMinVisibleDuration(duration),
         Math.max(getMinVisibleDuration(duration), duration),
       );
-      const anchorTime = current.start + (current.end - current.start) * anchorRatio;
-      nextStart = anchorTime - nextSpan * anchorRatio;
+      nextStart = anchorTime - nextSpan * WAVEFORM_WHEEL_ZOOM_TARGET_RATIO;
     }
 
     if (intent === 'pan' && horizontalMagnitude > 0.01) {
-      disableFollowPlayback();
       const secondsPerPixel = nextSpan / Math.max(1, width);
       nextStart += deltaX * secondsPerPixel;
     }
@@ -2246,6 +2291,15 @@ function attachUiEvents() {
     }
 
     setPlaybackPosition(progress * duration);
+  });
+  elements.waveformOverview.addEventListener('pointermove', (event) => {
+    updateTimelineHoverTooltip(event);
+  });
+  elements.waveformOverview.addEventListener('pointerleave', () => {
+    hideTimelineHoverTooltip();
+  });
+  elements.waveformOverview.addEventListener('pointercancel', () => {
+    hideTimelineHoverTooltip();
   });
 
   elements.waveZoomOut.addEventListener('click', () => {
@@ -2300,34 +2354,6 @@ function attachUiEvents() {
   bindLoopHandle(elements.spectrogramLoopStart, 'start', elements.spectrogramHitTarget);
   bindLoopHandle(elements.spectrogramLoopEnd, 'end', elements.spectrogramHitTarget);
 
-  elements.waveformOverview.addEventListener('pointerdown', (event) => {
-    if (event.target === elements.waveformOverviewThumb) {
-      return;
-    }
-
-    const duration = getEffectiveDuration();
-    const range = getWaveformRange();
-    const span = range.end - range.start;
-    const rect = elements.waveformOverview.getBoundingClientRect();
-
-    if (duration <= 0 || span <= 0 || rect.width <= 0) {
-      return;
-    }
-
-    disableFollowPlayback();
-    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-    scrollWaveformTo(ratio * duration - span / 2);
-  });
-
-  elements.waveformOverviewThumb.addEventListener('pointerdown', (event) => {
-    event.stopPropagation();
-    disableFollowPlayback();
-    state.waveformThumbDrag = {
-      clientX: event.clientX,
-      startTime: getWaveformRange().start,
-    };
-  });
-
   elements.spectrogramHitTarget.addEventListener('pointerdown', (event) => {
     const duration = getEffectiveDuration();
     const range = getWaveformRange();
@@ -2379,30 +2405,6 @@ function attachResizeObservers() {
   resizeObserver.observe(elements.waveformOverview);
 }
 
-function attachWindowPointerHandlers() {
-  window.addEventListener('pointermove', (event) => {
-    const dragState = state.waveformThumbDrag;
-    const duration = getEffectiveDuration();
-    const range = getWaveformRange();
-    const span = range.end - range.start;
-    const rect = elements.waveformOverview.getBoundingClientRect();
-
-    if (!dragState || duration <= 0 || span <= 0 || rect.width <= 0) {
-      return;
-    }
-
-    const deltaX = event.clientX - dragState.clientX;
-    const deltaRatio = deltaX / rect.width;
-    const nextStart = dragState.startTime + deltaRatio * duration;
-
-    scrollWaveformTo(nextStart);
-  });
-
-  window.addEventListener('pointerup', () => {
-    state.waveformThumbDrag = null;
-  });
-}
-
 function destroySession() {
   window.cancelAnimationFrame(state.playbackFrame);
   window.cancelAnimationFrame(state.spectrogramFrame);
@@ -2450,7 +2452,6 @@ function destroySession() {
   state.spectrogramMaxRows = 0;
   state.sourceArrayBuffer = null;
   state.waveformViewRange = { start: 0, end: 0 };
-  state.waveformThumbDrag = null;
   state.waveformSeekPointerId = null;
   state.selectionDrag = null;
   state.selectionDraft = null;
