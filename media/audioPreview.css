@@ -188,6 +188,9 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  transform: translate3d(0, 0, 0);
+  transform-origin: left center;
+  will-change: transform;
 }
 
 .waveform-hit-target {
@@ -268,7 +271,17 @@ body {
   position: relative;
   height: 30px;
   margin: 0;
+  overflow: hidden;
   border-top: 1px solid rgba(116, 143, 189, 0.12);
+}
+
+.waveform-axis-content {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  transform: translate3d(0, 0, 0);
+  transform-origin: left center;
+  will-change: transform;
 }
 
 .waveform-axis-tick {
@@ -501,7 +514,7 @@ body {
   inset-block: 3px;
   inset-inline-start: 0;
   z-index: 1;
-  border-radius: 999px;
+  border-radius: 8px;
   background: linear-gradient(90deg, rgba(79, 140, 255, 0.32) 0%, rgba(191, 219, 254, 0.22) 100%);
   border: 1px solid rgba(191, 219, 254, 0.32);
   box-shadow:
@@ -511,25 +524,6 @@ body {
   backdrop-filter: blur(6px);
   pointer-events: none;
   will-change: transform;
-}
-
-.timeline-viewport::before,
-.timeline-viewport::after {
-  content: "";
-  position: absolute;
-  inset-block: 2px;
-  width: 2px;
-  border-radius: 999px;
-  background: rgba(219, 234, 254, 0.95);
-  box-shadow: 0 0 10px rgba(147, 197, 253, 0.35);
-}
-
-.timeline-viewport::before {
-  left: 3px;
-}
-
-.timeline-viewport::after {
-  right: 3px;
 }
 
 .timeline-hover-tooltip {
@@ -575,7 +569,7 @@ body {
 .timeline::-webkit-slider-runnable-track {
   height: 12px;
   border: 1px solid rgba(116, 143, 189, 0.18);
-  border-radius: 999px;
+  border-radius: 8px;
   background:
     linear-gradient(90deg, var(--seek-fill) 0%, var(--seek-fill) var(--seek-progress), var(--seek-track) var(--seek-progress), var(--seek-track) 100%);
   box-shadow: inset 0 1px 2px rgba(96, 165, 250, 0.05), 0 1px 2px rgba(0, 0, 0, 0.22);
@@ -608,14 +602,14 @@ body {
 .timeline::-moz-range-track {
   height: 12px;
   border: 1px solid rgba(116, 143, 189, 0.18);
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--seek-track);
   box-shadow: inset 0 1px 2px rgba(96, 165, 250, 0.05), 0 1px 2px rgba(0, 0, 0, 0.22);
 }
 
 .timeline::-moz-range-progress {
   height: 12px;
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--seek-fill);
 }
 
