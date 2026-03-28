@@ -91,46 +91,8 @@ function createModuleFacade(exports) {
 
 // src-webview/sharedBuffers.js
 var TILE_COLUMN_COUNT = 256;
-var WAVEFORM_SLOT_COUNT = 8;
-var SPECTROGRAM_SLOT_COUNT = 12;
-var CONTROL_INDEX = {
-  sessionVersion: 0,
-  attached: 1,
-  waveformSlotBase: 16,
-  spectrogramSlotBase: 48
-};
-function getWaveformSlotLength(maxColumns) {
-  return maxColumns * 2;
-}
-function getWaveformSlotView(waveformSab, maxColumns, slotId) {
-  const slotLength = getWaveformSlotLength(maxColumns);
-  const byteOffset = Float32Array.BYTES_PER_ELEMENT * slotLength * slotId;
-  return new Float32Array(waveformSab, byteOffset, slotLength);
-}
-function getSpectrogramSlotByteLength(maxColumns, maxRows) {
-  return maxColumns * maxRows * 4;
-}
-function getSpectrogramSlotView(spectrogramSab, maxColumns, maxRows, slotId, width, height) {
-  const maxSlotBytes = getSpectrogramSlotByteLength(maxColumns, maxRows);
-  const byteOffset = maxSlotBytes * slotId;
-  return new Uint8ClampedArray(spectrogramSab, byteOffset, width * height * 4);
-}
-function markWaveformSlotReady(controlView, slotId, sequence) {
-  Atomics.store(controlView, CONTROL_INDEX.waveformSlotBase + slotId, sequence);
-}
-function markSpectrogramSlotReady(controlView, slotId, sequence) {
-  Atomics.store(controlView, CONTROL_INDEX.spectrogramSlotBase + slotId, sequence);
-}
 function quantizeCeil(value, bucketSize) {
   return Math.max(bucketSize, Math.ceil(value / bucketSize) * bucketSize);
-}
-function quantizeSamplesPerPixel(samplesPerPixel) {
-  const safeValue = Math.max(1, samplesPerPixel);
-  const bucketExponent = Math.round(Math.log2(safeValue) * 2) / 2;
-  return 2 ** bucketExponent;
-}
-function formatBucketNumber(value) {
-  return String(Math.round(value * 100) / 100).replace(".", "_");
 }
 
 // src-webview/audioAnalysisWorker.js
@@ -141,28 +103,37 @@ var QUALITY_PRESETS = {
   balanced: {
     rowsMultiplier: 1.5,
     colsMultiplier: 2.5,
-    fftSizes: [2048, 4096, 8192],
     lowFrequencyDecimationFactor: 2
   },
   high: {
     rowsMultiplier: 2.5,
     colsMultiplier: 4,
-    fftSizes: [4096, 8192, 16384],
     lowFrequencyDecimationFactor: 4
   },
   max: {
     rowsMultiplier: 4,
     colsMultiplier: 6,
-    fftSizes: [8192, 16384, 16384],
     lowFrequencyDecimationFactor: 4
   }
 };
-var requestQueue = Promise.resolve();
+var FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
+var OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875];
 var runtimePromise2 = null;
+var requestQueue = Promise.resolve();
+var overviewRenderLoopActive = false;
+var visibleRenderLoopActive = false;
+var pendingOverviewRequest = null;
+var pendingVisibleRequest = null;
+var surfaceState = {
+  canvas: null,
+  context: null,
+  pixelWidth: 0,
+  pixelHeight: 0
+};
 var analysisState = createEmptyAnalysisState();
 self.onmessage = (event) => {
-  const message = event.data;
-  switch (message?.type) {
+  const message = event.data ?? {};
+  switch (message.type) {
     case "bootstrapRuntime":
       enqueueRequest(async () => {
         const runtime = await getRuntime();
@@ -174,46 +145,60 @@ self.onmessage = (event) => {
         });
       });
       return;
+    case "initCanvas":
+      initializeCanvas(message.body);
+      return;
+    case "resizeCanvas":
+      resizeCanvas(message.body);
+      return;
     case "attachAudioSession":
       enqueueRequest(async () => {
         const runtime = await getRuntime();
         attachAudioSession(runtime, message.body);
       });
       return;
-    case "buildWaveformPyramid":
-      enqueueRequest(async () => {
-        const runtime = await getRuntime();
-        buildWaveformPyramid(runtime);
-      });
+    case "renderOverview":
+      pendingOverviewRequest = message.body ?? null;
+      void pumpOverviewLoop();
       return;
-    case "requestWaveformSlice":
-      enqueueRequest(async () => {
-        const runtime = await getRuntime();
-        requestWaveformSlice(runtime, message.body);
-      });
-      return;
-    case "requestSpectrogramTiles":
-      enqueueRequest(async () => {
-        const runtime = await getRuntime();
-        await requestSpectrogramTiles(runtime, message.body);
-      });
+    case "renderVisibleRange":
+      if (message.body) {
+        updateCurrentDisplayRange(message.body);
+      }
+      pendingVisibleRequest = message.body ?? null;
+      paintSpectrogramDisplay();
+      void pumpVisibleLoop();
       return;
     case "cancelGeneration":
       cancelGeneration(message.body?.generation);
-      return;
-    case "releaseSpectrogramSlot":
-      releaseSpectrogramSlot(message.body?.slotId);
       return;
     case "disposeSession":
       enqueueRequest(async () => {
         const runtime = await getRuntime();
         disposeSession(runtime);
+        paintSpectrogramDisplay();
       });
+      return;
+    case "dispose":
+      pendingOverviewRequest = null;
+      pendingVisibleRequest = null;
+      surfaceState.canvas = null;
+      surfaceState.context = null;
+      analysisState = createEmptyAnalysisState();
       return;
     default:
       return;
   }
 };
+function createEmptyLayerState(kind) {
+  return {
+    kind,
+    generation: kind === "overview" ? 0 : -1,
+    ready: false,
+    requestPending: false,
+    plan: null
+  };
+}
 function createEmptyAnalysisState() {
   return {
     initialized: false,
@@ -226,23 +211,16 @@ function createEmptyAnalysisState() {
     minFrequency: MIN_FREQUENCY,
     maxFrequency: MAX_FREQUENCY,
     runtimeVariant: null,
-    pcmSab: null,
-    controlSab: null,
-    controlView: null,
-    waveformSab: null,
-    waveformMaxColumns: 0,
-    spectrogramSab: null,
-    spectrogramMaxColumns: 0,
-    spectrogramMaxRows: 0,
     generationStatus: /* @__PURE__ */ new Map(),
     tileCache: /* @__PURE__ */ new Map(),
-    waveformRequestSequence: 0,
-    spectrogramRequestSequence: 0,
-    slotReleaseResolvers: [],
-    slotBusy: new Array(SPECTROGRAM_SLOT_COUNT).fill(false),
-    pcmPointer: 0,
-    waveformOutputPointer: 0,
-    waveformOutputCapacity: 0,
+    overview: createEmptyLayerState("overview"),
+    visible: createEmptyLayerState("visible"),
+    currentDisplayRange: {
+      start: 0,
+      end: 0,
+      pixelWidth: 0,
+      pixelHeight: 0
+    },
     spectrogramOutputPointer: 0,
     spectrogramOutputCapacity: 0
   };
@@ -261,6 +239,32 @@ function getRuntime() {
 function normalizeQualityPreset(value) {
   return value === "balanced" || value === "max" ? value : "high";
 }
+function initializeCanvas(options) {
+  if (options?.offscreenCanvas) {
+    surfaceState.canvas = options.offscreenCanvas;
+  }
+  surfaceState.pixelWidth = Math.max(1, Math.round(Number(options?.pixelWidth) || surfaceState.pixelWidth || 1));
+  surfaceState.pixelHeight = Math.max(1, Math.round(Number(options?.pixelHeight) || surfaceState.pixelHeight || 1));
+  if (!surfaceState.canvas) {
+    return;
+  }
+  surfaceState.canvas.width = surfaceState.pixelWidth;
+  surfaceState.canvas.height = surfaceState.pixelHeight;
+  surfaceState.context = surfaceState.canvas.getContext("2d", { alpha: false });
+  paintSpectrogramDisplay();
+}
+function resizeCanvas(options) {
+  surfaceState.pixelWidth = Math.max(1, Math.round(Number(options?.pixelWidth) || surfaceState.pixelWidth || 1));
+  surfaceState.pixelHeight = Math.max(1, Math.round(Number(options?.pixelHeight) || surfaceState.pixelHeight || 1));
+  if (!surfaceState.canvas) {
+    return;
+  }
+  surfaceState.canvas.width = surfaceState.pixelWidth;
+  surfaceState.canvas.height = surfaceState.pixelHeight;
+  analysisState.currentDisplayRange.pixelWidth = surfaceState.pixelWidth;
+  analysisState.currentDisplayRange.pixelHeight = surfaceState.pixelHeight;
+  paintSpectrogramDisplay();
+}
 function attachAudioSession(runtime, options) {
   const module = runtime.module;
   const transportMode = options?.transportMode === "transfer" ? "transfer" : "shared";
@@ -269,8 +273,8 @@ function attachAudioSession(runtime, options) {
   const duration = Number(options?.duration);
   const sampleCount = Number(options?.sampleCount);
   const quality = normalizeQualityPreset(options?.quality);
-  if (transportMode === "shared" && (!options?.pcmSab || !options?.controlSab || !options?.waveformSab || !options?.spectrogramSab)) {
-    throw new Error("Shared buffers are missing.");
+  if (transportMode === "shared" && !options?.pcmSab) {
+    throw new Error("Shared PCM buffer is missing.");
   }
   if (transportMode === "transfer" && !options?.samplesBuffer) {
     throw new Error("Transferable PCM buffer is missing.");
@@ -282,7 +286,7 @@ function attachAudioSession(runtime, options) {
   if (isNewAudioSession) {
     disposeWasmSession(module);
     if (!module._wave_prepare_session(sampleCount, sampleRate, duration)) {
-      throw new Error("Failed to allocate wasm audio session.");
+      throw new Error("Failed to allocate spectrogram session.");
     }
     const pcmPointer = module._wave_get_pcm_ptr();
     if (!pcmPointer) {
@@ -291,269 +295,321 @@ function attachAudioSession(runtime, options) {
     const pcmSource = transportMode === "shared" ? new Float32Array(options.pcmSab) : new Float32Array(options.samplesBuffer);
     const pcmTarget = getHeapF32View(module, pcmPointer, sampleCount);
     pcmTarget.set(pcmSource);
-    analysisState.pcmPointer = pcmPointer;
-    analysisState.tileCache.clear();
-    analysisState.generationStatus.clear();
   }
   analysisState.initialized = true;
+  analysisState.transportMode = transportMode;
   analysisState.attachedSessionVersion = sessionVersion;
   analysisState.sampleRate = sampleRate;
   analysisState.sampleCount = sampleCount;
   analysisState.duration = duration;
   analysisState.quality = quality;
-  analysisState.transportMode = transportMode;
   analysisState.minFrequency = MIN_FREQUENCY;
   analysisState.maxFrequency = Math.min(MAX_FREQUENCY, sampleRate / 2);
   analysisState.runtimeVariant = runtime.variant;
-  analysisState.pcmSab = transportMode === "shared" ? options.pcmSab : null;
-  analysisState.controlSab = transportMode === "shared" ? options.controlSab : null;
-  analysisState.controlView = transportMode === "shared" ? new Int32Array(options.controlSab) : null;
-  analysisState.waveformSab = transportMode === "shared" ? options.waveformSab : null;
-  analysisState.waveformMaxColumns = transportMode === "shared" ? Math.max(1, Math.round(options.waveformMaxColumns || 1)) : 0;
-  analysisState.spectrogramSab = transportMode === "shared" ? options.spectrogramSab : null;
-  analysisState.spectrogramMaxColumns = transportMode === "shared" ? Math.max(TILE_COLUMN_COUNT, Math.round(options.spectrogramMaxColumns || TILE_COLUMN_COUNT)) : 0;
-  analysisState.spectrogramMaxRows = transportMode === "shared" ? Math.max(ROW_BUCKET_SIZE, Math.round(options.spectrogramMaxRows || ROW_BUCKET_SIZE)) : 0;
-  analysisState.slotBusy = new Array(SPECTROGRAM_SLOT_COUNT).fill(false);
-  analysisState.slotReleaseResolvers = [];
-  if (analysisState.controlView) {
-    Atomics.store(analysisState.controlView, CONTROL_INDEX.sessionVersion, sessionVersion);
-    Atomics.store(analysisState.controlView, CONTROL_INDEX.attached, 1);
-  }
   if (isNewAudioSession) {
-    self.postMessage({
-      type: "analysisInitialized",
-      body: {
-        duration,
-        maxFrequency: analysisState.maxFrequency,
-        minFrequency: analysisState.minFrequency,
-        quality,
-        runtimeVariant: runtime.variant,
-        sampleCount,
-        sampleRate
-      }
-    });
-  }
-}
-function buildWaveformPyramid(runtime) {
-  assertInitialized();
-  if (!runtime.module._wave_build_waveform_pyramid()) {
-    throw new Error("Waveform pyramid build failed.");
+    analysisState.tileCache.clear();
+    analysisState.generationStatus.clear();
+    analysisState.overview = createEmptyLayerState("overview");
+    analysisState.visible = createEmptyLayerState("visible");
   }
   self.postMessage({
-    type: "waveformPyramidReady"
+    type: "analysisInitialized",
+    body: {
+      duration,
+      maxFrequency: analysisState.maxFrequency,
+      minFrequency: analysisState.minFrequency,
+      quality,
+      runtimeVariant: runtime.variant,
+      sampleCount,
+      sampleRate
+    }
   });
 }
-function requestWaveformSlice(runtime, request) {
-  assertInitialized();
-  const viewStart = clamp(Number(request?.viewStart) || 0, 0, analysisState.duration);
-  const viewEnd = clamp(Number(request?.viewEnd) || analysisState.duration, viewStart + 1 / analysisState.sampleRate, analysisState.duration);
-  const requestedColumnCount = Math.max(1, Math.round(Number(request?.columnCount) || 1));
-  const columnCount = analysisState.transportMode === "shared" ? Math.min(analysisState.waveformMaxColumns, requestedColumnCount) : requestedColumnCount;
-  const slotId = Math.abs(Math.round(Number(request?.slotId) || 0)) % WAVEFORM_SLOT_COUNT;
-  const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
-  const sequence = analysisState.waveformRequestSequence + 1;
-  analysisState.waveformRequestSequence = sequence;
-  ensureWaveformOutputCapacity(runtime.module, columnCount * 2);
-  const ok = runtime.module._wave_extract_waveform_slice(
-    viewStart,
-    viewEnd,
-    columnCount,
-    analysisState.waveformOutputPointer
+function updateCurrentDisplayRange(request) {
+  const start = clamp(Number(request?.displayStart) || 0, 0, analysisState.duration);
+  const end = clamp(
+    Number(request?.displayEnd) || analysisState.duration,
+    start + (analysisState.sampleRate > 0 ? 1 / analysisState.sampleRate : 1e-6),
+    analysisState.duration || start + 1e-6
   );
-  if (!ok) {
-    throw new Error("Waveform slice extraction failed.");
-  }
-  const output = getHeapF32View(runtime.module, analysisState.waveformOutputPointer, columnCount * 2);
-  if (analysisState.transportMode === "shared") {
-    const slotView = getWaveformSlotView(analysisState.waveformSab, analysisState.waveformMaxColumns, slotId);
-    slotView.fill(0);
-    slotView.set(output.subarray(0, columnCount * 2));
-    markWaveformSlotReady(analysisState.controlView, slotId, sequence);
-    self.postMessage({
-      type: "waveformSliceReady",
-      body: {
-        columnCount,
-        generation,
-        sequence,
-        slotId,
-        transportMode: analysisState.transportMode,
-        viewEnd,
-        viewStart
-      }
-    });
-    return;
-  }
-  const transferableSlice = new Float32Array(output.subarray(0, columnCount * 2));
-  self.postMessage({
-    type: "waveformSliceReady",
-    body: {
-      columnCount,
-      generation,
-      sliceBuffer: transferableSlice.buffer,
-      transportMode: analysisState.transportMode,
-      viewEnd,
-      viewStart
-    }
-  }, [transferableSlice.buffer]);
+  analysisState.currentDisplayRange = {
+    start,
+    end,
+    pixelWidth: Math.max(1, Math.round(Number(request?.pixelWidth) || surfaceState.pixelWidth || 1)),
+    pixelHeight: Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1))
+  };
 }
 function cancelGeneration(generation) {
   if (!Number.isFinite(generation)) {
     return;
   }
-  analysisState.generationStatus.set(generation, { cancelled: true });
+  analysisState.generationStatus.set(Number(generation), { cancelled: true });
 }
 function isGenerationCancelled(generation) {
   return analysisState.generationStatus.get(generation)?.cancelled === true;
 }
-async function requestSpectrogramTiles(runtime, request) {
-  assertInitialized();
-  const plan = createRequestPlan(request);
-  const existingGenerationStatus = analysisState.generationStatus.get(plan.generation);
-  if (existingGenerationStatus?.cancelled) {
-    postCancelled(plan);
+async function pumpOverviewLoop() {
+  if (overviewRenderLoopActive) {
     return;
   }
-  analysisState.generationStatus.set(plan.generation, { cancelled: false });
-  let completedTiles = 0;
+  overviewRenderLoopActive = true;
+  try {
+    while (pendingOverviewRequest) {
+      const request = pendingOverviewRequest;
+      pendingOverviewRequest = null;
+      await requestQueue;
+      if (!request || !analysisState.initialized) {
+        continue;
+      }
+      const runtime = await getRuntime();
+      const plan = createRequestPlan({
+        ...request,
+        generation: 0,
+        requestKind: "overview",
+        viewEnd: analysisState.duration,
+        viewStart: 0
+      });
+      analysisState.overview = {
+        generation: 0,
+        kind: "overview",
+        plan,
+        ready: false,
+        requestPending: true
+      };
+      await ensurePlanTiles(runtime, plan);
+      analysisState.overview = {
+        generation: 0,
+        kind: "overview",
+        plan,
+        ready: true,
+        requestPending: false
+      };
+      paintSpectrogramDisplay();
+      self.postMessage({
+        type: "overviewReady",
+        body: createLayerReadyBody(plan)
+      });
+    }
+  } catch (error) {
+    postError(error);
+  } finally {
+    overviewRenderLoopActive = false;
+  }
+}
+async function pumpVisibleLoop() {
+  if (visibleRenderLoopActive) {
+    return;
+  }
+  visibleRenderLoopActive = true;
+  try {
+    while (pendingVisibleRequest) {
+      const request = pendingVisibleRequest;
+      pendingVisibleRequest = null;
+      await requestQueue;
+      if (!request || !analysisState.initialized) {
+        continue;
+      }
+      updateCurrentDisplayRange(request);
+      const plan = createRequestPlan({
+        ...request,
+        requestKind: "visible",
+        viewEnd: request.requestEnd,
+        viewStart: request.requestStart
+      });
+      if (isEquivalentPlan(plan, analysisState.visible.plan) && analysisState.visible.ready) {
+        analysisState.visible.generation = plan.generation;
+        paintSpectrogramDisplay();
+        continue;
+      }
+      analysisState.generationStatus.set(plan.generation, { cancelled: false });
+      analysisState.visible = {
+        generation: plan.generation,
+        kind: "visible",
+        plan,
+        ready: false,
+        requestPending: true
+      };
+      const completed = await ensurePlanTiles(runtimePromise2 ? await runtimePromise2 : await getRuntime(), plan, {
+        onTileReady: () => {
+          if (analysisState.visible.generation === plan.generation) {
+            paintSpectrogramDisplay();
+          }
+        },
+        shouldAbort: () => shouldAbortVisiblePlan(plan)
+      });
+      if (!completed || shouldAbortVisiblePlan(plan)) {
+        continue;
+      }
+      analysisState.visible = {
+        generation: plan.generation,
+        kind: "visible",
+        plan,
+        ready: true,
+        requestPending: false
+      };
+      paintSpectrogramDisplay();
+      self.postMessage({
+        type: "visibleReady",
+        body: createLayerReadyBody(plan)
+      });
+    }
+  } catch (error) {
+    postError(error);
+  } finally {
+    visibleRenderLoopActive = false;
+  }
+}
+function shouldAbortVisiblePlan(plan) {
+  if (isGenerationCancelled(plan.generation)) {
+    return true;
+  }
+  return Boolean(
+    pendingVisibleRequest && Number.isFinite(pendingVisibleRequest.generation) && Number(pendingVisibleRequest.generation) !== plan.generation
+  );
+}
+async function ensurePlanTiles(runtime, plan, options = {}) {
+  const onTileReady = typeof options.onTileReady === "function" ? options.onTileReady : null;
+  const shouldAbort = typeof options.shouldAbort === "function" ? options.shouldAbort : null;
   for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
-    if (isGenerationCancelled(plan.generation)) {
-      postCancelled(plan);
-      return;
+    if (shouldAbort?.()) {
+      return false;
     }
     const cacheKey = buildTileCacheKey(plan, tileIndex);
-    const tileStart = tileIndex * plan.tileDuration;
-    const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
-    const usingSharedTransport = analysisState.transportMode === "shared";
-    const slotId = usingSharedTransport ? await acquireSpectrogramSlot() : null;
-    const slotView = usingSharedTransport ? getSpectrogramSlotView(
-      analysisState.spectrogramSab,
-      analysisState.spectrogramMaxColumns,
-      analysisState.spectrogramMaxRows,
-      slotId,
-      TILE_COLUMN_COUNT,
-      plan.rowCount
-    ) : null;
-    let fromCache = true;
-    const cached = analysisState.tileCache.get(cacheKey);
-    let rgbaTransferBuffer = null;
-    if (cached) {
-      if (usingSharedTransport) {
-        slotView.set(cached);
-      } else {
-        rgbaTransferBuffer = new Uint8ClampedArray(cached);
-      }
-    } else {
-      ensureSpectrogramOutputCapacity(runtime.module, TILE_COLUMN_COUNT * plan.rowCount * 4);
-      const ok = runtime.module._wave_render_spectrogram_tile_rgba(
-        tileStart,
+    if (!analysisState.tileCache.has(cacheKey)) {
+      const tileStart = tileIndex * plan.tileDuration;
+      const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
+      const tileCanvas = renderTile(runtime, plan, tileIndex, tileStart, tileEnd);
+      analysisState.tileCache.set(cacheKey, {
+        canvas: tileCanvas,
+        columnCount: TILE_COLUMN_COUNT,
+        rowCount: plan.rowCount,
         tileEnd,
-        TILE_COLUMN_COUNT,
-        plan.rowCount,
-        plan.fftSize,
-        plan.decimationFactor,
-        analysisState.minFrequency,
-        analysisState.maxFrequency,
-        analysisState.spectrogramOutputPointer
-      );
-      if (!ok) {
-        if (usingSharedTransport) {
-          releaseSpectrogramSlot(slotId);
-        }
-        throw new Error("Spectrogram tile render failed.");
-      }
-      const output = getHeapU8View(runtime.module, analysisState.spectrogramOutputPointer, TILE_COLUMN_COUNT * plan.rowCount * 4);
-      const cachedTile = new Uint8ClampedArray(output);
-      if (usingSharedTransport) {
-        slotView.set(cachedTile);
-      } else {
-        rgbaTransferBuffer = new Uint8ClampedArray(cachedTile);
-      }
-      analysisState.tileCache.set(cacheKey, cachedTile);
-      fromCache = false;
-    }
-    completedTiles += 1;
-    if (usingSharedTransport) {
-      const sequence = analysisState.spectrogramRequestSequence + 1;
-      analysisState.spectrogramRequestSequence = sequence;
-      markSpectrogramSlotReady(analysisState.controlView, slotId, sequence);
-      self.postMessage({
-        type: "spectrogramTile",
-        body: {
-          columnCount: TILE_COLUMN_COUNT,
-          completedTiles,
-          dprBucket: plan.dprBucket,
-          fftSize: plan.fftSize,
-          fromCache,
-          generation: plan.generation,
-          requestKind: plan.requestKind,
-          rowCount: plan.rowCount,
-          runtimeVariant: analysisState.runtimeVariant,
-          sequence,
-          slotId,
-          tileEnd,
-          tileIndex,
-          tileKey: cacheKey,
-          tileStart,
-          totalTiles: plan.totalTiles,
-          transportMode: analysisState.transportMode,
-          zoomBucket: plan.zoomBucket,
-          targetColumns: plan.targetColumns,
-          targetRows: plan.rowCount
-        }
+        tileIndex,
+        tileKey: cacheKey,
+        tileStart
       });
-    } else {
-      self.postMessage({
-        type: "spectrogramTile",
-        body: {
-          columnCount: TILE_COLUMN_COUNT,
-          completedTiles,
-          dprBucket: plan.dprBucket,
-          fftSize: plan.fftSize,
-          fromCache,
-          generation: plan.generation,
-          requestKind: plan.requestKind,
-          rowCount: plan.rowCount,
-          rgbaBuffer: rgbaTransferBuffer.buffer,
-          runtimeVariant: analysisState.runtimeVariant,
-          tileEnd,
-          tileIndex,
-          tileKey: cacheKey,
-          tileStart,
-          totalTiles: plan.totalTiles,
-          transportMode: analysisState.transportMode,
-          zoomBucket: plan.zoomBucket,
-          targetColumns: plan.targetColumns,
-          targetRows: plan.rowCount
-        }
-      }, [rgbaTransferBuffer.buffer]);
     }
+    onTileReady?.();
     await yieldToEventLoop();
   }
-  if (isGenerationCancelled(plan.generation)) {
-    postCancelled(plan);
+  return true;
+}
+function renderTile(runtime, plan, tileIndex, tileStart, tileEnd) {
+  ensureSpectrogramOutputCapacity(runtime.module, TILE_COLUMN_COUNT * plan.rowCount * 4);
+  const ok = runtime.module._wave_render_spectrogram_tile_rgba(
+    tileStart,
+    tileEnd,
+    TILE_COLUMN_COUNT,
+    plan.rowCount,
+    plan.fftSize,
+    plan.decimationFactor,
+    analysisState.minFrequency,
+    analysisState.maxFrequency,
+    analysisState.spectrogramOutputPointer
+  );
+  if (!ok) {
+    throw new Error(`Spectrogram tile render failed for tile ${tileIndex}.`);
+  }
+  const rgba = getHeapU8View(runtime.module, analysisState.spectrogramOutputPointer, TILE_COLUMN_COUNT * plan.rowCount * 4);
+  return createTileCanvas(rgba, TILE_COLUMN_COUNT, plan.rowCount);
+}
+function createTileCanvas(rgba, columnCount, rowCount) {
+  const tileCanvas = new OffscreenCanvas(columnCount, rowCount);
+  const tileContext = tileCanvas.getContext("2d", { alpha: false });
+  if (!tileContext) {
+    throw new Error("OffscreenCanvas 2D context is unavailable.");
+  }
+  const imageData = tileContext.createImageData(columnCount, rowCount);
+  imageData.data.set(new Uint8ClampedArray(rgba));
+  tileContext.putImageData(imageData, 0, 0);
+  return tileCanvas;
+}
+function paintSpectrogramDisplay() {
+  const context = surfaceState.context;
+  if (!context) {
     return;
   }
-  self.postMessage({
-    type: "spectrogramTilesComplete",
-    body: {
-      completedTiles,
-      dprBucket: plan.dprBucket,
-      fftSize: plan.fftSize,
-      generation: plan.generation,
-      requestKind: plan.requestKind,
-      runtimeVariant: analysisState.runtimeVariant,
-      targetColumns: plan.targetColumns,
-      targetRows: plan.rowCount,
-      totalTiles: plan.totalTiles,
-      viewEnd: plan.viewEnd,
-      viewStart: plan.viewStart,
-      zoomBucket: plan.zoomBucket
+  drawBackground(context, surfaceState.pixelWidth, surfaceState.pixelHeight);
+  const displayRange = analysisState.currentDisplayRange;
+  if (!(displayRange.end > displayRange.start)) {
+    return;
+  }
+  if (analysisState.overview.plan) {
+    paintLayer(context, analysisState.overview.plan, displayRange, {
+      smoothing: true,
+      smoothingQuality: "high"
+    });
+  }
+  if (analysisState.visible.plan) {
+    paintLayer(context, analysisState.visible.plan, displayRange, {
+      smoothing: false,
+      smoothingQuality: "low"
+    });
+  }
+}
+function drawBackground(context, width, height) {
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, width, height);
+  const background = context.createLinearGradient(0, 0, 0, height);
+  background.addColorStop(0, "#171127");
+  background.addColorStop(0.46, "#0d0b19");
+  background.addColorStop(1, "#04050c");
+  context.fillStyle = background;
+  context.fillRect(0, 0, width, height);
+}
+function paintLayer(context, plan, displayRange, { smoothing, smoothingQuality }) {
+  if (!plan) {
+    return;
+  }
+  const span = Math.max(1e-6, displayRange.end - displayRange.start);
+  const destinationWidth = Math.max(1, surfaceState.pixelWidth);
+  const destinationHeight = Math.max(1, surfaceState.pixelHeight);
+  context.imageSmoothingEnabled = smoothing;
+  context.imageSmoothingQuality = smoothingQuality;
+  for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
+    const cacheKey = buildTileCacheKey(plan, tileIndex);
+    const tile = analysisState.tileCache.get(cacheKey);
+    if (!tile) {
+      continue;
     }
-  });
+    const tileSpan = Math.max(1e-6, tile.tileEnd - tile.tileStart);
+    const overlapStart = Math.max(displayRange.start, tile.tileStart);
+    const overlapEnd = Math.min(displayRange.end, tile.tileEnd);
+    if (overlapEnd <= overlapStart) {
+      continue;
+    }
+    const sourceStartRatio = (overlapStart - tile.tileStart) / tileSpan;
+    const sourceEndRatio = (overlapEnd - tile.tileStart) / tileSpan;
+    const destinationStartRatio = (overlapStart - displayRange.start) / span;
+    const destinationEndRatio = (overlapEnd - displayRange.start) / span;
+    const sourceX = clamp(Math.floor(sourceStartRatio * tile.columnCount), 0, Math.max(0, tile.columnCount - 1));
+    const sourceWidth = Math.max(
+      1,
+      Math.min(
+        tile.columnCount - sourceX,
+        Math.ceil((sourceEndRatio - sourceStartRatio) * tile.columnCount)
+      )
+    );
+    const destinationX = Math.floor(destinationStartRatio * destinationWidth);
+    const destinationWidthPx = Math.max(
+      1,
+      Math.ceil((destinationEndRatio - destinationStartRatio) * destinationWidth)
+    );
+    context.drawImage(
+      tile.canvas,
+      sourceX,
+      0,
+      sourceWidth,
+      tile.rowCount,
+      destinationX,
+      0,
+      destinationWidthPx,
+      destinationHeight
+    );
+  }
 }
 function createRequestPlan(request) {
   const preset = QUALITY_PRESETS[analysisState.quality];
-  const usingSharedTransport = analysisState.transportMode === "shared";
   const requestKind = request?.requestKind === "overview" ? "overview" : "visible";
   const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
   const requestedStart = Number.isFinite(request?.viewStart) ? Number(request.viewStart) : 0;
@@ -564,118 +620,88 @@ function createRequestPlan(request) {
     viewStart + 1 / analysisState.sampleRate,
     analysisState.duration
   );
-  const pixelWidth = Math.max(1, Math.round(Number(request?.pixelWidth) || 1));
-  const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || 1));
+  const pixelWidth = Math.max(1, Math.round(Number(request?.pixelWidth) || surfaceState.pixelWidth || 1));
+  const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1));
   const dprBucket = Math.max(2, Math.round(Number(request?.dpr) || 2));
-  const spanSeconds = Math.max(1 / analysisState.sampleRate, viewEnd - viewStart);
-  const spanSamples = spanSeconds * analysisState.sampleRate;
-  const samplesPerPixel = spanSamples / Math.max(1, pixelWidth);
-  const zoomSelection = selectZoomPolicy(preset, samplesPerPixel);
-  const bucketedSamplesPerPixel = quantizeSamplesPerPixel(samplesPerPixel);
-  const requestedRowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), ROW_BUCKET_SIZE);
-  const rowCount = usingSharedTransport ? Math.min(analysisState.spectrogramMaxRows, requestedRowCount) : requestedRowCount;
+  const fftSize = normalizeFftSize(request?.fftSize);
+  const overlapRatio = normalizeOverlapRatio(request?.overlapRatio);
+  const rowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), ROW_BUCKET_SIZE);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
-    usingSharedTransport ? Math.min(
-      analysisState.spectrogramMaxColumns,
-      quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2)
-    ) : quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2)
+    quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2)
   );
-  const secondsPerColumn = Math.max(
-    1 / analysisState.sampleRate,
-    bucketedSamplesPerPixel / preset.colsMultiplier / analysisState.sampleRate
-  );
+  const hopSamples = Math.max(1, Math.round(fftSize * (1 - overlapRatio)));
+  const secondsPerColumn = hopSamples / analysisState.sampleRate;
   const tileDuration = Math.max(secondsPerColumn * TILE_COLUMN_COUNT, 1 / analysisState.sampleRate);
   const startTileIndex = Math.max(0, Math.floor(viewStart / tileDuration));
   const endTileIndex = Math.max(
     startTileIndex,
     Math.floor(Math.max(viewStart, viewEnd - secondsPerColumn * 0.5) / tileDuration)
   );
-  const totalTiles = endTileIndex - startTileIndex + 1;
+  const windowSeconds = fftSize / analysisState.sampleRate;
+  const configKey = `fft${fftSize}-ov${Math.round(overlapRatio * 1e3)}-rows${rowCount}`;
   return {
     decimationFactor: Math.max(1, preset.lowFrequencyDecimationFactor || 1),
+    configKey,
     dprBucket,
     endTileIndex,
-    fftSize: zoomSelection.fftSize,
+    fftSize,
     generation,
+    hopSamples,
+    hopSeconds: secondsPerColumn,
+    overlapRatio,
     pixelHeight,
     pixelWidth,
     requestKind,
     rowCount,
-    secondsPerColumn,
     startTileIndex,
     targetColumns,
     tileDuration,
-    totalTiles,
     viewEnd,
     viewStart,
-    zoomBucket: `${zoomSelection.bucket}-spp${formatBucketNumber(bucketedSamplesPerPixel)}-rows${rowCount}`
-  };
-}
-function selectZoomPolicy(preset, samplesPerPixel) {
-  const [highZoomFft, mediumZoomFft, lowZoomFft] = preset.fftSizes;
-  const highZoomThreshold = Math.max(32, highZoomFft / preset.colsMultiplier);
-  const mediumZoomThreshold = Math.max(highZoomThreshold * 1.75, mediumZoomFft / preset.colsMultiplier);
-  if (samplesPerPixel <= highZoomThreshold) {
-    return {
-      bucket: "high",
-      fftSize: highZoomFft
-    };
-  }
-  if (samplesPerPixel <= mediumZoomThreshold) {
-    return {
-      bucket: "medium",
-      fftSize: mediumZoomFft
-    };
-  }
-  return {
-    bucket: "low",
-    fftSize: lowZoomFft
+    windowSeconds
   };
 }
 function buildTileCacheKey(plan, tileIndex) {
   return [
     analysisState.quality,
-    plan.zoomBucket,
+    plan.configKey,
     `tile${tileIndex}`,
     `dpr${plan.dprBucket}`
   ].join(":");
 }
-function acquireSpectrogramSlot() {
-  const freeIndex = analysisState.slotBusy.findIndex((entry) => entry === false);
-  if (freeIndex >= 0) {
-    analysisState.slotBusy[freeIndex] = true;
-    return Promise.resolve(freeIndex);
-  }
-  return new Promise((resolve) => {
-    analysisState.slotReleaseResolvers.push(resolve);
-  });
+function createLayerReadyBody(plan) {
+  return {
+    decimationFactor: plan.decimationFactor,
+    fftSize: plan.fftSize,
+    generation: plan.generation,
+    hopSamples: plan.hopSamples,
+    hopSeconds: plan.hopSeconds,
+    overlapRatio: plan.overlapRatio,
+    pixelHeight: plan.pixelHeight,
+    pixelWidth: plan.pixelWidth,
+    requestKind: plan.requestKind,
+    runtimeVariant: analysisState.runtimeVariant,
+    targetColumns: plan.targetColumns,
+    targetRows: plan.rowCount,
+    viewEnd: plan.viewEnd,
+    viewStart: plan.viewStart,
+    windowSeconds: plan.windowSeconds
+  };
 }
-function releaseSpectrogramSlot(slotId) {
-  if (analysisState.transportMode !== "shared") {
-    return;
+function isEquivalentPlan(left, right) {
+  if (!left || !right) {
+    return false;
   }
-  if (!Number.isFinite(slotId)) {
-    return;
-  }
-  const safeSlotId = Math.max(0, Math.min(SPECTROGRAM_SLOT_COUNT - 1, Math.round(slotId)));
-  const waiter = analysisState.slotReleaseResolvers.shift();
-  if (waiter) {
-    analysisState.slotBusy[safeSlotId] = true;
-    waiter(safeSlotId);
-    return;
-  }
-  analysisState.slotBusy[safeSlotId] = false;
+  return left.requestKind === right.requestKind && left.dprBucket === right.dprBucket && left.pixelWidth === right.pixelWidth && left.pixelHeight === right.pixelHeight && left.rowCount === right.rowCount && left.targetColumns === right.targetColumns && left.fftSize === right.fftSize && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-6 && Math.abs(left.viewStart - right.viewStart) <= 1e-6 && Math.abs(left.viewEnd - right.viewEnd) <= 1e-6;
 }
-function ensureWaveformOutputCapacity(module, floatCount) {
-  if (analysisState.waveformOutputCapacity >= floatCount && analysisState.waveformOutputPointer) {
-    return;
-  }
-  if (analysisState.waveformOutputPointer) {
-    module._free(analysisState.waveformOutputPointer);
-  }
-  analysisState.waveformOutputPointer = module._malloc(floatCount * Float32Array.BYTES_PER_ELEMENT);
-  analysisState.waveformOutputCapacity = floatCount;
+function normalizeFftSize(value) {
+  const numericValue = Number(value);
+  return FFT_SIZE_OPTIONS.includes(numericValue) ? numericValue : 8192;
+}
+function normalizeOverlapRatio(value) {
+  const numericValue = Number(value);
+  return OVERLAP_RATIO_OPTIONS.includes(numericValue) ? numericValue : 0.75;
 }
 function ensureSpectrogramOutputCapacity(module, byteLength) {
   if (analysisState.spectrogramOutputCapacity >= byteLength && analysisState.spectrogramOutputPointer) {
@@ -694,15 +720,10 @@ function getHeapU8View(module, pointer, length) {
   return new Uint8Array(module.HEAPU8.buffer, pointer, length);
 }
 function disposeWasmSession(module) {
-  if (analysisState.waveformOutputPointer) {
-    module._free(analysisState.waveformOutputPointer);
-  }
   if (analysisState.spectrogramOutputPointer) {
     module._free(analysisState.spectrogramOutputPointer);
   }
   module._wave_dispose_session();
-  analysisState.waveformOutputPointer = 0;
-  analysisState.waveformOutputCapacity = 0;
   analysisState.spectrogramOutputPointer = 0;
   analysisState.spectrogramOutputCapacity = 0;
 }
@@ -712,23 +733,9 @@ function disposeSession(runtime) {
   }
   analysisState = createEmptyAnalysisState();
 }
-function assertInitialized() {
-  if (!analysisState.initialized) {
-    throw new Error("Analysis is not initialized.");
-  }
-}
 function yieldToEventLoop() {
   return new Promise((resolve) => {
     setTimeout(resolve, 0);
-  });
-}
-function postCancelled(plan) {
-  self.postMessage({
-    type: "spectrogramTilesCancelled",
-    body: {
-      generation: plan.generation,
-      requestKind: plan.requestKind
-    }
   });
 }
 function postError(error) {

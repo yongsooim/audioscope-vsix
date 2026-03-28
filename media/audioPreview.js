@@ -1,12 +1,6 @@
 import {
   DISPLAY_MIN_DPR,
   TILE_COLUMN_COUNT,
-  WAVEFORM_SLOT_COUNT,
-  createControlState,
-  getSpectrogramArenaByteLength,
-  getSpectrogramSlotView,
-  getWaveformArenaByteLength,
-  quantizeCeil,
 } from '../src-webview/sharedBuffers.js';
 
 const vscode = acquireVsCodeApi();
@@ -17,7 +11,8 @@ const HAS_SHARED_RUNTIME_SUPPORT =
   typeof SharedArrayBuffer === 'function'
   && window.crossOriginIsolated
   && typeof Worker !== 'undefined';
-const RUNTIME_TRANSPORT_MODE = HAS_SHARED_RUNTIME_SUPPORT ? 'shared' : 'transfer';
+const TRANSPORT_MODE_OVERRIDE_KEY = 'wavePreview.transportModeOverride';
+const RUNTIME_TRANSPORT_MODE = getRuntimeTransportMode();
 
 const SPECTROGRAM_MIN_FREQUENCY = 20;
 const SPECTROGRAM_MAX_FREQUENCY = 20000;
@@ -29,7 +24,7 @@ const SPECTROGRAM_ROW_BUCKET_SIZE = 32;
 
 const WAVEFORM_COLOR = '#7dd3fc';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
-const WAVEFORM_MAX_ZOOM_FACTOR = 100;
+const WAVEFORM_MAX_ZOOM_FACTOR = 1000;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 const WAVEFORM_WHEEL_ZOOM_TARGET_RATIO = 0.5;
 const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2.25;
@@ -64,10 +59,14 @@ const QUALITY_PRESETS = {
   },
 };
 
+const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
+const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875];
+
 const elements = {
   waveformViewport: document.getElementById('waveform-viewport'),
   waveformCanvasHost: document.getElementById('waveform-canvas-host'),
   waveformHitTarget: document.getElementById('waveform-hit-target'),
+  waveformHoverTooltip: document.getElementById('waveform-hover-tooltip'),
   waveformSelection: document.getElementById('waveform-selection'),
   waveformProgress: document.getElementById('waveform-progress'),
   waveformCursor: document.getElementById('waveform-cursor'),
@@ -89,6 +88,10 @@ const elements = {
   spectrogramCursor: document.getElementById('spectrogram-cursor'),
   spectrogramLoopStart: document.getElementById('spectrogram-loop-start'),
   spectrogramLoopEnd: document.getElementById('spectrogram-loop-end'),
+  spectrogramMeta: document.getElementById('spectrogram-meta'),
+  spectrogramFftSelect: document.getElementById('spectrogram-fft-select'),
+  spectrogramOverlapSelect: document.getElementById('spectrogram-overlap-select'),
+  spectrogramHoverTooltip: document.getElementById('spectrogram-hover-tooltip'),
   spectrogramAxis: document.getElementById('spectrogram-axis'),
   spectrogramGuides: document.getElementById('spectrogram-guides'),
   spectrogramHitTarget: document.getElementById('spectrogram-hit-target'),
@@ -121,7 +124,10 @@ const state = {
   analysisStartedForLoadToken: 0,
   waveformWorker: null,
   waveformWorkerBootstrapUrl: null,
+  waveformRuntimeReadyPromise: null,
+  resolveWaveformRuntimeReady: null,
   waveformSurfaceReadyPromise: null,
+  spectrogramSurfaceReadyPromise: null,
   waveformCanvas: null,
   waveformViewRange: { start: 0, end: 0 },
   waveformSeekPointerId: null,
@@ -132,33 +138,31 @@ const state = {
   pendingSeekTime: 0,
   followPlayback: true,
   transportMode: RUNTIME_TRANSPORT_MODE,
+  spectrogramRenderConfig: {
+    fftSize: 8192,
+    overlapRatio: 0.75,
+  },
   analysis: null,
   sessionVersion: 0,
-  controlSab: null,
-  controlView: null,
   pcmSab: null,
-  waveformSab: null,
-  waveformMaxColumns: 0,
   waveformRequestGeneration: 0,
-  waveformSlotCursor: 0,
   waveformPendingRequest: null,
   waveformRenderRange: { start: 0, end: 0 },
   waveformRenderWidth: 0,
   waveformRenderHeight: 0,
+  waveformRenderVisibleSpan: 0,
   waveformAxisRenderRange: { start: 0, end: 0 },
   waveformAxisRenderWidth: 0,
-  spectrogramSab: null,
-  spectrogramMaxColumns: 0,
-  spectrogramMaxRows: 0,
   playbackFrame: 0,
   spectrogramFrame: 0,
   spectrogramRequestFrame: 0,
 };
 
-const spectrogramContext = elements.spectrogram.getContext('2d', { alpha: false });
-
-if (!spectrogramContext) {
-  setFatalStatus('Canvas initialization failed.');
+if (
+  typeof elements.spectrogram?.transferControlToOffscreen !== 'function'
+  || typeof OffscreenCanvas !== 'function'
+) {
+  setFatalStatus('OffscreenCanvas is required for this preview.');
 } else {
   initializeKeyboardFocus();
   state.followPlayback = elements.waveFollow.checked;
@@ -166,6 +170,7 @@ if (!spectrogramContext) {
   attachResizeObservers();
   renderWaveformUi();
   renderSpectrogramScale();
+  renderSpectrogramMeta();
   vscode.postMessage({ type: 'ready' });
 }
 
@@ -202,6 +207,36 @@ function initializeKeyboardFocus() {
       window.requestAnimationFrame(focusKeyboardSurface);
     }
   });
+}
+
+function getRuntimeTransportMode() {
+  let override = null;
+
+  try {
+    override = window.localStorage?.getItem(TRANSPORT_MODE_OVERRIDE_KEY) ?? null;
+  } catch {
+    override = null;
+  }
+
+  if (override === 'shared' && HAS_SHARED_RUNTIME_SUPPORT) {
+    return 'shared';
+  }
+
+  if (override === 'transfer') {
+    return 'transfer';
+  }
+
+  return HAS_SHARED_RUNTIME_SUPPORT ? 'shared' : 'transfer';
+}
+
+function normalizeSpectrogramFftSize(value) {
+  const numericValue = Number(value);
+  return SPECTROGRAM_FFT_OPTIONS.includes(numericValue) ? numericValue : 8192;
+}
+
+function normalizeSpectrogramOverlapRatio(value) {
+  const numericValue = Number(value);
+  return SPECTROGRAM_OVERLAP_OPTIONS.includes(numericValue) ? numericValue : 0.75;
 }
 
 window.addEventListener('keydown', (event) => {
@@ -255,9 +290,9 @@ async function loadAudioFile(payload) {
 
   bindAudioEvents(audio, loadToken, payload);
   state.waveformSurfaceReadyPromise = initializeWaveformSurface(loadToken);
+  state.spectrogramSurfaceReadyPromise = initializeSpectrogramSurface(loadToken);
   syncTransport();
   renderWaveformUi();
-  renderSpectrogramBackground();
   renderSpectrogramScale();
   void loadPlaybackSource(loadToken, payload, audio);
 }
@@ -458,7 +493,7 @@ async function initializeWaveformSurface(loadToken) {
   const offscreenCanvas = canvas.transferControlToOffscreen();
   worker.postMessage({
     type: 'initCanvas',
-    payload: {
+    body: {
       color: WAVEFORM_COLOR,
       height,
       offscreenCanvas,
@@ -466,17 +501,42 @@ async function initializeWaveformSurface(loadToken) {
       width,
     },
   }, [offscreenCanvas]);
+}
 
-  if (state.transportMode === 'shared' && state.waveformSab && state.controlSab && state.waveformMaxColumns > 0) {
-    worker.postMessage({
-      type: 'attachSharedBuffers',
-      payload: {
-        controlSab: state.controlSab,
-        waveformMaxColumns: state.waveformMaxColumns,
-        waveformSab: state.waveformSab,
-      },
-    });
+async function initializeSpectrogramSurface(loadToken) {
+  disposeSpectrogramSurface();
+
+  const canvas = document.createElement('canvas');
+  canvas.id = 'spectrogram';
+  canvas.className = 'spectrogram-canvas';
+  canvas.setAttribute('aria-label', 'Spectrogram');
+  elements.spectrogram.replaceWith(canvas);
+  elements.spectrogram = canvas;
+
+  const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
+
+  if (
+    !analysisWorkerScriptUri
+    || typeof canvas.transferControlToOffscreen !== 'function'
+  ) {
+    throw new Error('Spectrogram worker runtime is unavailable.');
   }
+
+  const worker = await createAnalysisWorker(loadToken);
+
+  if (!worker || loadToken !== state.loadToken) {
+    return;
+  }
+
+  const offscreenCanvas = canvas.transferControlToOffscreen();
+  worker.postMessage({
+    type: 'initCanvas',
+    body: {
+      offscreenCanvas,
+      pixelHeight,
+      pixelWidth,
+    },
+  }, [offscreenCanvas]);
 }
 
 function cancelDeferredAnalysis() {
@@ -522,7 +582,7 @@ function scheduleDeferredAnalysis(loadToken, payload) {
 }
 
 async function startAnalysis(loadToken, payload) {
-  if (!analysisWorkerScriptUri) {
+  if (!analysisWorkerScriptUri || !waveformWorkerScriptUri) {
     setAnalysisStatus('Analysis worker is unavailable.', true);
     return;
   }
@@ -549,14 +609,20 @@ async function startAnalysis(loadToken, payload) {
       return;
     }
 
-    const analysisWorker = await createAnalysisWorker(loadToken);
+    const [analysisWorker, waveformWorker] = await Promise.all([
+      createAnalysisWorker(loadToken),
+      createWaveformWorker(loadToken),
+    ]);
 
-    if (!analysisWorker || loadToken !== state.loadToken) {
+    if (!analysisWorker || !waveformWorker || loadToken !== state.loadToken) {
       return;
     }
 
-    setAnalysisStatus('Initializing wasm…');
-    await state.analysisRuntimeReadyPromise;
+    setAnalysisStatus('Initializing wasm pipelines…');
+    await Promise.all([
+      state.analysisRuntimeReadyPromise,
+      state.waveformRuntimeReadyPromise,
+    ]);
 
     if (loadToken !== state.loadToken) {
       return;
@@ -583,10 +649,12 @@ async function startAnalysis(loadToken, payload) {
     ensureWaveformViewRange();
     renderWaveformUi();
     renderSpectrogramScale();
-    renderSpectrogramBackground();
     scheduleSpectrogramRender();
 
-    await state.waveformSurfaceReadyPromise;
+    await Promise.all([
+      state.waveformSurfaceReadyPromise,
+      state.spectrogramSurfaceReadyPromise,
+    ]);
 
     if (loadToken !== state.loadToken) {
       return;
@@ -596,27 +664,42 @@ async function startAnalysis(loadToken, payload) {
     setAnalysisStatus('Queued');
 
     if (state.transportMode === 'shared') {
-      ensureSharedAudioBuffers(monoSamples, decodedAudio.sampleRate);
-      syncSharedBuffersToWorkers();
+      ensureSharedAudioBuffer(monoSamples, decodedAudio.sampleRate);
+
+      const sharedBody = {
+        duration: decodedAudio.duration,
+        pcmSab: state.pcmSab,
+        quality: state.analysis.quality,
+        sampleCount: monoSamples.length,
+        sampleRate: decodedAudio.sampleRate,
+        sessionVersion: state.sessionVersion,
+        transportMode: state.transportMode,
+      };
+
+      waveformWorker.postMessage({
+        type: 'attachAudioSession',
+        body: sharedBody,
+      });
       analysisWorker.postMessage({
         type: 'attachAudioSession',
-        body: {
-          controlSab: state.controlSab,
-          duration: decodedAudio.duration,
-          pcmSab: state.pcmSab,
-          quality: state.analysis.quality,
-          sampleCount: monoSamples.length,
-          sampleRate: decodedAudio.sampleRate,
-          sessionVersion: state.sessionVersion,
-          spectrogramMaxColumns: state.spectrogramMaxColumns,
-          spectrogramMaxRows: state.spectrogramMaxRows,
-          spectrogramSab: state.spectrogramSab,
-          transportMode: state.transportMode,
-          waveformMaxColumns: state.waveformMaxColumns,
-          waveformSab: state.waveformSab,
-        },
+        body: sharedBody,
       });
     } else {
+      const waveformSamples = monoSamples.slice();
+
+      waveformWorker.postMessage({
+        type: 'attachAudioSession',
+        body: {
+          duration: decodedAudio.duration,
+          quality: state.analysis.quality,
+          sampleCount: waveformSamples.length,
+          sampleRate: decodedAudio.sampleRate,
+          samplesBuffer: waveformSamples.buffer,
+          sessionVersion: state.sessionVersion,
+          transportMode: state.transportMode,
+        },
+      }, [waveformSamples.buffer]);
+
       analysisWorker.postMessage({
         type: 'attachAudioSession',
         body: {
@@ -631,7 +714,10 @@ async function startAnalysis(loadToken, payload) {
       }, [monoSamples.buffer]);
     }
 
-    analysisWorker.postMessage({ type: 'buildWaveformPyramid' });
+    waveformWorker.postMessage({ type: 'buildWaveformPyramid' });
+    requestOverviewSpectrogram({ force: true });
+    scheduleSpectrogramRender({ force: true });
+    void syncWaveformView();
   } catch (error) {
     if (loadToken !== state.loadToken || controller.signal.aborted) {
       return;
@@ -688,8 +774,14 @@ async function createWaveformWorker(loadToken) {
   }
 
   const worker = createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl');
+  state.waveformRuntimeReadyPromise = new Promise((resolve) => {
+    state.resolveWaveformRuntimeReady = resolve;
+  });
   state.waveformWorker = worker;
 
+  worker.addEventListener('message', (event) => {
+    handleWaveformWorkerMessage(loadToken, event.data);
+  });
   worker.addEventListener('error', (event) => {
     if (loadToken !== state.loadToken) {
       return;
@@ -697,6 +789,7 @@ async function createWaveformWorker(loadToken) {
 
     setFatalStatus(`Waveform renderer failed: ${event.message || 'Unknown worker error.'}`);
   });
+  worker.postMessage({ type: 'bootstrapRuntime' });
 
   return worker;
 }
@@ -735,31 +828,72 @@ function handleAnalysisWorkerMessage(loadToken, message) {
     state.analysis.maxFrequency = body.maxFrequency;
 
     renderSpectrogramScale();
-    requestOverviewSpectrogram();
+    renderSpectrogramMeta();
+    requestOverviewSpectrogram({ force: true });
+    scheduleSpectrogramRender({ force: true });
     return;
   }
 
-  if (message?.type === 'waveformPyramidReady') {
-    void syncWaveformView();
+  if (message?.type === 'overviewReady') {
+    const { body } = message;
+
+    state.analysis.overview = {
+      ...state.analysis.overview,
+      complete: true,
+      decimationFactor: body.decimationFactor,
+      fftSize: body.fftSize,
+      hopSamples: body.hopSamples,
+      hopSeconds: body.hopSeconds,
+      overlapRatio: body.overlapRatio,
+      pixelHeight: body.pixelHeight,
+      pixelWidth: body.pixelWidth,
+      ready: true,
+      requestPending: false,
+      runtimeVariant: body.runtimeVariant,
+      targetColumns: body.targetColumns,
+      targetRows: body.targetRows,
+      viewEnd: body.viewEnd,
+      viewStart: body.viewStart,
+      windowSeconds: body.windowSeconds,
+    };
+    setAnalysisStatus('Overview ready');
+    renderSpectrogramMeta();
+    scheduleSpectrogramRender({ force: true });
     return;
   }
 
-  if (message?.type === 'waveformSliceReady') {
-    handleWaveformSliceReady(message.body);
-    return;
-  }
+  if (message?.type === 'visibleReady') {
+    const { body } = message;
 
-  if (message?.type === 'spectrogramTile') {
-    handleSpectrogramTileMessage(message.body);
-    return;
-  }
-
-  if (message?.type === 'spectrogramTilesComplete') {
-    handleSpectrogramRequestComplete(message.body);
-    return;
-  }
-
-  if (message?.type === 'spectrogramTilesCancelled') {
+    state.analysis.activeVisibleRequest = {
+      generation: body.generation,
+      pixelHeight: body.pixelHeight,
+      pixelWidth: body.pixelWidth,
+      viewEnd: body.viewEnd,
+      viewStart: body.viewStart,
+    };
+    state.analysis.visible = {
+      ...state.analysis.visible,
+      complete: true,
+      decimationFactor: body.decimationFactor,
+      fftSize: body.fftSize,
+      generation: body.generation,
+      hopSamples: body.hopSamples,
+      hopSeconds: body.hopSeconds,
+      overlapRatio: body.overlapRatio,
+      pixelHeight: body.pixelHeight,
+      pixelWidth: body.pixelWidth,
+      ready: true,
+      requestPending: false,
+      runtimeVariant: body.runtimeVariant,
+      targetColumns: body.targetColumns,
+      targetRows: body.targetRows,
+      viewEnd: body.viewEnd,
+      viewStart: body.viewStart,
+      windowSeconds: body.windowSeconds,
+    };
+    setAnalysisStatus('Ready');
+    renderSpectrogramMeta();
     return;
   }
 
@@ -769,56 +903,112 @@ function handleAnalysisWorkerMessage(loadToken, message) {
   }
 }
 
-function scheduleSpectrogramRender() {
+function handleWaveformWorkerMessage(loadToken, message) {
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  if (message?.type === 'runtimeReady') {
+    state.resolveWaveformRuntimeReady?.();
+    state.resolveWaveformRuntimeReady = null;
+    return;
+  }
+
+  if (!state.analysis) {
+    return;
+  }
+
+  if (message?.type === 'analysisInitialized') {
+    return;
+  }
+
+  if (message?.type === 'waveformPyramidReady') {
+    void syncWaveformView({ force: true });
+    return;
+  }
+
+  if (message?.type === 'waveformReady') {
+    handleWaveformReady(message.body);
+    return;
+  }
+
+  if (message?.type === 'error') {
+    setFatalStatus(`Waveform renderer failed: ${message.body.message}`);
+  }
+}
+
+function scheduleSpectrogramRender({ force = false } = {}) {
   if (state.spectrogramFrame) {
     return;
   }
 
   state.spectrogramFrame = window.requestAnimationFrame(() => {
     state.spectrogramFrame = 0;
-    renderSpectrogramBackground();
 
-    if (!state.analysis) {
+    if (!state.analysisWorker || !state.analysis?.initialized) {
       return;
     }
 
-    const range = getWaveformRange();
+    const { displayRange, pixelHeight, pixelWidth, requestRange } = getVisibleSpectrogramRequestMetrics();
 
-    if (range.end <= range.start) {
+    if (displayRange.end <= displayRange.start) {
       return;
     }
 
-    if (state.analysis.overview.ready) {
-      drawSpectrogramLayer(state.analysis.overview, range, {
-        smoothing: true,
-        smoothingQuality: 'high',
-      });
+    const previousGeneration = state.analysis.generation;
+    const needsNewGeneration = force || !isSameVisibleRequest(
+      state.analysis.activeVisibleRequest,
+      requestRange,
+      { pixelHeight, pixelWidth },
+    );
+    const generation = needsNewGeneration ? previousGeneration + 1 : previousGeneration;
+
+    if (needsNewGeneration) {
+      state.analysis.generation = generation;
+      state.analysis.activeVisibleRequest = {
+        generation,
+        pixelHeight,
+        pixelWidth,
+        viewEnd: requestRange.end,
+        viewStart: requestRange.start,
+      };
+      state.analysis.visible = {
+        ...createSpectrogramLayerState('visible'),
+        dpr: DISPLAY_PIXEL_RATIO,
+        generation,
+        pixelHeight,
+        pixelWidth,
+        requestPending: true,
+        viewEnd: requestRange.end,
+        viewStart: requestRange.start,
+      };
+
+      if (previousGeneration > 0) {
+        state.analysisWorker.postMessage({
+          type: 'cancelGeneration',
+          body: { generation: previousGeneration },
+        });
+      }
+
+      setAnalysisStatus('Refining visible range');
     }
 
-    const visibleLayer = getRenderableVisibleSpectrogramLayer(range);
-
-    if (visibleLayer) {
-      drawSpectrogramLayer(visibleLayer, range, {
-        smoothing: false,
-        smoothingQuality: 'low',
-      });
-    }
+    state.analysisWorker.postMessage({
+      type: 'renderVisibleRange',
+      body: {
+        displayEnd: displayRange.end,
+        displayStart: displayRange.start,
+        dpr: DISPLAY_PIXEL_RATIO,
+        fftSize: state.spectrogramRenderConfig.fftSize,
+        generation,
+        overlapRatio: state.spectrogramRenderConfig.overlapRatio,
+        pixelHeight,
+        pixelWidth,
+        requestEnd: requestRange.end,
+        requestStart: requestRange.start,
+      },
+    });
   });
-}
-
-function renderSpectrogramBackground() {
-  const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
-
-  elements.spectrogram.width = pixelWidth;
-  elements.spectrogram.height = pixelHeight;
-
-  const background = spectrogramContext.createLinearGradient(0, 0, 0, elements.spectrogram.height);
-  background.addColorStop(0, '#171127');
-  background.addColorStop(0.46, '#0d0b19');
-  background.addColorStop(1, '#04050c');
-
-  spectrogramContext.fillStyle = background;
-  spectrogramContext.fillRect(0, 0, elements.spectrogram.width, elements.spectrogram.height);
 }
 
 function createSpectrogramLayerState(kind) {
@@ -838,9 +1028,12 @@ function createSpectrogramLayerState(kind) {
     targetRows: 0,
     targetColumns: 0,
     fftSize: 0,
-    zoomBucket: '',
+    hopSamples: 0,
+    hopSeconds: 0,
+    overlapRatio: 0,
+    windowSeconds: 0,
+    decimationFactor: 1,
     runtimeVariant: null,
-    tiles: new Map(),
   };
 }
 
@@ -855,9 +1048,7 @@ function createSpectrogramAnalysisState({ duration, quality, minFrequency, maxFr
     runtimeVariant: null,
     sampleCount,
     sampleRate,
-    tileCacheMeta: new Map(),
     activeVisibleRequest: null,
-    visibleRequestQueued: true,
     overview: createSpectrogramLayerState('overview'),
     visible: createSpectrogramLayerState('visible'),
   };
@@ -867,114 +1058,16 @@ function normalizeSpectrogramQuality(value) {
   return value === 'balanced' || value === 'max' ? value : 'high';
 }
 
-function getQualityPreset(quality = state.analysis?.quality) {
-  return QUALITY_PRESETS[normalizeSpectrogramQuality(quality)];
-}
-
-function getWaveformSharedColumnCapacity() {
-  const { width } = getWaveformViewportSize();
-  return Math.max(256, Math.round(width * WAVEFORM_RENDER_SCALE * WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR));
-}
-
-function getSpectrogramSharedCapacity(quality = state.analysis?.quality) {
-  const preset = getQualityPreset(quality);
-  const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
-  const overviewSize = getOverviewSpectrogramRequestSize();
-  const bufferedVisibleWidth = Math.max(
-    TILE_COLUMN_COUNT,
-    Math.ceil(pixelWidth * SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR),
-  );
-  const visibleRows = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), SPECTROGRAM_ROW_BUCKET_SIZE);
-  const overviewRows = quantizeCeil(Math.ceil(overviewSize.pixelHeight * preset.rowsMultiplier), SPECTROGRAM_ROW_BUCKET_SIZE);
-  const visibleColumns = Math.max(
-    TILE_COLUMN_COUNT,
-    quantizeCeil(Math.ceil(bufferedVisibleWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
-  );
-  const overviewColumns = Math.max(
-    TILE_COLUMN_COUNT,
-    quantizeCeil(Math.ceil(overviewSize.pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
-  );
-
-  return {
-    maxColumns: Math.max(visibleColumns, overviewColumns),
-    maxRows: Math.max(visibleRows, overviewRows),
-  };
-}
-
-function ensureSharedAudioBuffers(samples, sampleRate) {
-  const waveformMaxColumns = getWaveformSharedColumnCapacity();
-  const { maxColumns: spectrogramMaxColumns, maxRows: spectrogramMaxRows } = getSpectrogramSharedCapacity();
-
-  if (!state.controlSab) {
-    const controlState = createControlState();
-    state.controlSab = controlState.sab;
-    state.controlView = controlState.view;
-  }
-
+function ensureSharedAudioBuffer(samples, sampleRate) {
   if (!state.pcmSab || new Float32Array(state.pcmSab).length !== samples.length) {
     state.pcmSab = new SharedArrayBuffer(samples.length * Float32Array.BYTES_PER_ELEMENT);
   }
 
   new Float32Array(state.pcmSab).set(samples);
 
-  if (!state.waveformSab || state.waveformMaxColumns !== waveformMaxColumns) {
-    state.waveformSab = new SharedArrayBuffer(getWaveformArenaByteLength(waveformMaxColumns));
-    state.waveformMaxColumns = waveformMaxColumns;
-  }
-
-  if (
-    !state.spectrogramSab
-    || state.spectrogramMaxColumns !== spectrogramMaxColumns
-    || state.spectrogramMaxRows !== spectrogramMaxRows
-  ) {
-    state.spectrogramSab = new SharedArrayBuffer(
-      getSpectrogramArenaByteLength(spectrogramMaxColumns, spectrogramMaxRows),
-    );
-    state.spectrogramMaxColumns = spectrogramMaxColumns;
-    state.spectrogramMaxRows = spectrogramMaxRows;
-  }
-
   if (state.analysis) {
     state.analysis.sampleRate = sampleRate;
     state.analysis.sampleCount = samples.length;
-  }
-}
-
-function syncSharedBuffersToWorkers() {
-  if (state.transportMode !== 'shared') {
-    return;
-  }
-
-  if (state.waveformWorker && state.waveformSab && state.controlSab && state.waveformMaxColumns > 0) {
-    state.waveformWorker.postMessage({
-      type: 'attachSharedBuffers',
-      payload: {
-        controlSab: state.controlSab,
-        waveformMaxColumns: state.waveformMaxColumns,
-        waveformSab: state.waveformSab,
-      },
-    });
-  }
-
-  if (state.analysisWorker && state.analysis && state.pcmSab && state.controlSab && state.waveformSab && state.spectrogramSab) {
-    state.analysisWorker.postMessage({
-      type: 'attachAudioSession',
-      body: {
-        controlSab: state.controlSab,
-        duration: state.analysis.duration,
-        pcmSab: state.pcmSab,
-        quality: state.analysis.quality,
-        sampleCount: state.analysis.sampleCount,
-        sampleRate: state.analysis.sampleRate,
-        sessionVersion: state.sessionVersion,
-        spectrogramMaxColumns: state.spectrogramMaxColumns,
-        spectrogramMaxRows: state.spectrogramMaxRows,
-        spectrogramSab: state.spectrogramSab,
-        transportMode: state.transportMode,
-        waveformMaxColumns: state.waveformMaxColumns,
-        waveformSab: state.waveformSab,
-      },
-    });
   }
 }
 
@@ -999,16 +1092,21 @@ function getOverviewSpectrogramRequestSize() {
   };
 }
 
-function requestOverviewSpectrogram() {
+function requestOverviewSpectrogram({ force = false } = {}) {
   if (!state.analysisWorker || !state.analysis?.initialized) {
     return;
   }
 
-  if (state.analysis.overview.requestPending || state.analysis.overview.ready) {
+  const { pixelHeight, pixelWidth } = getOverviewSpectrogramRequestSize();
+
+  if (
+    !force
+    && (state.analysis.overview.requestPending || state.analysis.overview.ready)
+    && Math.abs((state.analysis.overview.pixelWidth ?? 0) - pixelWidth) <= 1
+    && Math.abs((state.analysis.overview.pixelHeight ?? 0) - pixelHeight) <= 1
+  ) {
     return;
   }
-
-  const { pixelHeight, pixelWidth } = getOverviewSpectrogramRequestSize();
 
   state.analysis.overview = {
     ...createSpectrogramLayerState('overview'),
@@ -1022,110 +1120,19 @@ function requestOverviewSpectrogram() {
 
   setAnalysisStatus('Queued');
   state.analysisWorker.postMessage({
-    type: 'requestSpectrogramTiles',
+    type: 'renderOverview',
     body: {
       dpr: DISPLAY_PIXEL_RATIO,
-      generation: 0,
+      fftSize: state.spectrogramRenderConfig.fftSize,
+      overlapRatio: state.spectrogramRenderConfig.overlapRatio,
       pixelHeight,
       pixelWidth,
-      requestKind: 'overview',
-      viewEnd: state.analysis.duration,
-      viewStart: 0,
     },
   });
 }
 
 function queueVisibleSpectrogramRequest({ force = false } = {}) {
-  if (!state.analysis || !state.analysis.initialized) {
-    return;
-  }
-
-  if (!force && hasBufferedVisibleSpectrogramCoverage()) {
-    state.analysis.visibleRequestQueued = false;
-    return;
-  }
-
-  state.analysis.visibleRequestQueued = true;
-
-  if (!state.analysis.overview.ready || !state.analysisWorker) {
-    return;
-  }
-
-  if (state.spectrogramRequestFrame) {
-    return;
-  }
-
-  state.spectrogramRequestFrame = window.requestAnimationFrame(() => {
-    state.spectrogramRequestFrame = 0;
-
-    if (!state.analysis) {
-      return;
-    }
-
-    requestVisibleSpectrogram({ force });
-  });
-}
-
-function requestVisibleSpectrogram({ force = false } = {}) {
-  if (!state.analysisWorker || !state.analysis?.initialized || !state.analysis.overview.ready) {
-    return;
-  }
-
-  const { displayRange, pixelHeight, pixelWidth, requestRange } = getVisibleSpectrogramRequestMetrics();
-
-  if (displayRange.end <= displayRange.start) {
-    return;
-  }
-
-  if (!force && isSameVisibleRequest(state.analysis.activeVisibleRequest, requestRange, { pixelHeight, pixelWidth })) {
-    state.analysis.visibleRequestQueued = false;
-    return;
-  }
-
-  const previousGeneration = state.analysis.generation;
-  const nextGeneration = previousGeneration + 1;
-
-  state.analysis.generation = nextGeneration;
-  state.analysis.visibleRequestQueued = false;
-  state.analysis.activeVisibleRequest = {
-    generation: nextGeneration,
-    pixelHeight,
-    pixelWidth,
-    viewEnd: requestRange.end,
-    viewStart: requestRange.start,
-  };
-  state.analysis.visible = {
-    ...createSpectrogramLayerState('visible'),
-    dpr: DISPLAY_PIXEL_RATIO,
-    generation: nextGeneration,
-    pixelHeight,
-    pixelWidth,
-    requestPending: true,
-    viewEnd: requestRange.end,
-    viewStart: requestRange.start,
-  };
-
-  if (previousGeneration > 0) {
-    state.analysisWorker.postMessage({
-      type: 'cancelGeneration',
-      body: { generation: previousGeneration },
-    });
-  }
-
-  setAnalysisStatus('Refining visible range');
-  state.analysisWorker.postMessage({
-    type: 'requestSpectrogramTiles',
-    body: {
-      dpr: DISPLAY_PIXEL_RATIO,
-      generation: nextGeneration,
-      pixelHeight,
-      pixelWidth,
-      requestKind: 'visible',
-      viewEnd: requestRange.end,
-      viewStart: requestRange.start,
-    },
-  });
-  scheduleSpectrogramRender();
+  scheduleSpectrogramRender({ force });
 }
 
 function isSameVisibleRequest(activeRequest, range, size) {
@@ -1139,7 +1146,7 @@ function isSameVisibleRequest(activeRequest, range, size) {
     && Math.abs(activeRequest.pixelHeight - size.pixelHeight) <= 1;
 }
 
-function handleWaveformSliceReady(body) {
+function handleWaveformReady(body) {
   if (!state.waveformWorker || body.generation !== state.waveformRequestGeneration) {
     return;
   }
@@ -1157,248 +1164,9 @@ function handleWaveformSliceReady(body) {
   };
   state.waveformRenderWidth = width;
   state.waveformRenderHeight = height;
+  state.waveformRenderVisibleSpan = pendingRequest?.visibleSpan ?? Math.max(0, body.viewEnd - body.viewStart);
   state.waveformPendingRequest = null;
   applyWaveformCanvasTransform();
-
-  const payload = {
-    color: WAVEFORM_COLOR,
-    columnCount: body.columnCount,
-    generation: body.generation,
-    renderScale: WAVEFORM_RENDER_SCALE,
-    viewEnd: body.viewEnd,
-    viewStart: body.viewStart,
-    width,
-    height,
-  };
-
-  if (body.transportMode === 'shared') {
-    state.waveformWorker.postMessage({
-      type: 'renderWaveformSlice',
-      payload: {
-        ...payload,
-        sequence: body.sequence,
-        slotId: body.slotId,
-      },
-    });
-    return;
-  }
-
-  state.waveformWorker.postMessage({
-    type: 'renderWaveformSlice',
-    payload: {
-      ...payload,
-      sliceBuffer: body.sliceBuffer,
-    },
-  }, [body.sliceBuffer]);
-}
-
-function handleSpectrogramTileMessage(body) {
-  if (!state.analysis) {
-    return;
-  }
-
-  const layer = body.requestKind === 'overview'
-    ? state.analysis.overview
-    : body.generation === state.analysis.generation
-      ? state.analysis.visible
-      : null;
-
-  if (!layer) {
-    return;
-  }
-
-  const tileCanvas = createSpectrogramTileCanvas({
-    batch: body.transportMode === 'shared'
-      ? getSpectrogramSlotView(
-        state.spectrogramSab,
-        state.spectrogramMaxColumns,
-        state.spectrogramMaxRows,
-        body.slotId,
-        body.columnCount,
-        body.rowCount,
-      )
-      : new Uint8ClampedArray(body.rgbaBuffer),
-    columnCount: body.columnCount,
-    rowCount: body.rowCount,
-  });
-
-  layer.completedTiles = body.completedTiles;
-  layer.totalTiles = body.totalTiles;
-  layer.fftSize = body.fftSize;
-  layer.requestPending = true;
-  layer.runtimeVariant = body.runtimeVariant;
-  layer.targetColumns = body.targetColumns;
-  layer.targetRows = body.targetRows;
-  layer.zoomBucket = body.zoomBucket;
-
-  if (tileCanvas) {
-    layer.tiles.set(body.tileKey, {
-      canvas: tileCanvas,
-      columnCount: body.columnCount,
-      rowCount: body.rowCount,
-      tileEnd: body.tileEnd,
-      tileIndex: body.tileIndex,
-      tileKey: body.tileKey,
-      tileStart: body.tileStart,
-    });
-    layer.ready = true;
-  }
-
-  if (body.transportMode === 'shared' && state.analysisWorker) {
-    state.analysisWorker.postMessage({
-      type: 'releaseSpectrogramSlot',
-      body: {
-        slotId: body.slotId,
-      },
-    });
-  }
-
-  state.analysis.tileCacheMeta.set(body.tileKey, {
-    columnCount: body.columnCount,
-    dprBucket: body.dprBucket,
-    fftSize: body.fftSize,
-    requestKind: body.requestKind,
-    rowCount: body.rowCount,
-    zoomBucket: body.zoomBucket,
-  });
-
-  if (body.requestKind === 'overview' && layer.ready && !state.analysis.visible.requestPending && !state.analysis.visible.ready) {
-    setAnalysisStatus('Overview ready');
-  }
-
-  scheduleSpectrogramRender();
-}
-
-function handleSpectrogramRequestComplete(body) {
-  if (!state.analysis) {
-    return;
-  }
-
-  const layer = body.requestKind === 'overview'
-    ? state.analysis.overview
-    : body.generation === state.analysis.generation
-      ? state.analysis.visible
-      : null;
-
-  if (!layer) {
-    return;
-  }
-
-  layer.complete = true;
-  layer.completedTiles = body.completedTiles;
-  layer.totalTiles = body.totalTiles;
-  layer.fftSize = body.fftSize;
-  layer.requestPending = false;
-  layer.runtimeVariant = body.runtimeVariant;
-  layer.targetColumns = body.targetColumns;
-  layer.targetRows = body.targetRows;
-  layer.zoomBucket = body.zoomBucket;
-
-  if (body.requestKind === 'overview') {
-    setAnalysisStatus('Overview ready');
-    requestVisibleSpectrogram({ force: state.analysis.visibleRequestQueued || !state.analysis.visible.ready });
-    scheduleSpectrogramRender();
-    return;
-  }
-
-  if (body.generation === state.analysis.generation) {
-    setAnalysisStatus('Ready');
-    scheduleSpectrogramRender();
-  }
-}
-
-function createSpectrogramTileCanvas({ batch, columnCount, rowCount }) {
-  const tileCanvas = document.createElement('canvas');
-  tileCanvas.width = columnCount;
-  tileCanvas.height = rowCount;
-
-  const context = tileCanvas.getContext('2d', { alpha: false });
-
-  if (!context) {
-    return null;
-  }
-
-  const imageData = context.createImageData(columnCount, rowCount);
-  imageData.data.set(batch);
-  context.putImageData(imageData, 0, 0);
-  return tileCanvas;
-}
-
-function getRenderableVisibleSpectrogramLayer(range) {
-  if (!state.analysis) {
-    return null;
-  }
-
-  const layer = state.analysis.visible;
-  const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
-
-  if (!layer.ready || layer.generation !== state.analysis.generation) {
-    return null;
-  }
-
-  if (layer.pixelWidth < pixelWidth || layer.pixelHeight < pixelHeight) {
-    return null;
-  }
-
-  if (layer.viewEnd <= range.start || layer.viewStart >= range.end) {
-    return null;
-  }
-
-  return layer;
-}
-
-function drawSpectrogramLayer(layer, range, { smoothing, smoothingQuality }) {
-  const span = Math.max(1e-6, range.end - range.start);
-  const destinationHeight = elements.spectrogram.height;
-  const destinationWidth = elements.spectrogram.width;
-  const tiles = Array.from(layer.tiles.values()).sort((left, right) => left.tileIndex - right.tileIndex);
-
-  if (!tiles.length) {
-    return;
-  }
-
-  spectrogramContext.imageSmoothingEnabled = smoothing;
-  spectrogramContext.imageSmoothingQuality = smoothingQuality;
-
-  for (const tile of tiles) {
-    const tileSpan = Math.max(1e-6, tile.tileEnd - tile.tileStart);
-    const overlapStart = Math.max(range.start, tile.tileStart);
-    const overlapEnd = Math.min(range.end, tile.tileEnd);
-
-    if (overlapEnd <= overlapStart) {
-      continue;
-    }
-
-    const sourceStartRatio = (overlapStart - tile.tileStart) / tileSpan;
-    const sourceEndRatio = (overlapEnd - tile.tileStart) / tileSpan;
-    const destinationStartRatio = (overlapStart - range.start) / span;
-    const destinationEndRatio = (overlapEnd - range.start) / span;
-    const sourceX = clamp(Math.floor(sourceStartRatio * tile.columnCount), 0, Math.max(0, tile.columnCount - 1));
-    const sourceWidth = Math.max(
-      1,
-      Math.min(
-        tile.columnCount - sourceX,
-        Math.ceil((sourceEndRatio - sourceStartRatio) * tile.columnCount),
-      ),
-    );
-    const destinationX = Math.floor(destinationStartRatio * destinationWidth);
-    const destinationWidthPx = Math.max(
-      1,
-      Math.ceil((destinationEndRatio - destinationStartRatio) * destinationWidth),
-    );
-
-    spectrogramContext.drawImage(
-      tile.canvas,
-      sourceX,
-      0,
-      sourceWidth,
-      tile.rowCount,
-      destinationX,
-      0,
-      destinationWidthPx,
-      destinationHeight,
-    );
-  }
 }
 
 function renderSpectrogramScale() {
@@ -1409,10 +1177,15 @@ function renderSpectrogramScale() {
   elements.spectrogramAxis.replaceChildren();
   elements.spectrogramGuides.replaceChildren();
 
-  for (const tick of visibleTicks) {
+  visibleTicks.forEach((tick, index) => {
     const position = getLogFrequencyPosition(tick, minFrequency, maxFrequency);
     const axisTick = document.createElement('div');
     axisTick.className = 'spectrogram-tick';
+    if (index === 0) {
+      axisTick.classList.add('spectrogram-tick-edge-top');
+    } else if (index === visibleTicks.length - 1) {
+      axisTick.classList.add('spectrogram-tick-edge-bottom');
+    }
     axisTick.style.top = `${position * 100}%`;
 
     const label = document.createElement('span');
@@ -1426,7 +1199,42 @@ function renderSpectrogramScale() {
 
     elements.spectrogramAxis.append(axisTick);
     elements.spectrogramGuides.append(guide);
+  });
+}
+
+function getActiveSpectrogramMetaLayer() {
+  return state.spectrogramRenderConfig;
+}
+
+function renderSpectrogramMeta() {
+  if (!elements.spectrogramMeta || !elements.spectrogramFftSelect || !elements.spectrogramOverlapSelect) {
+    return;
   }
+
+  const layer = getActiveSpectrogramMetaLayer();
+
+  elements.spectrogramFftSelect.value = String(normalizeSpectrogramFftSize(layer?.fftSize));
+  elements.spectrogramOverlapSelect.value = String(normalizeSpectrogramOverlapRatio(layer?.overlapRatio));
+}
+
+function refreshSpectrogramAnalysisConfig() {
+  if (!state.analysis) {
+    return;
+  }
+
+  state.analysis.activeVisibleRequest = null;
+  state.analysis.overview = createSpectrogramLayerState('overview');
+  state.analysis.visible = createSpectrogramLayerState('visible');
+
+  if (state.analysisWorker && state.analysis.generation > 0) {
+    state.analysisWorker.postMessage({
+      type: 'cancelGeneration',
+      body: { generation: state.analysis.generation },
+    });
+  }
+
+  requestOverviewSpectrogram({ force: true });
+  scheduleSpectrogramRender({ force: true });
 }
 
 function ensureWaveformViewRange() {
@@ -1928,10 +1736,6 @@ function syncFollowView(timeSeconds) {
       void syncWaveformView();
     }
 
-    if (!hasBufferedVisibleSpectrogramCoverage(range)) {
-      queueVisibleSpectrogramRequest();
-    }
-
     scheduleSpectrogramRender();
     return;
   }
@@ -1970,25 +1774,17 @@ function syncFollowView(timeSeconds) {
   void syncWaveformView();
 }
 
-async function syncWaveformView() {
+async function syncWaveformView({ force = false } = {}) {
   const duration = getEffectiveDuration();
   const { displayRange, height, renderRange, renderWidth } = getWaveformRenderRequestMetrics();
+  const visibleSpan = Math.max(0, displayRange.end - displayRange.start);
 
-  if (!state.waveformCanvas || !state.analysisWorker || duration <= 0 || displayRange.end <= displayRange.start) {
+  if (!state.waveformCanvas || !state.waveformWorker || duration <= 0 || displayRange.end <= displayRange.start) {
     return;
   }
 
-  if (hasWaveformRenderCoverage(displayRange)) {
+  if (!force && hasWaveformRenderCoverage(displayRange)) {
     applyWaveformCanvasTransform(displayRange);
-    return;
-  }
-
-  const columnCount = Math.min(
-    state.waveformMaxColumns || Math.max(1, Math.round(renderWidth * WAVEFORM_RENDER_SCALE)),
-    Math.max(1, Math.round(renderWidth * WAVEFORM_RENDER_SCALE)),
-  );
-
-  if (columnCount <= 0) {
     return;
   }
 
@@ -1997,22 +1793,25 @@ async function syncWaveformView() {
   }
 
   state.waveformRequestGeneration += 1;
-  state.waveformSlotCursor = (state.waveformSlotCursor + 1) % WAVEFORM_SLOT_COUNT;
   state.waveformPendingRequest = {
     end: renderRange.end,
     generation: state.waveformRequestGeneration,
     height,
     start: renderRange.start,
+    visibleSpan,
     width: renderWidth,
   };
-  state.analysisWorker.postMessage({
-    type: 'requestWaveformSlice',
+  state.waveformWorker.postMessage({
+    type: 'renderWaveformView',
     body: {
-      columnCount,
+      color: WAVEFORM_COLOR,
       generation: state.waveformRequestGeneration,
-      slotId: state.waveformSlotCursor,
+      height,
+      renderScale: WAVEFORM_RENDER_SCALE,
       viewEnd: renderRange.end,
       viewStart: renderRange.start,
+      visibleSpan,
+      width: renderWidth,
     },
   });
 }
@@ -2046,6 +1845,11 @@ function zoomAroundTime(anchorTime, requestedSpan) {
     getMinVisibleDuration(duration),
     Math.max(getMinVisibleDuration(duration), duration),
   );
+
+  if (Math.abs(nextSpan - span) <= 1e-9) {
+    return;
+  }
+
   const ratio = span > 0 ? clamp((anchorTime - range.start) / span, 0, 1) : 0.5;
   const nextStart = anchorTime - nextSpan * ratio;
 
@@ -2120,6 +1924,107 @@ function updateTimelineHoverTooltip(event) {
 
 function hideTimelineHoverTooltip() {
   elements.timelineHoverTooltip.classList.remove('visible');
+}
+
+function hideSurfaceHoverTooltip(tooltipElement) {
+  if (!tooltipElement) {
+    return;
+  }
+
+  tooltipElement.classList.remove('visible');
+  tooltipElement.setAttribute('aria-hidden', 'true');
+}
+
+function updateSurfaceHoverTooltip(tooltipElement, targetElement, event, label) {
+  if (!tooltipElement || !targetElement || !label) {
+    hideSurfaceHoverTooltip(tooltipElement);
+    return;
+  }
+
+  const rect = targetElement.getBoundingClientRect();
+
+  if (rect.width <= 0 || rect.height <= 0) {
+    hideSurfaceHoverTooltip(tooltipElement);
+    return;
+  }
+
+  const localX = clamp(event.clientX - rect.left, 0, rect.width);
+  const localY = clamp(event.clientY - rect.top, 0, rect.height);
+
+  tooltipElement.textContent = label;
+  tooltipElement.classList.add('visible');
+  tooltipElement.setAttribute('aria-hidden', 'false');
+
+  const tooltipWidth = tooltipElement.offsetWidth || 0;
+  const tooltipHeight = tooltipElement.offsetHeight || 0;
+  const maxLeft = Math.max(12, rect.width - tooltipWidth - 12);
+  const maxTop = Math.max(12, rect.height - tooltipHeight - 12);
+
+  tooltipElement.style.left = `${clamp(localX + 14, 12, maxLeft)}px`;
+  tooltipElement.style.top = `${clamp(localY - tooltipHeight - 14, 12, maxTop)}px`;
+}
+
+function updateWaveformHoverTooltip(event) {
+  const duration = getEffectiveDuration();
+
+  if (!state.audio || duration <= 0) {
+    hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
+    return;
+  }
+
+  updateSurfaceHoverTooltip(
+    elements.waveformHoverTooltip,
+    elements.waveformViewport ?? elements.waveformHitTarget,
+    event,
+    formatAxisLabel(getTimeAtWaveformPointerEvent(event)),
+  );
+}
+
+function hideWaveformHoverTooltip() {
+  hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
+}
+
+function getFrequencyAtSpectrogramPointerEvent(event) {
+  const targetElement = elements.spectrogramHitTarget ?? elements.spectrogram;
+
+  if (!targetElement) {
+    return SPECTROGRAM_MIN_FREQUENCY;
+  }
+
+  const rect = targetElement.getBoundingClientRect();
+
+  if (rect.height <= 0) {
+    return SPECTROGRAM_MIN_FREQUENCY;
+  }
+
+  const minFrequency = state.analysis?.minFrequency ?? SPECTROGRAM_MIN_FREQUENCY;
+  const maxFrequency = state.analysis?.maxFrequency ?? SPECTROGRAM_MAX_FREQUENCY;
+  const position = clamp((event.clientY - rect.top) / rect.height, 0, 1);
+
+  return getFrequencyAtLogPosition(position, minFrequency, maxFrequency);
+}
+
+function updateSpectrogramHoverTooltip(event) {
+  const duration = getEffectiveDuration();
+
+  if (!state.audio || duration <= 0) {
+    hideSurfaceHoverTooltip(elements.spectrogramHoverTooltip);
+    return;
+  }
+
+  const timeLabel = formatAxisLabel(getTimeAtViewportPointerEvent(event, elements.spectrogramHitTarget));
+  const frequencyLabel = formatFrequencyLabel(getFrequencyAtSpectrogramPointerEvent(event));
+
+  updateSurfaceHoverTooltip(
+    elements.spectrogramHoverTooltip,
+    elements.spectrogramHitTarget,
+    event,
+    `${timeLabel} • ${frequencyLabel}`,
+  );
+}
+
+function hideSpectrogramHoverTooltip() {
+  hideSurfaceHoverTooltip(elements.spectrogramHoverTooltip);
 }
 
 function seekWaveformTo(timeSeconds) {
@@ -2325,7 +2230,8 @@ function handleSharedViewportWheel(event, targetElement) {
   }
 
   updateWaveformViewRange((current) => {
-    let nextSpan = Math.max(getMinVisibleDuration(duration), current.end - current.start);
+    const currentSpan = Math.max(getMinVisibleDuration(duration), current.end - current.start);
+    let nextSpan = currentSpan;
     let nextStart = current.start;
 
     if (intent === 'zoom' && verticalMagnitude > 0.01) {
@@ -2335,6 +2241,11 @@ function handleSharedViewportWheel(event, targetElement) {
         getMinVisibleDuration(duration),
         Math.max(getMinVisibleDuration(duration), duration),
       );
+
+      if (Math.abs(nextSpan - currentSpan) <= 1e-9) {
+        return current;
+      }
+
       nextStart = anchorTime - nextSpan * (
         shouldPreserveFollowZoom
           ? WAVEFORM_FOLLOW_TARGET_RATIO
@@ -2355,6 +2266,18 @@ function handleSharedViewportWheel(event, targetElement) {
 }
 
 function attachUiEvents() {
+  elements.spectrogramFftSelect?.addEventListener('change', () => {
+    state.spectrogramRenderConfig.fftSize = normalizeSpectrogramFftSize(elements.spectrogramFftSelect.value);
+    renderSpectrogramMeta();
+    refreshSpectrogramAnalysisConfig();
+  });
+
+  elements.spectrogramOverlapSelect?.addEventListener('change', () => {
+    state.spectrogramRenderConfig.overlapRatio = normalizeSpectrogramOverlapRatio(elements.spectrogramOverlapSelect.value);
+    renderSpectrogramMeta();
+    refreshSpectrogramAnalysisConfig();
+  });
+
   elements.jumpStart.addEventListener('click', () => {
     seekWaveformTo(state.loopRange?.start ?? 0);
   });
@@ -2431,7 +2354,11 @@ function attachUiEvents() {
   });
 
   elements.waveformHitTarget.addEventListener('pointermove', (event) => {
+    updateWaveformHoverTooltip(event);
     updateSelectionDrag(event, elements.waveformHitTarget);
+  });
+  elements.waveformHitTarget.addEventListener('pointerleave', () => {
+    hideWaveformHoverTooltip();
   });
 
   const releaseWaveformPointer = (event) => {
@@ -2440,6 +2367,7 @@ function attachUiEvents() {
 
   elements.waveformHitTarget.addEventListener('pointerup', releaseWaveformPointer);
   elements.waveformHitTarget.addEventListener('pointercancel', (event) => {
+    hideWaveformHoverTooltip();
     releaseSelectionDrag(event, elements.waveformHitTarget, true);
   });
 
@@ -2460,7 +2388,11 @@ function attachUiEvents() {
   });
 
   elements.spectrogramHitTarget.addEventListener('pointermove', (event) => {
+    updateSpectrogramHoverTooltip(event);
     updateSelectionDrag(event, elements.spectrogramHitTarget);
+  });
+  elements.spectrogramHitTarget.addEventListener('pointerleave', () => {
+    hideSpectrogramHoverTooltip();
   });
 
   elements.spectrogramHitTarget.addEventListener('pointerup', (event) => {
@@ -2468,6 +2400,7 @@ function attachUiEvents() {
   });
 
   elements.spectrogramHitTarget.addEventListener('pointercancel', (event) => {
+    hideSpectrogramHoverTooltip();
     releaseSelectionDrag(event, elements.spectrogramHitTarget, true);
   });
 
@@ -2482,16 +2415,37 @@ function attachUiEvents() {
 
 function attachResizeObservers() {
   const resizeObserver = new ResizeObserver(() => {
-    if (state.transportMode === 'shared' && state.analysis && state.pcmSab) {
-      ensureSharedAudioBuffers(new Float32Array(state.pcmSab), state.analysis.sampleRate);
-      syncSharedBuffersToWorkers();
+    const { height, width } = getWaveformViewportSize();
+    const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
+
+    if (state.waveformWorker) {
+      state.waveformWorker.postMessage({
+        type: 'resizeCanvas',
+        body: {
+          color: WAVEFORM_COLOR,
+          height,
+          renderScale: WAVEFORM_RENDER_SCALE,
+          width,
+        },
+      });
+    }
+
+    if (state.analysisWorker) {
+      state.analysisWorker.postMessage({
+        type: 'resizeCanvas',
+        body: {
+          pixelHeight,
+          pixelWidth,
+        },
+      });
     }
 
     renderWaveformUi();
     void syncWaveformView();
     renderSpectrogramScale();
+    requestOverviewSpectrogram({ force: true });
     queueVisibleSpectrogramRequest({ force: true });
-    scheduleSpectrogramRender();
+    scheduleSpectrogramRender({ force: true });
   });
 
   resizeObserver.observe(document.body);
@@ -2521,6 +2475,7 @@ function destroySession() {
 
   disposeAnalysisWorker();
   disposeWaveformRenderer();
+  disposeSpectrogramSurface();
 
   if (state.audio) {
     state.audio.pause();
@@ -2534,22 +2489,15 @@ function destroySession() {
     state.audioBlobUrl = null;
   }
 
-  state.controlSab = null;
-  state.controlView = null;
   state.pcmSab = null;
-  state.waveformSab = null;
-  state.waveformMaxColumns = 0;
   state.waveformRequestGeneration = 0;
-  state.waveformSlotCursor = 0;
   state.waveformPendingRequest = null;
   state.waveformRenderRange = { start: 0, end: 0 };
   state.waveformRenderWidth = 0;
   state.waveformRenderHeight = 0;
+  state.waveformRenderVisibleSpan = 0;
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
-  state.spectrogramSab = null;
-  state.spectrogramMaxColumns = 0;
-  state.spectrogramMaxRows = 0;
   state.sourceArrayBuffer = null;
   state.waveformViewRange = { start: 0, end: 0 };
   state.waveformSeekPointerId = null;
@@ -2561,7 +2509,12 @@ function destroySession() {
   state.analysisStartedForLoadToken = 0;
   state.sessionVersion = 0;
   state.analysis = null;
+  state.waveformSurfaceReadyPromise = null;
+  state.spectrogramSurfaceReadyPromise = null;
+  hideWaveformHoverTooltip();
+  hideSpectrogramHoverTooltip();
   renderWaveformUi();
+  renderSpectrogramMeta();
 }
 
 function disposeAnalysisWorker() {
@@ -2580,6 +2533,15 @@ function disposeAnalysisWorker() {
   }
 }
 
+function disposeSpectrogramSurface() {
+  const replacement = document.createElement('canvas');
+  replacement.id = 'spectrogram';
+  replacement.className = 'spectrogram-canvas';
+  replacement.setAttribute('aria-label', 'Spectrogram');
+  elements.spectrogram.replaceWith(replacement);
+  elements.spectrogram = replacement;
+}
+
 function disposeWaveformRenderer() {
   if (state.waveformWorker) {
     state.waveformWorker.postMessage({ type: 'dispose' });
@@ -2587,6 +2549,8 @@ function disposeWaveformRenderer() {
     state.waveformWorker = null;
   }
 
+  state.waveformRuntimeReadyPromise = null;
+  state.resolveWaveformRuntimeReady = null;
   if (state.waveformWorkerBootstrapUrl) {
     URL.revokeObjectURL(state.waveformWorkerBootstrapUrl);
     state.waveformWorkerBootstrapUrl = null;
@@ -2597,6 +2561,7 @@ function disposeWaveformRenderer() {
   state.waveformRenderRange = { start: 0, end: 0 };
   state.waveformRenderWidth = 0;
   state.waveformRenderHeight = 0;
+  state.waveformRenderVisibleSpan = 0;
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
   elements.waveformCanvasHost.replaceChildren();
@@ -2881,8 +2846,18 @@ function getWaveformAxisRenderMetrics(displayRange = getWaveformRange()) {
   };
 }
 
+function isWaveformDisplaySpanCompatible(candidateVisibleSpan, displaySpan) {
+  if (!Number.isFinite(candidateVisibleSpan) || !Number.isFinite(displaySpan) || displaySpan <= 0) {
+    return false;
+  }
+
+  const tolerance = Math.max(SPECTROGRAM_RANGE_EPSILON_SECONDS, displaySpan * 0.001);
+  return Math.abs(candidateVisibleSpan - displaySpan) <= tolerance;
+}
+
 function hasWaveformRenderCoverage(displayRange = getWaveformRange()) {
   const { height, renderWidth } = getWaveformRenderRequestMetrics(displayRange);
+  const displaySpan = Math.max(0, displayRange.end - displayRange.start);
   const candidates = [];
 
   if (state.waveformPendingRequest) {
@@ -2894,12 +2869,18 @@ function hasWaveformRenderCoverage(displayRange = getWaveformRange()) {
       end: state.waveformRenderRange.end,
       height: state.waveformRenderHeight,
       start: state.waveformRenderRange.start,
+      visibleSpan: state.waveformRenderVisibleSpan,
       width: state.waveformRenderWidth,
     });
   }
 
   return candidates.some((candidate) => {
-    if (!candidate || Math.abs((candidate.height ?? height) - height) > 1 || (candidate.width ?? 0) < (renderWidth - 1)) {
+    if (
+      !candidate
+      || Math.abs((candidate.height ?? height) - height) > 1
+      || (candidate.width ?? 0) < (renderWidth - 1)
+      || !isWaveformDisplaySpanCompatible(candidate.visibleSpan, displaySpan)
+    ) {
       return false;
     }
 
@@ -3124,6 +3105,14 @@ function getLogFrequencyPosition(frequency, minFrequency, maxFrequency) {
   const current = Math.log(clamp(frequency, minFrequency, maxFrequency));
 
   return 1 - ((current - start) / (end - start));
+}
+
+function getFrequencyAtLogPosition(position, minFrequency, maxFrequency) {
+  const start = Math.log(minFrequency);
+  const end = Math.log(maxFrequency);
+  const ratio = 1 - clamp(position, 0, 1);
+
+  return Math.exp(start + ratio * (end - start));
 }
 
 function formatFrequencyLabel(frequency) {

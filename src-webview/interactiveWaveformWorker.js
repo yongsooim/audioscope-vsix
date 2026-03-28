@@ -1,117 +1,338 @@
-import { readWaveformSlotSequence } from './sharedBuffers.js';
+import { loadWaveCoreRuntime } from './waveCoreRuntime.js';
 
 const TOP_PADDING = 10;
 const BOTTOM_PADDING = 10;
 const CENTER_LINE_ALPHA = 0.14;
 const SYMMETRIC_ENVELOPE_GAIN = 0.76;
 
-let canvas = null;
-let context = null;
-let waveformSab = null;
-let controlView = null;
-let waveformMaxColumns = 0;
-let width = 0;
-let height = 0;
-let renderScale = 2;
-let color = '#7dd3fc';
-let latestSlice = null;
+let runtimePromise = null;
+let requestQueue = Promise.resolve();
+let renderLoopActive = false;
+let pendingRenderRequest = null;
+
+const surfaceState = {
+  canvas: null,
+  context: null,
+  width: 0,
+  height: 0,
+  renderScale: 2,
+  color: '#7dd3fc',
+};
+
+let analysisState = createEmptyAnalysisState();
 
 self.onmessage = (event) => {
-  const { type, payload } = event.data ?? {};
+  const message = event.data ?? {};
 
-  switch (type) {
+  switch (message.type) {
+    case 'bootstrapRuntime':
+      enqueueRequest(async () => {
+        const runtime = await getRuntime();
+        self.postMessage({
+          type: 'runtimeReady',
+          body: {
+            runtimeVariant: runtime.variant,
+          },
+        });
+      });
+      return;
     case 'initCanvas':
-      canvas = payload?.offscreenCanvas ?? null;
-      width = payload?.width ?? width;
-      height = payload?.height ?? height;
-      renderScale = payload?.renderScale ?? renderScale;
-      color = payload?.color ?? color;
-
-      if (canvas) {
-        resizeSurface(canvas, width, height, renderScale);
-        context = canvas.getContext('2d');
-      }
+      initializeCanvas(message.body);
+      void pumpRenderLoop();
       return;
-    case 'attachSharedBuffers':
-      waveformSab = payload?.waveformSab ?? waveformSab;
-      controlView = payload?.controlSab ? new Int32Array(payload.controlSab) : controlView;
-      waveformMaxColumns = payload?.waveformMaxColumns ?? waveformMaxColumns;
+    case 'resizeCanvas':
+      resizeCanvas(message.body);
+      void pumpRenderLoop();
       return;
-    case 'renderWaveformSlice':
-      width = payload?.width ?? width;
-      height = payload?.height ?? height;
-      renderScale = payload?.renderScale ?? renderScale;
-      color = payload?.color ?? color;
-      latestSlice = payload;
-
-      if (canvas) {
-        resizeSurface(canvas, width, height, renderScale);
-      }
-
-      drawFrame();
+    case 'attachAudioSession':
+      enqueueRequest(async () => {
+        const runtime = await getRuntime();
+        attachAudioSession(runtime, message.body);
+      });
       return;
-    case 'clear':
-      latestSlice = null;
-      clearCanvas();
+    case 'buildWaveformPyramid':
+      enqueueRequest(async () => {
+        const runtime = await getRuntime();
+        buildWaveformPyramid(runtime);
+        void pumpRenderLoop();
+      });
+      return;
+    case 'renderWaveformView':
+      pendingRenderRequest = message.body ?? null;
+      void pumpRenderLoop();
+      return;
+    case 'disposeSession':
+      enqueueRequest(async () => {
+        const runtime = await getRuntime();
+        disposeSession(runtime);
+        clearCanvas();
+      });
       return;
     case 'dispose':
-      latestSlice = null;
-      waveformSab = null;
-      controlView = null;
-      waveformMaxColumns = 0;
-      context = null;
-      canvas = null;
+      pendingRenderRequest = null;
+      surfaceState.context = null;
+      surfaceState.canvas = null;
+      analysisState = createEmptyAnalysisState();
       return;
     default:
       return;
   }
 };
 
-function resizeSurface(surface, nextWidth, nextHeight, nextRenderScale) {
-  surface.width = Math.max(1, Math.round(nextWidth * nextRenderScale));
-  surface.height = Math.max(1, Math.round(nextHeight * nextRenderScale));
+function createEmptyAnalysisState() {
+  return {
+    initialized: false,
+    waveformBuilt: false,
+    transportMode: 'shared',
+    attachedSessionVersion: -1,
+    sampleRate: 0,
+    sampleCount: 0,
+    duration: 0,
+    runtimeVariant: null,
+    waveformOutputPointer: 0,
+    waveformOutputCapacity: 0,
+  };
+}
+
+function enqueueRequest(task) {
+  requestQueue = requestQueue
+    .then(task)
+    .catch((error) => {
+      postError(error);
+    });
+}
+
+function getRuntime() {
+  if (!runtimePromise) {
+    runtimePromise = loadWaveCoreRuntime();
+  }
+
+  return runtimePromise;
+}
+
+function initializeCanvas(options) {
+  if (options?.offscreenCanvas) {
+    surfaceState.canvas = options.offscreenCanvas;
+  }
+
+  surfaceState.width = Math.max(1, Math.round(Number(options?.width) || surfaceState.width || 1));
+  surfaceState.height = Math.max(1, Math.round(Number(options?.height) || surfaceState.height || 1));
+  surfaceState.renderScale = Math.max(1, Number(options?.renderScale) || surfaceState.renderScale || 1);
+  surfaceState.color = typeof options?.color === 'string' && options.color
+    ? options.color
+    : surfaceState.color;
+
+  if (!surfaceState.canvas) {
+    return;
+  }
+
+  resizeSurface();
+  surfaceState.context = surfaceState.canvas.getContext('2d');
+  clearCanvas();
+}
+
+function resizeCanvas(options) {
+  surfaceState.width = Math.max(1, Math.round(Number(options?.width) || surfaceState.width || 1));
+  surfaceState.height = Math.max(1, Math.round(Number(options?.height) || surfaceState.height || 1));
+  surfaceState.renderScale = Math.max(1, Number(options?.renderScale) || surfaceState.renderScale || 1);
+  surfaceState.color = typeof options?.color === 'string' && options.color
+    ? options.color
+    : surfaceState.color;
+
+  resizeSurface();
+}
+
+function resizeSurface() {
+  if (!surfaceState.canvas) {
+    return;
+  }
+
+  surfaceState.canvas.width = Math.max(1, Math.round(surfaceState.width * surfaceState.renderScale));
+  surfaceState.canvas.height = Math.max(1, Math.round(surfaceState.height * surfaceState.renderScale));
 }
 
 function clearCanvas() {
+  if (!surfaceState.context || !surfaceState.canvas) {
+    return;
+  }
+
+  surfaceState.context.setTransform(1, 0, 0, 1, 0, 0);
+  surfaceState.context.clearRect(0, 0, surfaceState.canvas.width, surfaceState.canvas.height);
+}
+
+function attachAudioSession(runtime, options) {
+  const module = runtime.module;
+  const transportMode = options?.transportMode === 'transfer' ? 'transfer' : 'shared';
+  const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
+  const sampleRate = Number(options?.sampleRate);
+  const duration = Number(options?.duration);
+  const sampleCount = Number(options?.sampleCount);
+
+  if (transportMode === 'shared' && !options?.pcmSab) {
+    throw new Error('Shared PCM buffer is missing.');
+  }
+
+  if (transportMode === 'transfer' && !options?.samplesBuffer) {
+    throw new Error('Transferable PCM buffer is missing.');
+  }
+
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(sampleCount) || sampleCount <= 0) {
+    throw new Error('Audio session metadata is invalid.');
+  }
+
+  const isNewAudioSession = sessionVersion !== analysisState.attachedSessionVersion;
+
+  if (isNewAudioSession) {
+    disposeWasmSession(module);
+
+    if (!module._wave_prepare_session(sampleCount, sampleRate, duration)) {
+      throw new Error('Failed to allocate waveform session.');
+    }
+
+    const pcmPointer = module._wave_get_pcm_ptr();
+
+    if (!pcmPointer) {
+      throw new Error('Wasm PCM allocation failed.');
+    }
+
+    const pcmSource = transportMode === 'shared'
+      ? new Float32Array(options.pcmSab)
+      : new Float32Array(options.samplesBuffer);
+    const pcmTarget = getHeapF32View(module, pcmPointer, sampleCount);
+    pcmTarget.set(pcmSource);
+  }
+
+  analysisState.initialized = true;
+  analysisState.waveformBuilt = false;
+  analysisState.transportMode = transportMode;
+  analysisState.attachedSessionVersion = sessionVersion;
+  analysisState.sampleRate = sampleRate;
+  analysisState.sampleCount = sampleCount;
+  analysisState.duration = duration;
+  analysisState.runtimeVariant = runtime.variant;
+
+  self.postMessage({
+    type: 'analysisInitialized',
+    body: {
+      duration,
+      runtimeVariant: runtime.variant,
+      sampleCount,
+      sampleRate,
+    },
+  });
+}
+
+function buildWaveformPyramid(runtime) {
+  assertInitialized();
+
+  if (!runtime.module._wave_build_waveform_pyramid()) {
+    throw new Error('Waveform pyramid build failed.');
+  }
+
+  analysisState.waveformBuilt = true;
+  self.postMessage({
+    type: 'waveformPyramidReady',
+  });
+}
+
+async function pumpRenderLoop() {
+  if (renderLoopActive) {
+    return;
+  }
+
+  renderLoopActive = true;
+
+  try {
+    while (pendingRenderRequest) {
+      const request = pendingRenderRequest;
+      pendingRenderRequest = null;
+
+      await requestQueue;
+
+      if (!request || !surfaceState.context || !surfaceState.canvas) {
+        clearCanvas();
+        continue;
+      }
+
+      if (!analysisState.initialized || !analysisState.waveformBuilt) {
+        continue;
+      }
+
+      const runtime = await getRuntime();
+      renderWaveform(runtime, request);
+    }
+  } catch (error) {
+    postError(error);
+  } finally {
+    renderLoopActive = false;
+  }
+}
+
+function renderWaveform(runtime, request) {
+  const module = runtime.module;
+  const viewStart = clamp(Number(request?.viewStart) || 0, 0, analysisState.duration);
+  const viewEnd = clamp(
+    Number(request?.viewEnd) || analysisState.duration,
+    viewStart + (1 / analysisState.sampleRate),
+    analysisState.duration,
+  );
+  const width = Math.max(1, Math.round(Number(request?.width) || surfaceState.width || 1));
+  const height = Math.max(1, Math.round(Number(request?.height) || surfaceState.height || 1));
+  const renderScale = Math.max(1, Number(request?.renderScale) || surfaceState.renderScale || 1);
+  const color = typeof request?.color === 'string' && request.color
+    ? request.color
+    : surfaceState.color;
+  const visibleSpan = Number.isFinite(request?.visibleSpan) ? Number(request.visibleSpan) : Math.max(0, viewEnd - viewStart);
+  const columnCount = Math.max(1, Math.round(width * renderScale));
+
+  surfaceState.width = width;
+  surfaceState.height = height;
+  surfaceState.renderScale = renderScale;
+  surfaceState.color = color;
+  resizeSurface();
+
+  ensureWaveformOutputCapacity(module, columnCount * 2);
+
+  const ok = module._wave_extract_waveform_slice(
+    viewStart,
+    viewEnd,
+    columnCount,
+    analysisState.waveformOutputPointer,
+  );
+
+  if (!ok) {
+    throw new Error('Waveform slice extraction failed.');
+  }
+
+  const slice = getHeapF32View(module, analysisState.waveformOutputPointer, columnCount * 2);
+  drawFrame(slice, columnCount, color);
+
+  self.postMessage({
+    type: 'waveformReady',
+    body: {
+      columnCount,
+      generation: Number.isFinite(request?.generation) ? Number(request.generation) : 0,
+      height,
+      viewEnd,
+      viewStart,
+      visibleSpan,
+      width,
+    },
+  });
+}
+
+function drawFrame(slice, columnCount, color) {
+  const context = surfaceState.context;
+  const canvas = surfaceState.canvas;
+
   if (!context || !canvas) {
     return;
   }
 
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  context.clearRect(0, 0, canvas.width, canvas.height);
-}
-
-function drawFrame() {
-  if (!context || !canvas || !latestSlice) {
-    clearCanvas();
-    return;
-  }
-
-  const { columnCount } = latestSlice;
-  let slice = null;
-
-  if (latestSlice.sliceBuffer) {
-    slice = new Float32Array(latestSlice.sliceBuffer);
-  } else {
-    if (!waveformSab || !controlView || waveformMaxColumns <= 0) {
-      clearCanvas();
-      return;
-    }
-
-    const { slotId, sequence } = latestSlice;
-
-    if (readWaveformSlotSequence(controlView, slotId) !== sequence) {
-      return;
-    }
-
-    const slotByteOffset = Float32Array.BYTES_PER_ELEMENT * waveformMaxColumns * 2 * slotId;
-    slice = new Float32Array(waveformSab, slotByteOffset, waveformMaxColumns * 2);
-  }
-
-  const deviceWidth = Math.max(1, Math.round(width * renderScale));
-  const deviceHeight = Math.max(1, Math.round(height * renderScale));
-  const chartTop = Math.round(TOP_PADDING * renderScale);
-  const chartBottom = Math.max(chartTop + 1, Math.round((height - BOTTOM_PADDING) * renderScale));
+  const deviceWidth = Math.max(1, canvas.width);
+  const deviceHeight = Math.max(1, canvas.height);
+  const chartTop = Math.round(TOP_PADDING * surfaceState.renderScale);
+  const chartBottom = Math.max(chartTop + 1, Math.round((surfaceState.height - BOTTOM_PADDING) * surfaceState.renderScale));
   const chartHeight = Math.max(1, chartBottom - chartTop);
   const midY = chartTop + chartHeight * 0.5;
   const amplitudeHeight = chartHeight * 0.38;
@@ -120,7 +341,7 @@ function drawFrame() {
   context.setTransform(1, 0, 0, 1, 0, 0);
   context.clearRect(0, 0, deviceWidth, deviceHeight);
   context.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;
-  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, renderScale));
+  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, surfaceState.renderScale));
   context.fillStyle = color;
 
   const drawColumns = Math.min(columnCount, deviceWidth);
@@ -134,13 +355,55 @@ function drawFrame() {
     const bottom = clamp(Math.round(midY + symmetricPeak * amplitudeHeight), chartTop, chartBottom);
     context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));
   }
+}
+
+function ensureWaveformOutputCapacity(module, floatCount) {
+  if (analysisState.waveformOutputCapacity >= floatCount && analysisState.waveformOutputPointer) {
+    return;
+  }
+
+  if (analysisState.waveformOutputPointer) {
+    module._free(analysisState.waveformOutputPointer);
+  }
+
+  analysisState.waveformOutputPointer = module._malloc(floatCount * Float32Array.BYTES_PER_ELEMENT);
+  analysisState.waveformOutputCapacity = floatCount;
+}
+
+function getHeapF32View(module, pointer, length) {
+  return new Float32Array(module.HEAPF32.buffer, pointer, length);
+}
+
+function disposeWasmSession(module) {
+  if (analysisState.waveformOutputPointer) {
+    module._free(analysisState.waveformOutputPointer);
+  }
+
+  module._wave_dispose_session();
+  analysisState.waveformOutputPointer = 0;
+  analysisState.waveformOutputCapacity = 0;
+}
+
+function disposeSession(runtime) {
+  if (analysisState.initialized) {
+    disposeWasmSession(runtime.module);
+  }
+
+  analysisState = createEmptyAnalysisState();
+}
+
+function assertInitialized() {
+  if (!analysisState.initialized) {
+    throw new Error('Waveform analysis is not initialized.');
+  }
+}
+
+function postError(error) {
+  const text = error instanceof Error ? error.message : String(error);
 
   self.postMessage({
-    type: 'waveformRendered',
-    payload: {
-      generation: latestSlice.generation,
-      slotId: latestSlice.slotId ?? -1,
-    },
+    type: 'error',
+    body: { message: text },
   });
 }
 

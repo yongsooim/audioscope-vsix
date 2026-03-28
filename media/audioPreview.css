@@ -78,7 +78,7 @@ body {
 
 .viewport {
   display: grid;
-  grid-template-rows: minmax(224px, 38%) minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   width: 100%;
   max-width: 100%;
   margin: 0 !important;
@@ -305,7 +305,8 @@ body {
 
 .spectrogram-panel {
   position: relative;
-  display: block;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
   width: 100%;
   max-width: 100%;
   margin: 0 !important;
@@ -327,6 +328,8 @@ body {
   position: relative;
   margin: 0;
   padding: 0;
+  width: 100%;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   border: 1px solid var(--spectrogram-axis-border);
@@ -337,10 +340,67 @@ body {
 }
 
 .spectrogram-canvas {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
   cursor: pointer;
+}
+
+.spectrogram-meta {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 6;
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  padding: 6px 8px;
+  border: 1px solid rgba(191, 219, 254, 0.14);
+  border-radius: 9px;
+  background: rgba(4, 9, 19, 0.58);
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+  box-shadow:
+    0 8px 18px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.spectrogram-control {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.spectrogram-control-label {
+  color: rgba(193, 209, 236, 0.78);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.spectrogram-control-select {
+  min-width: 72px;
+  padding: 2px 6px;
+  border: 1px solid rgba(191, 219, 254, 0.16);
+  border-radius: 7px;
+  background: rgba(11, 18, 34, 0.72);
+  color: rgba(245, 249, 255, 0.98);
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.spectrogram-control-select:focus,
+.spectrogram-control-select:focus-visible {
+  outline: none !important;
+  border-color: rgba(191, 219, 254, 0.16);
+  box-shadow: none !important;
 }
 
 .spectrogram-hit-target {
@@ -416,6 +476,14 @@ body {
   transform: translateY(-50%);
 }
 
+.spectrogram-tick-edge-top {
+  transform: translateY(0);
+}
+
+.spectrogram-tick-edge-bottom {
+  transform: translateY(-100%);
+}
+
 .spectrogram-tick::after {
   display: none;
 }
@@ -430,6 +498,41 @@ body {
   text-shadow:
     0 1px 2px rgba(0, 0, 0, 0.92),
     0 0 10px rgba(0, 0, 0, 0.5);
+}
+
+.surface-hover-tooltip {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 7;
+  max-width: calc(100% - 24px);
+  padding: 5px 8px;
+  border: 1px solid rgba(191, 219, 254, 0.14);
+  border-radius: 8px;
+  background: rgba(5, 9, 18, 0.58);
+  color: rgba(239, 246, 255, 0.96);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate3d(0, 6px, 0);
+  transition: opacity 120ms ease, transform 120ms ease;
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(8px);
+}
+
+.surface-hover-tooltip.visible {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+.surface-hover-tooltip-detail {
+  color: rgba(255, 242, 228, 0.96);
 }
 
 .transport {
@@ -655,10 +758,6 @@ body {
 }
 
 @media (max-width: 960px) {
-  .viewport {
-    grid-template-rows: minmax(210px, 34%) minmax(0, 1fr) auto;
-  }
-
   .transport {
     grid-template-columns: auto auto auto auto auto minmax(180px, 1fr);
     grid-template-areas:
