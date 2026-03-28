@@ -101,6 +101,7 @@ self.onmessage = (event) => {
 function createEmptyAnalysisState() {
   return {
     initialized: false,
+    transportMode: 'shared',
     attachedSessionVersion: -1,
     sampleRate: 0,
     sampleCount: 0,
@@ -153,14 +154,19 @@ function normalizeQualityPreset(value) {
 
 function attachAudioSession(runtime, options) {
   const module = runtime.module;
+  const transportMode = options?.transportMode === 'transfer' ? 'transfer' : 'shared';
   const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
   const duration = Number(options?.duration);
   const sampleCount = Number(options?.sampleCount);
   const quality = normalizeQualityPreset(options?.quality);
 
-  if (!options?.pcmSab || !options?.controlSab || !options?.waveformSab || !options?.spectrogramSab) {
+  if (transportMode === 'shared' && (!options?.pcmSab || !options?.controlSab || !options?.waveformSab || !options?.spectrogramSab)) {
     throw new Error('Shared buffers are missing.');
+  }
+
+  if (transportMode === 'transfer' && !options?.samplesBuffer) {
+    throw new Error('Transferable PCM buffer is missing.');
   }
 
   if (!Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(sampleCount) || sampleCount <= 0) {
@@ -182,7 +188,9 @@ function attachAudioSession(runtime, options) {
       throw new Error('Wasm PCM allocation failed.');
     }
 
-    const pcmSource = new Float32Array(options.pcmSab);
+    const pcmSource = transportMode === 'shared'
+      ? new Float32Array(options.pcmSab)
+      : new Float32Array(options.samplesBuffer);
     const pcmTarget = getHeapF32View(module, pcmPointer, sampleCount);
     pcmTarget.set(pcmSource);
 
@@ -197,22 +205,31 @@ function attachAudioSession(runtime, options) {
   analysisState.sampleCount = sampleCount;
   analysisState.duration = duration;
   analysisState.quality = quality;
+  analysisState.transportMode = transportMode;
   analysisState.minFrequency = MIN_FREQUENCY;
   analysisState.maxFrequency = Math.min(MAX_FREQUENCY, sampleRate / 2);
   analysisState.runtimeVariant = runtime.variant;
-  analysisState.pcmSab = options.pcmSab;
-  analysisState.controlSab = options.controlSab;
-  analysisState.controlView = new Int32Array(options.controlSab);
-  analysisState.waveformSab = options.waveformSab;
-  analysisState.waveformMaxColumns = Math.max(1, Math.round(options.waveformMaxColumns || 1));
-  analysisState.spectrogramSab = options.spectrogramSab;
-  analysisState.spectrogramMaxColumns = Math.max(TILE_COLUMN_COUNT, Math.round(options.spectrogramMaxColumns || TILE_COLUMN_COUNT));
-  analysisState.spectrogramMaxRows = Math.max(ROW_BUCKET_SIZE, Math.round(options.spectrogramMaxRows || ROW_BUCKET_SIZE));
+  analysisState.pcmSab = transportMode === 'shared' ? options.pcmSab : null;
+  analysisState.controlSab = transportMode === 'shared' ? options.controlSab : null;
+  analysisState.controlView = transportMode === 'shared' ? new Int32Array(options.controlSab) : null;
+  analysisState.waveformSab = transportMode === 'shared' ? options.waveformSab : null;
+  analysisState.waveformMaxColumns = transportMode === 'shared'
+    ? Math.max(1, Math.round(options.waveformMaxColumns || 1))
+    : 0;
+  analysisState.spectrogramSab = transportMode === 'shared' ? options.spectrogramSab : null;
+  analysisState.spectrogramMaxColumns = transportMode === 'shared'
+    ? Math.max(TILE_COLUMN_COUNT, Math.round(options.spectrogramMaxColumns || TILE_COLUMN_COUNT))
+    : 0;
+  analysisState.spectrogramMaxRows = transportMode === 'shared'
+    ? Math.max(ROW_BUCKET_SIZE, Math.round(options.spectrogramMaxRows || ROW_BUCKET_SIZE))
+    : 0;
   analysisState.slotBusy = new Array(SPECTROGRAM_SLOT_COUNT).fill(false);
   analysisState.slotReleaseResolvers = [];
 
-  Atomics.store(analysisState.controlView, CONTROL_INDEX.sessionVersion, sessionVersion);
-  Atomics.store(analysisState.controlView, CONTROL_INDEX.attached, 1);
+  if (analysisState.controlView) {
+    Atomics.store(analysisState.controlView, CONTROL_INDEX.sessionVersion, sessionVersion);
+    Atomics.store(analysisState.controlView, CONTROL_INDEX.attached, 1);
+  }
 
   if (isNewAudioSession) {
     self.postMessage({
@@ -247,10 +264,10 @@ function requestWaveformSlice(runtime, request) {
 
   const viewStart = clamp(Number(request?.viewStart) || 0, 0, analysisState.duration);
   const viewEnd = clamp(Number(request?.viewEnd) || analysisState.duration, viewStart + (1 / analysisState.sampleRate), analysisState.duration);
-  const columnCount = Math.min(
-    analysisState.waveformMaxColumns,
-    Math.max(1, Math.round(Number(request?.columnCount) || 1)),
-  );
+  const requestedColumnCount = Math.max(1, Math.round(Number(request?.columnCount) || 1));
+  const columnCount = analysisState.transportMode === 'shared'
+    ? Math.min(analysisState.waveformMaxColumns, requestedColumnCount)
+    : requestedColumnCount;
   const slotId = Math.abs(Math.round(Number(request?.slotId) || 0)) % WAVEFORM_SLOT_COUNT;
   const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
   const sequence = analysisState.waveformRequestSequence + 1;
@@ -270,23 +287,40 @@ function requestWaveformSlice(runtime, request) {
   }
 
   const output = getHeapF32View(runtime.module, analysisState.waveformOutputPointer, columnCount * 2);
-  const slotView = getWaveformSlotView(analysisState.waveformSab, analysisState.waveformMaxColumns, slotId);
+  if (analysisState.transportMode === 'shared') {
+    const slotView = getWaveformSlotView(analysisState.waveformSab, analysisState.waveformMaxColumns, slotId);
 
-  slotView.fill(0);
-  slotView.set(output.subarray(0, columnCount * 2));
-  markWaveformSlotReady(analysisState.controlView, slotId, sequence);
+    slotView.fill(0);
+    slotView.set(output.subarray(0, columnCount * 2));
+    markWaveformSlotReady(analysisState.controlView, slotId, sequence);
 
+    self.postMessage({
+      type: 'waveformSliceReady',
+      body: {
+        columnCount,
+        generation,
+        sequence,
+        slotId,
+        transportMode: analysisState.transportMode,
+        viewEnd,
+        viewStart,
+      },
+    });
+    return;
+  }
+
+  const transferableSlice = new Float32Array(output.subarray(0, columnCount * 2));
   self.postMessage({
     type: 'waveformSliceReady',
     body: {
       columnCount,
       generation,
-      sequence,
-      slotId,
+      sliceBuffer: transferableSlice.buffer,
+      transportMode: analysisState.transportMode,
       viewEnd,
       viewStart,
     },
-  });
+  }, [transferableSlice.buffer]);
 }
 
 function cancelGeneration(generation) {
@@ -322,24 +356,32 @@ async function requestSpectrogramTiles(runtime, request) {
       return;
     }
 
-    const slotId = await acquireSpectrogramSlot();
     const cacheKey = buildTileCacheKey(plan, tileIndex);
     const tileStart = tileIndex * plan.tileDuration;
     const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
-    const slotView = getSpectrogramSlotView(
-      analysisState.spectrogramSab,
-      analysisState.spectrogramMaxColumns,
-      analysisState.spectrogramMaxRows,
-      slotId,
-      TILE_COLUMN_COUNT,
-      plan.rowCount,
-    );
+    const usingSharedTransport = analysisState.transportMode === 'shared';
+    const slotId = usingSharedTransport ? await acquireSpectrogramSlot() : null;
+    const slotView = usingSharedTransport
+      ? getSpectrogramSlotView(
+        analysisState.spectrogramSab,
+        analysisState.spectrogramMaxColumns,
+        analysisState.spectrogramMaxRows,
+        slotId,
+        TILE_COLUMN_COUNT,
+        plan.rowCount,
+      )
+      : null;
 
     let fromCache = true;
     const cached = analysisState.tileCache.get(cacheKey);
+    let rgbaTransferBuffer = null;
 
     if (cached) {
-      slotView.set(cached);
+      if (usingSharedTransport) {
+        slotView.set(cached);
+      } else {
+        rgbaTransferBuffer = new Uint8ClampedArray(cached);
+      }
     } else {
       ensureSpectrogramOutputCapacity(runtime.module, TILE_COLUMN_COUNT * plan.rowCount * 4);
 
@@ -356,45 +398,83 @@ async function requestSpectrogramTiles(runtime, request) {
       );
 
       if (!ok) {
-        releaseSpectrogramSlot(slotId);
+        if (usingSharedTransport) {
+          releaseSpectrogramSlot(slotId);
+        }
         throw new Error('Spectrogram tile render failed.');
       }
 
       const output = getHeapU8View(runtime.module, analysisState.spectrogramOutputPointer, TILE_COLUMN_COUNT * plan.rowCount * 4);
-      slotView.set(output);
-      analysisState.tileCache.set(cacheKey, new Uint8ClampedArray(slotView));
+      const cachedTile = new Uint8ClampedArray(output);
+
+      if (usingSharedTransport) {
+        slotView.set(cachedTile);
+      } else {
+        rgbaTransferBuffer = new Uint8ClampedArray(cachedTile);
+      }
+
+      analysisState.tileCache.set(cacheKey, cachedTile);
       fromCache = false;
     }
 
     completedTiles += 1;
-    const sequence = analysisState.spectrogramRequestSequence + 1;
-    analysisState.spectrogramRequestSequence = sequence;
-    markSpectrogramSlotReady(analysisState.controlView, slotId, sequence);
 
-    self.postMessage({
-      type: 'spectrogramTile',
-      body: {
-        columnCount: TILE_COLUMN_COUNT,
-        completedTiles,
-        dprBucket: plan.dprBucket,
-        fftSize: plan.fftSize,
-        fromCache,
-        generation: plan.generation,
-        requestKind: plan.requestKind,
-        rowCount: plan.rowCount,
-        runtimeVariant: analysisState.runtimeVariant,
-        sequence,
-        slotId,
-        tileEnd,
-        tileIndex,
-        tileKey: cacheKey,
-        tileStart,
-        totalTiles: plan.totalTiles,
-        zoomBucket: plan.zoomBucket,
-        targetColumns: plan.targetColumns,
-        targetRows: plan.rowCount,
-      },
-    });
+    if (usingSharedTransport) {
+      const sequence = analysisState.spectrogramRequestSequence + 1;
+      analysisState.spectrogramRequestSequence = sequence;
+      markSpectrogramSlotReady(analysisState.controlView, slotId, sequence);
+
+      self.postMessage({
+        type: 'spectrogramTile',
+        body: {
+          columnCount: TILE_COLUMN_COUNT,
+          completedTiles,
+          dprBucket: plan.dprBucket,
+          fftSize: plan.fftSize,
+          fromCache,
+          generation: plan.generation,
+          requestKind: plan.requestKind,
+          rowCount: plan.rowCount,
+          runtimeVariant: analysisState.runtimeVariant,
+          sequence,
+          slotId,
+          tileEnd,
+          tileIndex,
+          tileKey: cacheKey,
+          tileStart,
+          totalTiles: plan.totalTiles,
+          transportMode: analysisState.transportMode,
+          zoomBucket: plan.zoomBucket,
+          targetColumns: plan.targetColumns,
+          targetRows: plan.rowCount,
+        },
+      });
+    } else {
+      self.postMessage({
+        type: 'spectrogramTile',
+        body: {
+          columnCount: TILE_COLUMN_COUNT,
+          completedTiles,
+          dprBucket: plan.dprBucket,
+          fftSize: plan.fftSize,
+          fromCache,
+          generation: plan.generation,
+          requestKind: plan.requestKind,
+          rowCount: plan.rowCount,
+          rgbaBuffer: rgbaTransferBuffer.buffer,
+          runtimeVariant: analysisState.runtimeVariant,
+          tileEnd,
+          tileIndex,
+          tileKey: cacheKey,
+          tileStart,
+          totalTiles: plan.totalTiles,
+          transportMode: analysisState.transportMode,
+          zoomBucket: plan.zoomBucket,
+          targetColumns: plan.targetColumns,
+          targetRows: plan.rowCount,
+        },
+      }, [rgbaTransferBuffer.buffer]);
+    }
 
     await yieldToEventLoop();
   }
@@ -425,6 +505,7 @@ async function requestSpectrogramTiles(runtime, request) {
 
 function createRequestPlan(request) {
   const preset = QUALITY_PRESETS[analysisState.quality];
+  const usingSharedTransport = analysisState.transportMode === 'shared';
   const requestKind = request?.requestKind === 'overview' ? 'overview' : 'visible';
   const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
   const requestedStart = Number.isFinite(request?.viewStart) ? Number(request.viewStart) : 0;
@@ -443,16 +524,18 @@ function createRequestPlan(request) {
   const samplesPerPixel = spanSamples / Math.max(1, pixelWidth);
   const zoomSelection = selectZoomPolicy(preset, samplesPerPixel);
   const bucketedSamplesPerPixel = quantizeSamplesPerPixel(samplesPerPixel);
-  const rowCount = Math.min(
-    analysisState.spectrogramMaxRows,
-    quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), ROW_BUCKET_SIZE),
-  );
+  const requestedRowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), ROW_BUCKET_SIZE);
+  const rowCount = usingSharedTransport
+    ? Math.min(analysisState.spectrogramMaxRows, requestedRowCount)
+    : requestedRowCount;
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
-    Math.min(
-      analysisState.spectrogramMaxColumns,
-      quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
-    ),
+    usingSharedTransport
+      ? Math.min(
+        analysisState.spectrogramMaxColumns,
+        quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
+      )
+      : quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
   );
   const secondsPerColumn = Math.max(
     1 / analysisState.sampleRate,
@@ -535,6 +618,10 @@ function acquireSpectrogramSlot() {
 }
 
 function releaseSpectrogramSlot(slotId) {
+  if (analysisState.transportMode !== 'shared') {
+    return;
+  }
+
   if (!Number.isFinite(slotId)) {
     return;
   }

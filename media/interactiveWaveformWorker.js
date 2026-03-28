@@ -82,20 +82,26 @@ function clearCanvas() {
   context.clearRect(0, 0, canvas.width, canvas.height);
 }
 function drawFrame() {
-  if (!context || !canvas || !latestSlice || !waveformSab || !controlView || waveformMaxColumns <= 0) {
+  if (!context || !canvas || !latestSlice) {
     clearCanvas();
     return;
   }
-  const {
-    slotId,
-    sequence,
-    columnCount
-  } = latestSlice;
-  if (readWaveformSlotSequence(controlView, slotId) !== sequence) {
-    return;
+  const { columnCount } = latestSlice;
+  let slice = null;
+  if (latestSlice.sliceBuffer) {
+    slice = new Float32Array(latestSlice.sliceBuffer);
+  } else {
+    if (!waveformSab || !controlView || waveformMaxColumns <= 0) {
+      clearCanvas();
+      return;
+    }
+    const { slotId, sequence } = latestSlice;
+    if (readWaveformSlotSequence(controlView, slotId) !== sequence) {
+      return;
+    }
+    const slotByteOffset = Float32Array.BYTES_PER_ELEMENT * waveformMaxColumns * 2 * slotId;
+    slice = new Float32Array(waveformSab, slotByteOffset, waveformMaxColumns * 2);
   }
-  const slotByteOffset = Float32Array.BYTES_PER_ELEMENT * waveformMaxColumns * 2 * slotId;
-  const slice = new Float32Array(waveformSab, slotByteOffset, waveformMaxColumns * 2);
   const deviceWidth = Math.max(1, Math.round(width * renderScale));
   const deviceHeight = Math.max(1, Math.round(height * renderScale));
   const chartTop = Math.round(TOP_PADDING * renderScale);
@@ -123,7 +129,7 @@ function drawFrame() {
     type: "waveformRendered",
     payload: {
       generation: latestSlice.generation,
-      slotId
+      slotId: latestSlice.slotId ?? -1
     }
   });
 }

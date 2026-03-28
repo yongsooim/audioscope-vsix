@@ -41,7 +41,10 @@ npm run compile
 개발 모드에서는 `exampleFiles/sample-tone.wav`가 `Wave Preview`로 자동으로 열립니다.
 원하지 않으면 VS Code 설정에서 `wavePreview.openSampleOnStartupInDevelopment`를 `false`로 바꾸면 됩니다.
 
-현재 런타임 지원 범위는 `VS Code desktop + crossOriginIsolated + SharedArrayBuffer`입니다. 조건을 만족하지 않으면 preview는 unsupported 상태로 중단됩니다.
+런타임은 두 경로를 지원합니다.
+
+- `crossOriginIsolated + SharedArrayBuffer` 가능 시: SAB fast path
+- 그 외 VS Code desktop 환경: transferable fallback path
 
 기본 등록 우선순위는 `option`이라서, 오디오 파일을 연 뒤 아래 중 하나로 미리보기를 사용할 수 있습니다.
 
