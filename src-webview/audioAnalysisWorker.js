@@ -5,28 +5,32 @@ import wasmBinarySimd from '../node_modules/@echogarden/pffft-wasm/dist/simd/pff
 
 const FORWARD_DIRECTION = 0;
 const REAL_TRANSFORM = 0;
-const MIN_FREQUENCY = 40;
-const MAX_FREQUENCY = 12000;
+const MIN_FREQUENCY = 20;
+const MAX_FREQUENCY = 20000;
 const MIN_DB = -92;
 const MAX_DB = -12;
 const TILE_COLUMN_COUNT = 256;
 const ROW_BUCKET_SIZE = 32;
+const LOW_FREQUENCY_ENHANCEMENT_MAX_FREQUENCY = 1200;
 
 const QUALITY_PRESETS = {
   balanced: {
     rowsMultiplier: 1.5,
     colsMultiplier: 2.5,
     fftSizes: [2048, 4096, 8192],
+    lowFrequencyDecimationFactor: 2,
   },
   high: {
     rowsMultiplier: 2.5,
     colsMultiplier: 4,
     fftSizes: [4096, 8192, 16384],
+    lowFrequencyDecimationFactor: 4,
   },
   max: {
     rowsMultiplier: 4,
     colsMultiplier: 6,
     fftSizes: [8192, 16384, 16384],
+    lowFrequencyDecimationFactor: 4,
   },
 };
 
@@ -364,6 +368,7 @@ function analyzeTile(module, plan, tileIndex, cacheKey) {
   const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
   const tileBuffer = new Float32Array(TILE_COLUMN_COUNT * plan.rowCount);
   const powerSpectrum = new Float32Array(Math.max(2, Math.floor(plan.fftSize / 2) + 1));
+  const lowFrequencyEnhancement = createLowFrequencyEnhancement(plan, bandRanges);
   const safeTileSpan = Math.max(1 / analysisState.sampleRate, tileEnd - tileStart);
 
   for (let columnIndex = 0; columnIndex < TILE_COLUMN_COUNT; columnIndex += 1) {
@@ -387,12 +392,37 @@ function analyzeTile(module, plan, tileIndex, cacheKey) {
       fftResource.workPointer,
       FORWARD_DIRECTION,
     );
+    writePowerSpectrum({
+      fftSize: plan.fftSize,
+      outputView: fftResource.outputView,
+      powerSpectrum,
+    });
+
+    if (lowFrequencyEnhancement) {
+      writeDecimatedFftInput({
+        centerSample,
+        decimationFactor: lowFrequencyEnhancement.decimationFactor,
+        fftResource,
+        fftSize: plan.fftSize,
+      });
+      module._pffft_transform_ordered(
+        fftResource.setup,
+        fftResource.inputPointer,
+        fftResource.outputPointer,
+        fftResource.workPointer,
+        FORWARD_DIRECTION,
+      );
+      writePowerSpectrum({
+        fftSize: plan.fftSize,
+        outputView: fftResource.outputView,
+        powerSpectrum: lowFrequencyEnhancement.powerSpectrum,
+      });
+    }
 
     writeSpectrogramColumn({
       bandRanges,
       columnOffset: columnIndex,
-      fftSize: plan.fftSize,
-      outputView: fftResource.outputView,
+      lowFrequencyEnhancement,
       powerSpectrum,
       rowCount: plan.rowCount,
       target: tileBuffer,
@@ -406,6 +436,42 @@ function analyzeTile(module, plan, tileIndex, cacheKey) {
     tileEnd,
     tileStart,
     key: cacheKey,
+  };
+}
+
+function createLowFrequencyEnhancement(plan, bandRanges) {
+  const preset = QUALITY_PRESETS[analysisState.quality];
+  const decimationFactor = Math.max(1, preset.lowFrequencyDecimationFactor || 1);
+
+  if (decimationFactor <= 1) {
+    return null;
+  }
+
+  const effectiveSampleRate = analysisState.sampleRate / decimationFactor;
+  const maximumFrequency = Math.min(
+    LOW_FREQUENCY_ENHANCEMENT_MAX_FREQUENCY,
+    (effectiveSampleRate / 2) * 0.92,
+    analysisState.maxFrequency,
+  );
+
+  if (maximumFrequency <= analysisState.minFrequency * 1.25) {
+    return null;
+  }
+
+  const enhancedBandRanges = createBandRangesForSampleRate({
+    fftSize: plan.fftSize,
+    maxFrequency: maximumFrequency,
+    minFrequency: analysisState.minFrequency,
+    rowCount: plan.rowCount,
+    sampleRate: effectiveSampleRate,
+    template: bandRanges,
+  });
+
+  return {
+    decimationFactor,
+    enhancedBandRanges,
+    maxFrequency: maximumFrequency,
+    powerSpectrum: new Float32Array(Math.max(2, Math.floor(plan.fftSize / 2) + 1)),
   };
 }
 
@@ -501,27 +567,26 @@ function createLogBandRanges({ fftSize, maxFrequency, minFrequency, rows, sample
 
     bandRanges.push({
       endBin,
+      endFrequency,
       startBin,
+      startFrequency,
     });
   }
 
   return bandRanges;
 }
 
-function writeSpectrogramColumn({ bandRanges, columnOffset, fftSize, outputView, powerSpectrum, rowCount, target }) {
-  const maximumBin = Math.max(2, Math.floor(fftSize / 2));
-  const normalizationFactor = (fftSize / 2) ** 2;
-
-  powerSpectrum.fill(0);
-
-  for (let bin = 1; bin < maximumBin; bin += 1) {
-    const real = outputView[bin * 2];
-    const imaginary = outputView[(bin * 2) + 1];
-    powerSpectrum[bin] = ((real * real) + (imaginary * imaginary)) / normalizationFactor;
-  }
-
+function writeSpectrogramColumn({ bandRanges, columnOffset, lowFrequencyEnhancement, powerSpectrum, rowCount, target }) {
   for (let row = 0; row < rowCount; row += 1) {
-    const { startBin, endBin } = bandRanges[row];
+    const range = bandRanges[row];
+    const useLowFrequencyEnhancement = shouldUseLowFrequencyEnhancement(range, lowFrequencyEnhancement);
+    const activeRange = useLowFrequencyEnhancement
+      ? lowFrequencyEnhancement.enhancedBandRanges[row]
+      : range;
+    const activePowerSpectrum = useLowFrequencyEnhancement
+      ? lowFrequencyEnhancement.powerSpectrum
+      : powerSpectrum;
+    const { startBin, endBin } = activeRange;
     const bandSize = Math.max(1, endBin - startBin);
     let weightedEnergy = 0;
     let totalWeight = 0;
@@ -531,7 +596,7 @@ function writeSpectrogramColumn({ bandRanges, columnOffset, fftSize, outputView,
       const taper = 1 - Math.abs((position * 2) - 1);
       const weight = 0.7 + (taper * 0.3);
 
-      weightedEnergy += powerSpectrum[bin] * weight;
+      weightedEnergy += activePowerSpectrum[bin] * weight;
       totalWeight += weight;
     }
 
@@ -542,6 +607,65 @@ function writeSpectrogramColumn({ bandRanges, columnOffset, fftSize, outputView,
 
     target[(columnOffset * rowCount) + targetRow] = clamp(normalized, 0, 1);
   }
+}
+
+function writePowerSpectrum({ fftSize, outputView, powerSpectrum }) {
+  const maximumBin = Math.max(2, Math.floor(fftSize / 2));
+  const normalizationFactor = (fftSize / 2) ** 2;
+
+  powerSpectrum.fill(0);
+
+  for (let bin = 1; bin < maximumBin; bin += 1) {
+    const real = outputView[bin * 2];
+    const imaginary = outputView[(bin * 2) + 1];
+    powerSpectrum[bin] = ((real * real) + (imaginary * imaginary)) / normalizationFactor;
+  }
+}
+
+function writeDecimatedFftInput({ centerSample, decimationFactor, fftResource, fftSize }) {
+  const decimatedWindowStart = centerSample - Math.floor((fftSize * decimationFactor) / 2);
+
+  for (let offset = 0; offset < fftSize; offset += 1) {
+    let sum = 0;
+
+    for (let tap = 0; tap < decimationFactor; tap += 1) {
+      const sourceIndex = decimatedWindowStart + (offset * decimationFactor) + tap;
+      sum += sourceIndex >= 0 && sourceIndex < analysisState.samples.length
+        ? analysisState.samples[sourceIndex]
+        : 0;
+    }
+
+    fftResource.inputView[offset] = (sum / decimationFactor) * fftResource.window[offset];
+  }
+}
+
+function createBandRangesForSampleRate({ fftSize, maxFrequency, minFrequency, rowCount, sampleRate, template }) {
+  const nyquist = sampleRate / 2;
+  const maximumBin = Math.max(2, Math.floor(fftSize / 2));
+
+  return template.slice(0, rowCount).map((range) => {
+    const startFrequency = Math.min(
+      Math.max(minFrequency, range.startFrequency),
+      maxFrequency * 0.999,
+    );
+    const endFrequency = Math.min(
+      maxFrequency,
+      Math.max(startFrequency * 1.01, range.endFrequency),
+    );
+    const startBin = clamp(Math.floor((startFrequency / nyquist) * maximumBin), 1, maximumBin - 1);
+    const endBin = clamp(Math.ceil((endFrequency / nyquist) * maximumBin), startBin + 1, maximumBin);
+
+    return {
+      endBin,
+      endFrequency,
+      startBin,
+      startFrequency,
+    };
+  });
+}
+
+function shouldUseLowFrequencyEnhancement(range, lowFrequencyEnhancement) {
+  return Boolean(lowFrequencyEnhancement) && range.endFrequency <= lowFrequencyEnhancement.maxFrequency;
 }
 
 function buildTileCacheKey(plan, tileIndex) {

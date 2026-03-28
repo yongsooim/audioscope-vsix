@@ -9,9 +9,9 @@ const analysisWorkerScriptUri = document.body.dataset.workerSrc;
 const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc;
 const DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, 2);
 
-const SPECTROGRAM_MIN_FREQUENCY = 40;
-const SPECTROGRAM_MAX_FREQUENCY = 12000;
-const SPECTROGRAM_TICKS = [12000, 8000, 4000, 2000, 1000, 400, 100, 40];
+const SPECTROGRAM_MIN_FREQUENCY = 20;
+const SPECTROGRAM_MAX_FREQUENCY = 20000;
+const SPECTROGRAM_TICKS = [20000, 16000, 12000, 8000, 4000, 2000, 1000, 400, 100, 40, 20];
 const SPECTROGRAM_OVERVIEW_WIDTH_SCALE = 0.45;
 const SPECTROGRAM_OVERVIEW_HEIGHT_SCALE = 0.7;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
@@ -51,6 +51,8 @@ const elements = {
   waveZoomIn: document.getElementById('wave-zoom-in'),
   waveFollow: document.getElementById('wave-follow'),
   spectrogram: document.getElementById('spectrogram'),
+  spectrogramProgress: document.getElementById('spectrogram-progress'),
+  spectrogramCursor: document.getElementById('spectrogram-cursor'),
   spectrogramAxis: document.getElementById('spectrogram-axis'),
   spectrogramGuides: document.getElementById('spectrogram-guides'),
   jumpStart: document.getElementById('jump-start'),
@@ -729,8 +731,9 @@ function renderSpectrogramBackground() {
   elements.spectrogram.height = pixelHeight;
 
   const background = spectrogramContext.createLinearGradient(0, 0, 0, elements.spectrogram.height);
-  background.addColorStop(0, '#ffffff');
-  background.addColorStop(1, '#edf4ff');
+  background.addColorStop(0, '#171127');
+  background.addColorStop(0.46, '#0d0b19');
+  background.addColorStop(1, '#04050c');
 
   spectrogramContext.fillStyle = background;
   spectrogramContext.fillRect(0, 0, elements.spectrogram.width, elements.spectrogram.height);
@@ -1566,6 +1569,9 @@ function applyWaveformPlaybackTime(timeSeconds) {
     elements.waveformProgress.style.width = '0%';
     elements.waveformCursor.style.display = 'none';
     elements.waveformCursor.style.left = '0%';
+    elements.spectrogramProgress.style.width = '0%';
+    elements.spectrogramCursor.style.display = 'none';
+    elements.spectrogramCursor.style.left = '0%';
     return;
   }
 
@@ -1575,6 +1581,9 @@ function applyWaveformPlaybackTime(timeSeconds) {
   elements.waveformProgress.style.width = `${progressPercent}%`;
   elements.waveformCursor.style.left = `${progressPercent}%`;
   elements.waveformCursor.style.display = isCursorVisible ? 'block' : 'none';
+  elements.spectrogramProgress.style.width = `${progressPercent}%`;
+  elements.spectrogramCursor.style.left = `${progressPercent}%`;
+  elements.spectrogramCursor.style.display = isCursorVisible ? 'block' : 'none';
 }
 
 function syncFollowView(timeSeconds) {
@@ -2501,14 +2510,16 @@ function buildSpectrogramPalette() {
     const t = index / 255;
     let color;
 
-    if (t < 0.18) {
-      color = interpolateColor([248, 251, 255], [226, 237, 255], t / 0.18);
-    } else if (t < 0.45) {
-      color = interpolateColor([226, 237, 255], [121, 169, 255], (t - 0.18) / 0.27);
-    } else if (t < 0.78) {
-      color = interpolateColor([121, 169, 255], [36, 92, 223], (t - 0.45) / 0.33);
+    if (t < 0.14) {
+      color = interpolateColor([4, 4, 12], [34, 17, 70], t / 0.14);
+    } else if (t < 0.34) {
+      color = interpolateColor([34, 17, 70], [91, 31, 126], (t - 0.14) / 0.2);
+    } else if (t < 0.58) {
+      color = interpolateColor([91, 31, 126], [179, 68, 112], (t - 0.34) / 0.24);
+    } else if (t < 0.82) {
+      color = interpolateColor([179, 68, 112], [248, 143, 84], (t - 0.58) / 0.24);
     } else {
-      color = interpolateColor([36, 92, 223], [245, 122, 32], (t - 0.78) / 0.22);
+      color = interpolateColor([248, 143, 84], [252, 236, 176], (t - 0.82) / 0.18);
     }
 
     const offset = index * 4;

@@ -13,6 +13,19 @@
   --wave-surface: #020617;
   --wave-surface-border: rgba(15, 23, 42, 0.68);
   --wave-track: rgba(15, 23, 42, 0.96);
+  --spectrogram-surface-top: #161126;
+  --spectrogram-surface-mid: #0e0c1c;
+  --spectrogram-surface-bottom: #04050c;
+  --spectrogram-axis-bg: rgba(9, 9, 18, 0.98);
+  --spectrogram-axis-border: rgba(255, 225, 181, 0.14);
+  --spectrogram-guide: rgba(250, 191, 124, 0.1);
+  --spectrogram-tick: rgba(255, 196, 136, 0.32);
+  --spectrogram-label: rgba(255, 233, 198, 0.86);
+  --overview-shell: linear-gradient(180deg, #eef3fb 0%, #e2eaf6 100%);
+  --overview-track: #1f2944;
+  --overview-track-border: rgba(103, 129, 178, 0.28);
+  --overview-thumb-start: #4f8cff;
+  --overview-thumb-end: #2f6df3;
 }
 
 *,
@@ -39,6 +52,8 @@ body {
   position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
+  margin: 0;
+  padding: 0;
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -47,7 +62,9 @@ body {
 
 .viewport {
   display: grid;
-  grid-template-rows: minmax(232px, 44%) minmax(0, 1fr);
+  grid-template-rows: minmax(224px, 38%) minmax(0, 1fr) auto;
+  margin: 0;
+  padding: 0;
   width: 100%;
   min-height: 0;
   overflow: hidden;
@@ -55,9 +72,10 @@ body {
 
 .wave-panel {
   display: grid;
-  grid-template-rows: auto minmax(168px, 1fr) auto auto;
+  grid-template-rows: auto minmax(168px, 1fr) auto;
+  margin: 0;
+  padding: 0;
   min-height: 0;
-  border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, #f8fbfe 0%, #eaf1fa 100%);
   box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.08);
 }
@@ -67,7 +85,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 14px 8px;
+  padding: 10px 0 8px;
 }
 
 .wave-toolbar-copy {
@@ -135,11 +153,12 @@ body {
 
 .waveform-viewport {
   position: relative;
-  margin: 0 14px;
+  margin: 0;
+  padding: 0;
   min-height: 168px;
   overflow: hidden;
   border: 1px solid var(--wave-surface-border);
-  border-radius: 12px;
+  border-radius: 0;
   background: linear-gradient(180deg, #020617 0%, #0a1224 100%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   cursor: crosshair;
@@ -223,9 +242,9 @@ body {
 
 .waveform-axis {
   position: relative;
-  height: 28px;
-  margin: 0 14px;
-  border-top: 1px solid rgba(15, 23, 42, 0.12);
+  height: 30px;
+  margin: 0;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
 }
 
 .waveform-axis-tick {
@@ -247,14 +266,23 @@ body {
   white-space: nowrap;
 }
 
+.viewport-overview-shell {
+  margin: 0;
+  padding: 10px 0 12px;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  background: var(--overview-shell);
+}
+
 .waveform-overview {
   position: relative;
-  height: 10px;
-  margin: 0 14px 10px;
+  height: 14px;
+  margin: 0;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--wave-track);
-  box-shadow: inset 0 0 0 1px rgba(51, 65, 85, 0.9);
+  background: linear-gradient(180deg, #26324f 0%, var(--overview-track) 100%);
+  box-shadow:
+    inset 0 0 0 1px var(--overview-track-border),
+    inset 0 1px 3px rgba(255, 255, 255, 0.08);
   cursor: pointer;
 }
 
@@ -263,26 +291,40 @@ body {
   inset-block: 0;
   inset-inline-start: 0;
   border-radius: 999px;
-  background: rgba(59, 130, 246, 0.92);
-  box-shadow: 0 0 0 1px rgba(191, 219, 254, 0.25);
+  background: linear-gradient(90deg, var(--overview-thumb-start) 0%, var(--overview-thumb-end) 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(191, 219, 254, 0.3),
+    0 0 0 1px rgba(37, 99, 235, 0.16);
   will-change: transform;
 }
 
 .spectrogram-panel {
-  display: grid;
-  grid-template-columns: 68px minmax(0, 1fr);
-  background: linear-gradient(180deg, #f7faff 0%, #e7effb 100%);
+  position: relative;
+  display: block;
+  margin: 0;
+  min-height: 0;
+  padding: 4px 0 0;
+  background: linear-gradient(180deg, #eef4fb 0%, #e8eef8 100%);
 }
 
 .spectrogram-axis {
-  position: relative;
-  border-right: 1px solid rgba(15, 23, 42, 0.1);
-  background: linear-gradient(180deg, rgba(249, 251, 254, 0.95) 0%, rgba(236, 242, 250, 0.9) 100%);
+  position: absolute;
+  inset: 4px auto 0 0;
+  width: 76px;
+  z-index: 4;
+  overflow: visible;
+  pointer-events: none;
 }
 
 .spectrogram-stage {
   position: relative;
+  margin: 0;
+  padding: 0;
+  min-height: 0;
   overflow: hidden;
+  border: 1px solid var(--spectrogram-axis-border);
+  border-radius: 0;
+  background: linear-gradient(180deg, var(--spectrogram-surface-top) 0%, var(--spectrogram-surface-mid) 48%, var(--spectrogram-surface-bottom) 100%);
 }
 
 .spectrogram-canvas {
@@ -292,9 +334,37 @@ body {
   cursor: pointer;
 }
 
+.spectrogram-progress {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  z-index: 1;
+  background: rgba(249, 115, 22, 0.1);
+  pointer-events: none;
+}
+
+.spectrogram-cursor {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: none;
+  width: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.spectrogram-cursor::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.3);
+}
+
 .spectrogram-guides {
   position: absolute;
   inset: 0;
+  z-index: 2;
   pointer-events: none;
 }
 
@@ -302,35 +372,34 @@ body {
   position: absolute;
   left: 0;
   right: 0;
-  border-top: 1px solid rgba(15, 23, 42, 0.1);
+  border-top: 1px solid var(--spectrogram-guide);
   transform: translateY(-0.5px);
 }
 
 .spectrogram-tick {
   position: absolute;
   left: 0;
-  right: 0;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  padding-right: 10px;
+  justify-content: flex-start;
+  padding-left: 12px;
   transform: translateY(-50%);
 }
 
 .spectrogram-tick::after {
-  content: "";
-  width: 8px;
-  border-top: 1px solid rgba(15, 23, 42, 0.28);
+  display: none;
 }
 
 .spectrogram-tick-label {
-  color: rgba(15, 23, 42, 0.78);
+  color: var(--spectrogram-label);
   font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1;
   white-space: nowrap;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.92),
+    0 0 10px rgba(0, 0, 0, 0.5);
 }
 
 .transport {
@@ -338,7 +407,8 @@ body {
   grid-template-columns: auto auto auto auto auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
-  padding: 10px 16px 12px;
+  margin: 0;
+  padding: 10px 0 12px;
   border-top: 1px solid var(--border);
   background: var(--panel);
   backdrop-filter: blur(10px);
@@ -499,6 +569,10 @@ body {
 }
 
 @media (max-width: 960px) {
+  .viewport {
+    grid-template-rows: minmax(210px, 34%) minmax(0, 1fr) auto;
+  }
+
   .transport {
     grid-template-columns: auto auto auto auto auto minmax(180px, 1fr);
     grid-template-areas:
@@ -539,6 +613,21 @@ body {
   #analysis-status {
     grid-area: status;
     text-align: right;
+  }
+}
+
+@media (max-width: 720px) {
+  .spectrogram-panel {
+    padding: 2px 0 0;
+  }
+
+  .spectrogram-axis {
+    inset: 2px auto 0 0;
+    width: 60px;
+  }
+
+  .viewport-overview-shell {
+    padding: 8px 0 10px;
   }
 }
 
