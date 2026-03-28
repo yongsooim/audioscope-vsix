@@ -160,6 +160,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           <div id="waveform-viewport" class="waveform-viewport" aria-label="Waveform">
             <div id="waveform-canvas-host" class="waveform-canvas-host" aria-hidden="true"></div>
             <div id="waveform-hit-target" class="waveform-hit-target" aria-hidden="true"></div>
+            <div id="waveform-hover-tooltip" class="surface-hover-tooltip" aria-hidden="true"></div>
             <div id="waveform-selection" class="waveform-selection" aria-hidden="true"></div>
             <div id="waveform-progress" class="waveform-progress" aria-hidden="true"></div>
             <div id="waveform-cursor" class="waveform-cursor" aria-hidden="true"></div>
@@ -172,6 +173,27 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           <div id="spectrogram-axis" class="spectrogram-axis" aria-hidden="true"></div>
           <div class="spectrogram-stage">
             <canvas id="spectrogram" class="spectrogram-canvas" aria-label="Spectrogram"></canvas>
+            <div id="spectrogram-meta" class="spectrogram-meta">
+              <label class="spectrogram-control">
+                <span class="spectrogram-control-label">FFT</span>
+                <select id="spectrogram-fft-select" class="spectrogram-control-select" aria-label="Spectrogram FFT size">
+                  <option value="1024">1024</option>
+                  <option value="2048">2048</option>
+                  <option value="4096">4096</option>
+                  <option value="8192" selected>8192</option>
+                  <option value="16384">16384</option>
+                </select>
+              </label>
+              <label class="spectrogram-control">
+                <span class="spectrogram-control-label">Overlap</span>
+                <select id="spectrogram-overlap-select" class="spectrogram-control-select" aria-label="Spectrogram overlap ratio">
+                  <option value="0.5">50%</option>
+                  <option value="0.75" selected>75%</option>
+                  <option value="0.875">87.5%</option>
+                </select>
+              </label>
+            </div>
+            <div id="spectrogram-hover-tooltip" class="surface-hover-tooltip surface-hover-tooltip-detail" aria-hidden="true"></div>
             <div id="spectrogram-selection" class="spectrogram-selection" aria-hidden="true"></div>
             <div id="spectrogram-progress" class="spectrogram-progress" aria-hidden="true"></div>
             <div id="spectrogram-cursor" class="spectrogram-cursor" aria-hidden="true"></div>
