@@ -92,8 +92,9 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
+    "build:wave-core": "node ./scripts/build-wave-core.mjs",
     "build:webview": "node ./scripts/build-webview.mjs",
-    "compile": "tsc -p ./ && npm run build:webview",
+    "compile": "npm run build:wave-core && npm run build:webview && tsc -p ./",
     "watch": "tsc -w -p ./"
   },
   "devDependencies": {
@@ -102,7 +103,5 @@
     "esbuild": "^0.27.4",
     "typescript": "^5.9.2"
   },
-  "dependencies": {
-    "@echogarden/pffft-wasm": "^0.4.2"
-  }
+  "dependencies": {}
 }
