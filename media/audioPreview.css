@@ -20,7 +20,7 @@
   --spectrogram-axis-border: rgba(179, 136, 255, 0.14);
   --spectrogram-guide: rgba(251, 146, 60, 0.12);
   --spectrogram-tick: rgba(255, 196, 136, 0.28);
-  --spectrogram-label: rgba(255, 233, 198, 0.86);
+  --spectrogram-label: rgba(255, 255, 255, 0.96);
   --overview-shell: linear-gradient(180deg, #08101d 0%, #050b16 100%);
   --overview-track: #18233c;
   --overview-track-border: rgba(103, 129, 178, 0.22);
@@ -537,7 +537,7 @@ body {
 
 .transport {
   display: grid;
-  grid-template-columns: auto auto auto auto auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto auto auto auto auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   width: 100%;
@@ -746,11 +746,7 @@ body {
 }
 
 .analysis-status {
-  min-width: 150px;
-  color: var(--fg-muted);
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
+  display: none;
 }
 
 .analysis-status.error {
@@ -762,7 +758,7 @@ body {
     grid-template-columns: auto auto auto auto auto minmax(180px, 1fr);
     grid-template-areas:
       "start back play forward end slider"
-      "time time status status status status";
+      "time time time time time time";
     row-gap: 8px;
   }
 
@@ -796,8 +792,7 @@ body {
   }
 
   #analysis-status {
-    grid-area: status;
-    text-align: right;
+    display: none;
   }
 }
 
