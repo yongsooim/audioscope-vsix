@@ -172,9 +172,13 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           <div id="spectrogram-axis" class="spectrogram-axis" aria-hidden="true"></div>
           <div class="spectrogram-stage">
             <canvas id="spectrogram" class="spectrogram-canvas" aria-label="Spectrogram"></canvas>
+            <div id="spectrogram-selection" class="spectrogram-selection" aria-hidden="true"></div>
             <div id="spectrogram-progress" class="spectrogram-progress" aria-hidden="true"></div>
             <div id="spectrogram-cursor" class="spectrogram-cursor" aria-hidden="true"></div>
+            <div id="spectrogram-loop-start" class="waveform-loop-handle spectrogram-loop-handle" aria-hidden="true"></div>
+            <div id="spectrogram-loop-end" class="waveform-loop-handle spectrogram-loop-handle" aria-hidden="true"></div>
             <div id="spectrogram-guides" class="spectrogram-guides" aria-hidden="true"></div>
+            <div id="spectrogram-hit-target" class="spectrogram-hit-target" aria-hidden="true"></div>
           </div>
         </div>
         <div class="viewport-overview-shell">
