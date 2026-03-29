@@ -38,6 +38,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0 !important;
@@ -79,24 +83,33 @@ body {
 .media-metadata-panel {
   position: relative;
   z-index: 8;
-  min-width: 0;
-  max-width: min(520px, 42vw);
-  justify-self: center;
-  grid-area: meta;
+  flex: 1 1 320px;
+  min-width: min(100%, 260px);
+  max-width: min(100%, 560px);
 }
 
 .media-metadata-summary {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(12, 18, 32, 0.9) 0%, rgba(7, 12, 23, 0.86) 100%);
   min-width: 0;
   color: rgba(223, 233, 250, 0.84);
   font-size: 10px;
   font-weight: 600;
-  line-height: 1.2;
+  line-height: 1.25;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   outline: none;
-  text-align: center;
+  text-align: left;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 10px 22px rgba(0, 0, 0, 0.14);
 }
 
 .media-metadata-panel[data-state="pending"] .media-metadata-summary {
@@ -116,7 +129,7 @@ body {
 .media-metadata-detail {
   position: absolute;
   top: 100%;
-  left: 50%;
+  left: 0;
   z-index: 12;
   display: grid;
   gap: 12px;
@@ -133,7 +146,7 @@ body {
   backdrop-filter: blur(12px);
   opacity: 0;
   pointer-events: none;
-  transform: translate3d(-50%, 8px, 0);
+  transform: translate3d(0, 8px, 0);
   transition: opacity 140ms ease, transform 140ms ease;
 }
 
@@ -141,7 +154,7 @@ body {
 .media-metadata-panel:focus-within .media-metadata-detail {
   opacity: 1;
   pointer-events: auto;
-  transform: translate3d(-50%, 0, 0);
+  transform: translate3d(0, 0, 0);
 }
 
 .media-metadata-section {
@@ -212,44 +225,73 @@ body {
 
 .wave-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: start;
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px 16px;
   padding: 10px 0 8px;
 }
 
-.wave-toolbar-copy {
-  display: grid;
-  gap: 4px;
+.wave-toolbar-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
   min-width: 0;
-  grid-area: copy;
 }
 
-.wave-hint {
-  color: var(--fg-muted);
-  font-size: 11px;
+.wave-toolbar-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  min-width: 0;
+  padding: 6px 11px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(12, 18, 32, 0.9) 0%, rgba(7, 12, 23, 0.84) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 10px 22px rgba(0, 0, 0, 0.12);
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.01em;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.wave-toolbar-pill {
+  flex: 0 0 auto;
+  color: rgba(219, 234, 254, 0.96);
+  font-weight: 700;
 }
 
 .wave-loop-label {
+  flex: 0 1 auto;
   color: rgba(110, 168, 255, 0.96);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
+  max-width: min(220px, 24vw);
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.wave-toolbar-pill-loop {
+  border-color: rgba(96, 165, 250, 0.2);
+  background: linear-gradient(180deg, rgba(11, 20, 40, 0.94) 0%, rgba(8, 14, 28, 0.9) 100%);
 }
 
 .wave-toolbar-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   justify-self: end;
-  grid-area: actions;
+  padding: 5px 6px;
+  border: 1px solid rgba(116, 143, 189, 0.14);
+  border-radius: 14px;
+  background: rgba(6, 10, 21, 0.38);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 10px 24px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(8px);
 }
 
 .wave-tool-button {
@@ -680,7 +722,7 @@ body {
 
 .transport {
   display: grid;
-  grid-template-columns: auto auto auto auto auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto auto auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
   width: 100%;
@@ -950,35 +992,33 @@ body {
 
 @media (max-width: 960px) {
   .wave-toolbar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "copy actions"
-      "meta meta";
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
     row-gap: 8px;
   }
 
   .media-metadata-panel {
-    grid-area: meta;
-    width: 100%;
+    flex: 1 1 100%;
     max-width: none;
-    justify-self: stretch;
   }
 
-  .media-metadata-summary {
-    text-align: left;
+  .wave-toolbar-actions {
+    justify-self: stretch;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .wave-toolbar-info {
+    flex-wrap: wrap;
   }
 
   .transport {
-    grid-template-columns: auto auto auto auto auto minmax(180px, 1fr);
+    grid-template-columns: auto auto auto minmax(180px, 1fr);
     grid-template-areas:
-      "start back play forward end slider"
-      "time time time time time time"
-      "loudness loudness loudness loudness loudness loudness";
+      "back play forward slider"
+      "time time time time"
+      "loudness loudness loudness loudness";
     row-gap: 8px;
-  }
-
-  #jump-start {
-    grid-area: start;
   }
 
   #seek-backward {
@@ -991,10 +1031,6 @@ body {
 
   #seek-forward {
     grid-area: forward;
-  }
-
-  #jump-end {
-    grid-area: end;
   }
 
   #waveform-overview {
@@ -1019,6 +1055,21 @@ body {
 @media (max-width: 720px) {
   :root {
     --surface-inline-padding: 12px;
+  }
+
+  .wave-toolbar-row {
+    gap: 6px;
+  }
+
+  .wave-toolbar-pill,
+  .media-metadata-summary {
+    font-size: 10px;
+  }
+
+  .media-metadata-panel,
+  .wave-loop-label {
+    width: 100%;
+    max-width: none;
   }
 
   .spectrogram-panel {

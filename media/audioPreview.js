@@ -69,6 +69,7 @@ const elements = {
   mediaMetadataPanel: document.getElementById('media-metadata-panel'),
   mediaMetadataSummary: document.getElementById('media-metadata-summary'),
   mediaMetadataDetail: document.getElementById('media-metadata-detail'),
+  waveToolbarInfo: document.getElementById('wave-toolbar-info'),
   waveformViewport: document.getElementById('waveform-viewport'),
   waveformCanvasHost: document.getElementById('waveform-canvas-host'),
   waveformHitTarget: document.getElementById('waveform-hit-target'),
@@ -84,6 +85,7 @@ const elements = {
   waveformOverviewThumb: document.getElementById('waveform-overview-thumb'),
   waveHint: document.getElementById('wave-hint'),
   waveLoopLabel: document.getElementById('wave-loop-label'),
+  waveZoomChip: document.getElementById('wave-zoom-chip'),
   waveClearLoop: document.getElementById('wave-clear-loop'),
   waveZoomOut: document.getElementById('wave-zoom-out'),
   waveZoomReset: document.getElementById('wave-zoom-reset'),
@@ -104,11 +106,9 @@ const elements = {
   spectrogramAxis: document.getElementById('spectrogram-axis'),
   spectrogramGuides: document.getElementById('spectrogram-guides'),
   spectrogramHitTarget: document.getElementById('spectrogram-hit-target'),
-  jumpStart: document.getElementById('jump-start'),
   seekBackward: document.getElementById('seek-backward'),
   playToggle: document.getElementById('play-toggle'),
   seekForward: document.getElementById('seek-forward'),
-  jumpEnd: document.getElementById('jump-end'),
   timeline: document.getElementById('timeline'),
   timelineHoverTooltip: document.getElementById('timeline-hover-tooltip'),
   timeReadout: document.getElementById('time-readout'),
@@ -719,8 +719,6 @@ function renderMediaMetadata() {
   const detail = metadata.detail;
   const detailSummary = detail?.summary ?? null;
 
-  appendMetadataDetailRow(overviewSection, 'Decode', formatMetadataDecodeSourceLabel());
-  appendMetadataDetailRow(overviewSection, 'Probe', detail?.probeSource === 'ffprobe' ? 'ffprobe' : 'Unavailable');
   appendMetadataDetailRow(overviewSection, 'Format', detail?.formatLongName || detail?.formatName || detailSummary?.containerText || null);
   appendMetadataDetailRow(overviewSection, 'Codec', detailSummary?.codecText || null);
   appendMetadataDetailRow(overviewSection, 'Sample Rate', detailSummary?.sampleRateText || null);
@@ -729,7 +727,27 @@ function renderMediaMetadata() {
   appendMetadataDetailRow(overviewSection, 'Duration', detailSummary?.durationText || null);
   appendMetadataDetailRow(overviewSection, 'Size', detailSummary?.sizeText || null);
 
+  const streamItems = Array.isArray(detail?.streams)
+    ? detail.streams
+      .map((stream) => formatMetadataStreamSummary(stream))
+      .filter(Boolean)
+    : [];
+  appendMetadataListSection(detailRoot, 'Streams', streamItems);
+  appendMetadataListSection(detailRoot, 'Tags', formatMetadataTags(detail?.tags));
+  appendMetadataListSection(detailRoot, 'Chapters', formatMetadataChapters(detail?.chapters));
+
+  const loudnessSection = appendMetadataDetailSection(detailRoot, 'Loudness');
+  const loudness = state.loudness ?? createLoudnessSummaryState('idle');
+  appendMetadataDetailRow(loudnessSection, 'Source', loudness.status === 'ready' ? `${loudness.source} • ${loudness.channelMode}` : null);
+  appendMetadataDetailRow(loudnessSection, 'Integrated', formatLoudnessValue(loudness.status, loudness.integratedLufs, 'LUFS'));
+  appendMetadataDetailRow(loudnessSection, 'Range', formatLoudnessValue(loudness.status, loudness.loudnessRangeLu, 'LU'));
+  appendMetadataDetailRow(loudnessSection, 'Sample Peak', formatLoudnessValue(loudness.status, loudness.samplePeakDbfs, 'dBFS'));
+  appendMetadataDetailRow(loudnessSection, 'True Peak', formatLoudnessValue(loudness.status, loudness.truePeakDbtp, 'dBTP'));
+  appendMetadataDetailRow(loudnessSection, 'Note', loudness.status === 'error' ? loudness.message : null);
+
   const toolSection = appendMetadataDetailSection(detailRoot, 'Tools');
+  appendMetadataDetailRow(toolSection, 'Decode', formatMetadataDecodeSourceLabel());
+  appendMetadataDetailRow(toolSection, 'Probe', detail?.probeSource === 'ffprobe' ? 'ffprobe' : 'Unavailable');
   appendMetadataDetailRow(
     toolSection,
     'ffmpeg',
@@ -749,24 +767,6 @@ function renderMediaMetadata() {
     'Status',
     state.decodeFallbackError?.message || detail?.guidance || metadata.message || state.externalTools.guidance || null,
   );
-
-  const streamItems = Array.isArray(detail?.streams)
-    ? detail.streams
-      .map((stream) => formatMetadataStreamSummary(stream))
-      .filter(Boolean)
-    : [];
-  appendMetadataListSection(detailRoot, 'Streams', streamItems);
-  appendMetadataListSection(detailRoot, 'Tags', formatMetadataTags(detail?.tags));
-  appendMetadataListSection(detailRoot, 'Chapters', formatMetadataChapters(detail?.chapters));
-
-  const loudnessSection = appendMetadataDetailSection(detailRoot, 'Loudness');
-  const loudness = state.loudness ?? createLoudnessSummaryState('idle');
-  appendMetadataDetailRow(loudnessSection, 'Source', loudness.status === 'ready' ? `${loudness.source} • ${loudness.channelMode}` : null);
-  appendMetadataDetailRow(loudnessSection, 'Integrated', formatLoudnessValue(loudness.status, loudness.integratedLufs, 'LUFS'));
-  appendMetadataDetailRow(loudnessSection, 'Range', formatLoudnessValue(loudness.status, loudness.loudnessRangeLu, 'LU'));
-  appendMetadataDetailRow(loudnessSection, 'Sample Peak', formatLoudnessValue(loudness.status, loudness.samplePeakDbfs, 'dBFS'));
-  appendMetadataDetailRow(loudnessSection, 'True Peak', formatLoudnessValue(loudness.status, loudness.truePeakDbtp, 'dBTP'));
-  appendMetadataDetailRow(loudnessSection, 'Note', loudness.status === 'error' ? loudness.message : null);
 
   if (detailRoot.childElementCount === 0) {
     detailRoot.setAttribute('aria-hidden', 'true');
@@ -2438,15 +2438,22 @@ function renderWaveformUi() {
   const zoomFactor = duration > 0 && span > 0 ? duration / span : 1;
   const loopLabelRange = state.selectionDraft ?? state.loopRange;
 
-  elements.waveZoomReset.textContent = `${zoomFactor.toFixed(1)}x`;
+  elements.waveZoomReset.textContent = 'Reset';
+  if (elements.waveZoomChip) {
+    elements.waveZoomChip.textContent = `Zoom ${zoomFactor.toFixed(1)}x`;
+  }
   elements.waveFollow.checked = state.followPlayback;
+  const hintText = duration > 0
+    ? 'Seek, drag loop, or wheel to zoom and pan.'
+    : 'Preparing playback and waveform preview.';
   elements.waveHint.textContent =
-    duration > 0
-      ? 'Click to seek. Drag to set a loop. Wheel to zoom or pan.'
-      : 'Playback starts immediately. Waveform fills in after decode.';
+    hintText;
+  if (elements.waveToolbarInfo) {
+    elements.waveToolbarInfo.title = hintText;
+  }
   elements.waveLoopLabel.textContent = loopLabelRange
     ? `Loop ${formatAxisLabel(loopLabelRange.start)} - ${formatAxisLabel(loopLabelRange.end)}`
-    : 'No loop selection';
+    : 'Loop not set';
   elements.waveClearLoop.hidden = !state.loopRange;
 
   renderWaveformAxis();
@@ -3265,9 +3272,6 @@ function attachUiEvents() {
     refreshSpectrogramAnalysisConfig();
   });
 
-  elements.jumpStart.addEventListener('click', () => {
-    seekWaveformTo(state.loopRange?.start ?? 0);
-  });
   elements.seekBackward.addEventListener('click', () => {
     seekBy(-5);
   });
@@ -3277,11 +3281,6 @@ function attachUiEvents() {
   elements.seekForward.addEventListener('click', () => {
     seekBy(5);
   });
-  elements.jumpEnd.addEventListener('click', () => {
-    const loopEnd = state.loopRange?.end;
-    seekWaveformTo(Number.isFinite(loopEnd) ? getSeekableEndTime(loopEnd) : getSeekableEndTime());
-  });
-
   elements.timeline.addEventListener('input', (event) => {
     if (!state.audio) {
       return;
@@ -3661,10 +3660,8 @@ function syncTransport() {
 
   elements.playToggle.disabled = !state.audio;
   elements.playToggle.textContent = state.audio?.paused === false ? 'Pause' : 'Play';
-  elements.jumpStart.disabled = !isPlayable;
   elements.seekBackward.disabled = !isPlayable;
   elements.seekForward.disabled = !isPlayable;
-  elements.jumpEnd.disabled = !isPlayable;
   elements.timeline.disabled = !isPlayable;
   elements.timeline.value = String(progress);
   elements.timeline.style.setProperty('--seek-progress', `${Math.round(progress * 100)}%`);
