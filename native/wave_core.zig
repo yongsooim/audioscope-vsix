@@ -629,18 +629,27 @@ pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column
     const clamped_end = clampf64(view_end, clamped_start + 0.0001, @as(f64, g_session.duration));
     const duration_f64 = @as(f64, g_session.duration);
     const sample_count_f64 = @as(f64, @floatFromInt(g_session.sample_count));
-    const start_sample = @as(i32, @intFromFloat(@floor((clamped_start / duration_f64) * sample_count_f64)));
-    const end_sample = @as(i32, @intFromFloat(@ceil((clamped_end / duration_f64) * sample_count_f64)));
-    const visible_samples = maxI32(1, end_sample - start_sample);
-    const samples_per_pixel = @as(f64, @floatFromInt(visible_samples)) / @as(f64, @floatFromInt(column_count));
+    const render_span = clamped_end - clamped_start;
+    const exact_visible_samples = @max(1.0, (render_span / duration_f64) * sample_count_f64);
+    const samples_per_pixel = exact_visible_samples / @as(f64, @floatFromInt(column_count));
     const selected_level = pickWaveformLevel(samples_per_pixel);
 
     var column_index: i32 = 0;
     while (column_index < column_count) : (column_index += 1) {
         const start_ratio = @as(f64, @floatFromInt(column_index)) / @as(f64, @floatFromInt(column_count));
         const end_ratio = (@as(f64, @floatFromInt(column_index)) + 1.0) / @as(f64, @floatFromInt(column_count));
-        const column_start_sample = @as(i32, @intFromFloat(@floor(@as(f64, @floatFromInt(start_sample)) + (start_ratio * @as(f64, @floatFromInt(visible_samples))))));
-        const column_end_sample = @as(i32, @intFromFloat(@ceil(@as(f64, @floatFromInt(start_sample)) + (end_ratio * @as(f64, @floatFromInt(visible_samples))))));
+        const column_start_time = clamped_start + (start_ratio * render_span);
+        const column_end_time = clamped_start + (end_ratio * render_span);
+        const column_start_sample = clampi32(
+            @as(i32, @intFromFloat(@floor((column_start_time / duration_f64) * sample_count_f64))),
+            0,
+            g_session.sample_count,
+        );
+        const column_end_sample = clampi32(
+            @as(i32, @intFromFloat(@ceil((column_end_time / duration_f64) * sample_count_f64))),
+            0,
+            g_session.sample_count,
+        );
         const result = if (selected_level) |level|
             getLevelRange(level, column_start_sample, column_end_sample)
         else
