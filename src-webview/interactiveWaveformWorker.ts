@@ -3,7 +3,7 @@ import {
   createInteractiveWaveformPreviewData,
   extractInteractiveWaveformSlice,
   resizeInteractiveWaveformSurface,
-} from './interactiveWaveformRenderer.js';
+} from './interactiveWaveformRenderer';
 
 const TOP_PADDING = 10;
 const BOTTOM_PADDING = 10;

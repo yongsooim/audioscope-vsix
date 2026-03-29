@@ -1,4 +1,4 @@
-// src-webview/waveCoreRuntime.js
+// src-webview/waveCoreRuntime.ts
 var exportedFunctionNames = [
   "malloc",
   "free",
@@ -90,13 +90,13 @@ function createModuleFacade(exports) {
   return module;
 }
 
-// src-webview/sharedBuffers.js
+// src-webview/sharedBuffers.ts
 var TILE_COLUMN_COUNT = 256;
 function quantizeCeil(value, bucketSize) {
   return Math.max(bucketSize, Math.ceil(value / bucketSize) * bucketSize);
 }
 
-// src-webview/audioAnalysisWorker.js
+// src-webview/audioAnalysisWorker.ts
 var MIN_FREQUENCY = 20;
 var MAX_FREQUENCY = 2e4;
 var ROW_BUCKET_SIZE = 32;

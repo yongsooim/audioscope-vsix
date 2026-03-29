@@ -1,4 +1,4 @@
-// src-webview/interactiveWaveformRenderer.js
+// src-webview/interactiveWaveformRenderer.ts
 var MIN_LEVEL_BLOCK_SIZE = 16;
 var LEVEL_SCALE_FACTOR = 4;
 var MIN_LEVEL_BUCKETS = 512;
@@ -251,7 +251,7 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-// src-webview/interactiveWaveformWorker.js
+// src-webview/interactiveWaveformWorker.ts
 var TOP_PADDING = 10;
 var BOTTOM_PADDING = 10;
 var CENTER_LINE_ALPHA = 0.14;

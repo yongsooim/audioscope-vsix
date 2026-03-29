@@ -1,8 +1,8 @@
-import { loadWaveCoreRuntime } from './waveCoreRuntime.js';
+import { loadWaveCoreRuntime } from './waveCoreRuntime';
 import {
   TILE_COLUMN_COUNT,
   quantizeCeil,
-} from './sharedBuffers.js';
+} from './sharedBuffers';
 
 const MIN_FREQUENCY = 20;
 const MAX_FREQUENCY = 20000;
