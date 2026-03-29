@@ -1,11 +1,35 @@
 {
   "name": "wave-scope",
   "displayName": "Wave Scope",
-  "description": "VS Code custom audio editor with waveform, spectrogram, and playback controls.",
-  "version": "0.0.1",
-  "publisher": "local-dev",
-  "private": true,
+  "description": "Audio waveform and spectrogram editor for VS Code with playback, zoom, and loop controls.",
+  "version": "1.1.0",
+  "publisher": "yongsooim",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yongsooim/wave-preview.git"
+  },
+  "homepage": "https://github.com/yongsooim/wave-preview#readme",
+  "bugs": {
+    "url": "https://github.com/yongsooim/wave-preview/issues"
+  },
   "license": "MIT",
+  "icon": "images/icon.png",
+  "keywords": [
+    "audio",
+    "waveform",
+    "spectrogram",
+    "mp3",
+    "wav",
+    "flac"
+  ],
+  "files": [
+    "out/**/*.js",
+    "media/**",
+    "images/icon.png",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
   "engines": {
     "vscode": "^1.100.0"
   },
