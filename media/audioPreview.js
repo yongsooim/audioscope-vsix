@@ -790,12 +790,6 @@ function renderMediaMetadata() {
   appendMetadataDetailRow(overviewSection, 'Duration', detailSummary?.durationText || null);
   appendMetadataDetailRow(overviewSection, 'Size', detailSummary?.sizeText || null);
 
-  const streamItems = Array.isArray(detail?.streams)
-    ? detail.streams
-      .map((stream) => formatMetadataStreamSummary(stream))
-      .filter(Boolean)
-    : [];
-  appendMetadataListSection(detailRoot, 'Streams', streamItems);
   appendMetadataListSection(detailRoot, 'Tags', formatMetadataTags(detail?.tags));
   appendMetadataListSection(detailRoot, 'Chapters', formatMetadataChapters(detail?.chapters));
 
@@ -2625,6 +2619,9 @@ function renderWaveformUi() {
     : 'Preparing playback and waveform preview.';
   elements.waveHint.textContent =
     hintText;
+  if (elements.waveToolbar) {
+    elements.waveToolbar.title = hintText;
+  }
   if (elements.waveToolbarInfo) {
     elements.waveToolbarInfo.title = hintText;
   }

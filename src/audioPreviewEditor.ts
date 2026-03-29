@@ -281,19 +281,30 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
                 <div id="media-metadata-summary" class="media-metadata-summary" tabindex="0">Checking metadata…</div>
                 <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true"></div>
               </div>
-              <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Loop not set</div>
-              <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-wide" type="button" hidden>Clear</button>
-              <div id="wave-zoom-chip" class="wave-toolbar-pill" aria-live="polite">Zoom 1.0x</div>
               <div id="wave-hint" hidden>Click to seek. Drag to set a loop. Wheel to zoom or pan.</div>
             </div>
             <div class="wave-toolbar-actions">
-              <button id="wave-zoom-out" class="wave-tool-button" type="button" aria-label="Zoom out waveform">-</button>
-              <button id="wave-zoom-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform zoom">1.0x</button>
-              <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform">+</button>
-              <label class="wave-follow-toggle">
-                <input id="wave-follow" type="checkbox" checked />
-                <span>Follow</span>
-              </label>
+              <div class="wave-toolbar-group wave-toolbar-group-zoom">
+                <div id="wave-zoom-chip" class="wave-toolbar-pill wave-toolbar-pill-zoom" aria-live="polite">Zoom 1.0x</div>
+                <button id="wave-zoom-out" class="wave-tool-button" type="button" aria-label="Zoom out waveform">-</button>
+                <button id="wave-zoom-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform zoom">1.0x</button>
+                <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform">+</button>
+              </div>
+              <div class="wave-toolbar-group wave-toolbar-group-follow">
+                <label class="wave-follow-toggle">
+                  <input id="wave-follow" class="wave-follow-toggle-input" type="checkbox" checked />
+                  <span class="wave-follow-toggle-button">
+                    <span class="wave-follow-toggle-track" aria-hidden="true">
+                      <span class="wave-follow-toggle-thumb"></span>
+                    </span>
+                    <span class="wave-follow-toggle-text">Follow</span>
+                  </span>
+                </label>
+              </div>
+              <div class="wave-toolbar-group wave-toolbar-group-loop">
+                <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Loop not set</div>
+                <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" hidden>Clear</button>
+              </div>
             </div>
           </div>
           <div id="waveform-viewport" class="waveform-viewport" aria-label="Waveform">
