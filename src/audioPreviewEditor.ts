@@ -175,6 +175,14 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
             <canvas id="spectrogram" class="spectrogram-canvas" aria-label="Spectrogram"></canvas>
             <div id="spectrogram-meta" class="spectrogram-meta">
               <label class="spectrogram-control">
+                <span class="spectrogram-control-label">Type</span>
+                <select id="spectrogram-type-select" class="spectrogram-control-select" aria-label="Spectrogram analysis type">
+                  <option value="spectrogram" selected>Spectrogram</option>
+                  <option value="mel">Mel-Spectrogram</option>
+                  <option value="scalogram">Scalogram</option>
+                </select>
+              </label>
+              <label class="spectrogram-control">
                 <span class="spectrogram-control-label">FFT</span>
                 <select id="spectrogram-fft-select" class="spectrogram-control-select" aria-label="Spectrogram FFT size">
                   <option value="1024">1024</option>
@@ -190,6 +198,13 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
                   <option value="0.5">50%</option>
                   <option value="0.75" selected>75%</option>
                   <option value="0.875">87.5%</option>
+                </select>
+              </label>
+              <label class="spectrogram-control">
+                <span class="spectrogram-control-label">Scale</span>
+                <select id="spectrogram-scale-select" class="spectrogram-control-select" aria-label="Spectrogram frequency scale">
+                  <option value="log" selected>Log</option>
+                  <option value="linear">Linear</option>
                 </select>
               </label>
             </div>

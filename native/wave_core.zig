@@ -15,10 +15,25 @@ const hard_max_frequency: f32 = 20_000.0;
 const min_db: f32 = -92.0;
 const max_db: f32 = -12.0;
 const low_frequency_enhancement_max_frequency: f32 = 1_200.0;
+const morlet_omega0: f32 = 6.0;
+const morlet_support_sigma: f32 = 3.0;
+const morlet_max_support_samples: i32 = 4096;
+const morlet_target_steps: i32 = 96;
 
 const RangeResult = struct {
     min: f32,
     max: f32,
+};
+
+const AnalysisType = enum(i32) {
+    spectrogram = 0,
+    mel = 1,
+    scalogram = 2,
+};
+
+const FrequencyScale = enum(i32) {
+    log = 0,
+    linear = 1,
 };
 
 const PffftSetup = opaque {};
@@ -86,6 +101,15 @@ const BandRange = extern struct {
     start_bin: i32 = 0,
     end_bin: i32 = 0,
     start_frequency: f32 = 0,
+    end_frequency: f32 = 0,
+};
+
+const MelBand = struct {
+    start_bin: i32 = 0,
+    peak_bin: i32 = 0,
+    end_bin: i32 = 0,
+    start_frequency: f32 = 0,
+    center_frequency: f32 = 0,
     end_frequency: f32 = 0,
 };
 
@@ -183,6 +207,50 @@ fn minF32(left: f32, right: f32) f32 {
 
 fn maxF32(left: f32, right: f32) f32 {
     return @max(left, right);
+}
+
+fn decodeAnalysisType(value: i32) AnalysisType {
+    return switch (value) {
+        1 => .mel,
+        2 => .scalogram,
+        else => .spectrogram,
+    };
+}
+
+fn decodeFrequencyScale(value: i32) FrequencyScale {
+    return if (value == 1) .linear else .log;
+}
+
+fn hzToMel(frequency: f32) f32 {
+    return 1127.0 * @log(1.0 + (frequency / 700.0));
+}
+
+fn melToHz(mel_value: f32) f32 {
+    return 700.0 * (@exp(mel_value / 1127.0) - 1.0);
+}
+
+fn bandStartFrequencyForRow(row: i32, rows: i32, min_frequency: f32, max_frequency: f32, scale: FrequencyScale) f32 {
+    const safe_rows = maxI32(1, rows);
+    const start_ratio = @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(safe_rows));
+    return switch (scale) {
+        .linear => min_frequency + ((max_frequency - min_frequency) * start_ratio),
+        .log => min_frequency * @exp(@log(max_frequency / min_frequency) * start_ratio),
+    };
+}
+
+fn bandEndFrequencyForRow(row: i32, rows: i32, min_frequency: f32, max_frequency: f32, scale: FrequencyScale) f32 {
+    const safe_rows = maxI32(1, rows);
+    const end_ratio = @as(f32, @floatFromInt(row + 1)) / @as(f32, @floatFromInt(safe_rows));
+    return switch (scale) {
+        .linear => min_frequency + ((max_frequency - min_frequency) * end_ratio),
+        .log => min_frequency * @exp(@log(max_frequency / min_frequency) * end_ratio),
+    };
+}
+
+fn frequencyForScalogramRow(row: i32, rows: i32, min_frequency: f32, max_frequency: f32) f32 {
+    if (rows <= 1) return min_frequency;
+    const ratio = @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(rows - 1));
+    return min_frequency * @exp(@log(max_frequency / min_frequency) * ratio);
 }
 
 fn reduceMinMax(values: []const f32, comptime clamp_samples: bool) RangeResult {
@@ -445,6 +513,43 @@ fn createLogBandRanges(
     }
 }
 
+fn createLinearBandRanges(
+    ranges: []BandRange,
+    fft_size: i32,
+    sample_rate: f32,
+    min_frequency: f32,
+    max_frequency: f32,
+) void {
+    const rows = @as(i32, @intCast(ranges.len));
+    const nyquist = sample_rate / 2.0;
+    const maximum_bin = maxI32(2, @divTrunc(fft_size, 2));
+    const safe_min_frequency = maxF32(1.0, min_frequency);
+    const safe_max_frequency = maxF32(safe_min_frequency + 1.0, max_frequency);
+
+    for (ranges, 0..) |*range, row_usize| {
+        const row = @as(i32, @intCast(row_usize));
+        const start_frequency = bandStartFrequencyForRow(row, rows, safe_min_frequency, safe_max_frequency, .linear);
+        const end_frequency = bandEndFrequencyForRow(row, rows, safe_min_frequency, safe_max_frequency, .linear);
+        const start_bin = clampi32(
+            @as(i32, @intFromFloat(@floor((start_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
+            1,
+            maximum_bin - 1,
+        );
+        const end_bin = clampi32(
+            @as(i32, @intFromFloat(@ceil((end_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
+            start_bin + 1,
+            maximum_bin,
+        );
+
+        range.* = .{
+            .start_bin = start_bin,
+            .end_bin = end_bin,
+            .start_frequency = start_frequency,
+            .end_frequency = end_frequency,
+        };
+    }
+}
+
 fn createBandRangesForSampleRate(
     output: []BandRange,
     template_ranges: []const BandRange,
@@ -483,6 +588,138 @@ fn createBandRangesForSampleRate(
             .end_frequency = end_frequency,
         };
     }
+}
+
+fn createMelBands(
+    bands: []MelBand,
+    fft_size: i32,
+    sample_rate: f32,
+    min_frequency: f32,
+    max_frequency: f32,
+) void {
+    const rows = @as(i32, @intCast(bands.len));
+    const nyquist = sample_rate / 2.0;
+    const maximum_bin = maxI32(2, @divTrunc(fft_size, 2));
+    const safe_min_frequency = maxF32(1.0, min_frequency);
+    const safe_max_frequency = maxF32(safe_min_frequency * 1.01, max_frequency);
+    const mel_min = hzToMel(safe_min_frequency);
+    const mel_max = hzToMel(safe_max_frequency);
+    const mel_step = (mel_max - mel_min) / @as(f32, @floatFromInt(rows + 1));
+
+    for (bands, 0..) |*band, row_usize| {
+        const row = @as(i32, @intCast(row_usize));
+        const left_frequency = melToHz(mel_min + (mel_step * @as(f32, @floatFromInt(row))));
+        const center_frequency = melToHz(mel_min + (mel_step * @as(f32, @floatFromInt(row + 1))));
+        const right_frequency = melToHz(mel_min + (mel_step * @as(f32, @floatFromInt(row + 2))));
+        const start_bin = clampi32(
+            @as(i32, @intFromFloat(@floor((left_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
+            1,
+            maximum_bin - 1,
+        );
+        const peak_bin = clampi32(
+            @as(i32, @intFromFloat(@round((center_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
+            start_bin + 1,
+            maximum_bin - 1,
+        );
+        const end_bin = clampi32(
+            @as(i32, @intFromFloat(@ceil((right_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
+            peak_bin + 1,
+            maximum_bin,
+        );
+
+        band.* = .{
+            .start_bin = start_bin,
+            .peak_bin = peak_bin,
+            .end_bin = end_bin,
+            .start_frequency = left_frequency,
+            .center_frequency = center_frequency,
+            .end_frequency = right_frequency,
+        };
+    }
+}
+
+fn computeBandRms(power_spectrum: []const f32, range: BandRange) f32 {
+    const band_size = maxI32(1, range.end_bin - range.start_bin);
+    var weighted_energy: f32 = 0.0;
+    var total_weight: f32 = 0.0;
+    var bin = range.start_bin;
+
+    while (bin < range.end_bin) : (bin += 1) {
+        const position = if (band_size == 1)
+            0.5
+        else
+            (@as(f32, @floatFromInt(bin - range.start_bin)) + 0.5) / @as(f32, @floatFromInt(band_size));
+        const taper = 1.0 - @abs((position * 2.0) - 1.0);
+        const weight = 0.7 + (taper * 0.3);
+        weighted_energy += power_spectrum[@as(usize, @intCast(bin))] * weight;
+        total_weight += weight;
+    }
+
+    return @sqrt(weighted_energy / maxF32(total_weight, 1e-8));
+}
+
+fn computeMelBandRms(power_spectrum: []const f32, band: MelBand, fft_size: i32, sample_rate: f32) f32 {
+    const maximum_bin = maxI32(2, @divTrunc(fft_size, 2));
+    const nyquist = sample_rate / 2.0;
+    var weighted_energy: f32 = 0.0;
+    var total_weight: f32 = 0.0;
+    var bin = band.start_bin;
+
+    while (bin < band.end_bin) : (bin += 1) {
+        const frequency = (@as(f32, @floatFromInt(bin)) / @as(f32, @floatFromInt(maximum_bin))) * nyquist;
+        var weight: f32 = 0.0;
+
+        if (frequency <= band.center_frequency) {
+            const denominator = maxF32(1e-6, band.center_frequency - band.start_frequency);
+            weight = (frequency - band.start_frequency) / denominator;
+        } else {
+            const denominator = maxF32(1e-6, band.end_frequency - band.center_frequency);
+            weight = (band.end_frequency - frequency) / denominator;
+        }
+
+        weight = clampf32(weight, 0.0, 1.0);
+        weighted_energy += power_spectrum[@as(usize, @intCast(bin))] * weight;
+        total_weight += weight;
+    }
+
+    return @sqrt(weighted_energy / maxF32(total_weight, 1e-8));
+}
+
+fn normalizeMagnitudeToDecibels(magnitude: f32) f32 {
+    const decibels = 20.0 * @log10(magnitude + 1e-7);
+    return (decibels - min_db) / (max_db - min_db);
+}
+
+fn computeMorletMagnitude(center_sample: i32, frequency: f32) f32 {
+    const safe_frequency = maxF32(1.0, frequency);
+    const scale_seconds = morlet_omega0 / (2.0 * std.math.pi * safe_frequency);
+    const support_samples = minI32(
+        morlet_max_support_samples,
+        maxI32(24, @as(i32, @intFromFloat(@ceil(scale_seconds * morlet_support_sigma * g_session.sample_rate)))),
+    );
+    const stride = maxI32(1, @divTrunc(support_samples, morlet_target_steps));
+    var real: f32 = 0.0;
+    var imaginary: f32 = 0.0;
+    var norm: f32 = 0.0;
+    var offset: i32 = -support_samples;
+
+    while (offset <= support_samples) : (offset += stride) {
+        const sample_index = center_sample + offset;
+        if (sample_index < 0 or sample_index >= g_session.sample_count) continue;
+
+        const time = @as(f32, @floatFromInt(offset)) / g_session.sample_rate;
+        const normalized_time = time / scale_seconds;
+        const gaussian = @exp(-0.5 * normalized_time * normalized_time);
+        const phase = morlet_omega0 * normalized_time;
+        const sample = g_session.samples[@as(usize, @intCast(sample_index))];
+
+        real += sample * gaussian * @cos(phase);
+        imaginary -= sample * gaussian * @sin(phase);
+        norm += gaussian * gaussian;
+    }
+
+    if (norm <= 1e-8) return 0.0;
+    return @sqrt((real * real) + (imaginary * imaginary)) / @sqrt(norm);
 }
 
 fn lerpColorChannel(start: f32, end: f32, t: f32) u8 {
@@ -662,7 +899,9 @@ pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column
     return 1;
 }
 
-pub export fn wave_render_spectrogram_tile_rgba(
+fn renderStftDerivedTile(
+    analysis_type: AnalysisType,
+    frequency_scale: FrequencyScale,
     tile_start: f64,
     tile_end: f64,
     column_count: i32,
@@ -673,58 +912,68 @@ pub export fn wave_render_spectrogram_tile_rgba(
     max_frequency: f32,
     output_ptr: i32,
 ) i32 {
-    if (g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or fft_size <= 0 or tile_end <= tile_start) {
-        return 0;
-    }
-
     const resource = getFftResource(fft_size) orelse return 0;
     const power_spectrum_length = @as(usize, @intCast(maxI32(2, @divTrunc(fft_size, 2) + 1)));
     const power_spectrum = allocator.alloc(f32, power_spectrum_length) catch return 0;
     defer allocator.free(power_spectrum);
 
-    const band_ranges = allocator.alloc(BandRange, @as(usize, @intCast(row_count))) catch return 0;
-    defer allocator.free(band_ranges);
-
     const safe_min_frequency = maxF32(g_session.min_frequency, min_frequency);
     const safe_max_frequency = minF32(g_session.max_frequency, max_frequency);
-    createLogBandRanges(band_ranges, fft_size, g_session.sample_rate, safe_min_frequency, safe_max_frequency);
+    const output = @as([*]u8, @ptrFromInt(@as(usize, @intCast(output_ptr))));
+    const safe_tile_span = maxF32(1.0 / g_session.sample_rate, @as(f32, @floatCast(tile_end - tile_start)));
+    const output_width = @as(usize, @intCast(column_count));
 
+    var band_ranges: []BandRange = &.{};
+    var mel_bands: []MelBand = &.{};
     var use_low_frequency_enhancement = false;
     var low_frequency_maximum: f32 = 0.0;
     var low_power_spectrum: []f32 = &.{};
     var enhanced_band_ranges: []BandRange = &.{};
 
+    defer if (band_ranges.len > 0) allocator.free(band_ranges);
+    defer if (mel_bands.len > 0) allocator.free(mel_bands);
     defer if (low_power_spectrum.len > 0) allocator.free(low_power_spectrum);
     defer if (enhanced_band_ranges.len > 0) allocator.free(enhanced_band_ranges);
 
-    if (decimation_factor > 1) {
-        const effective_sample_rate = g_session.sample_rate / @as(f32, @floatFromInt(decimation_factor));
-        low_frequency_maximum = minF32(
-            low_frequency_enhancement_max_frequency,
-            minF32((effective_sample_rate / 2.0) * 0.92, safe_max_frequency),
-        );
-
-        if (low_frequency_maximum > safe_min_frequency * 1.25) {
-            low_power_spectrum = allocator.alloc(f32, power_spectrum_length) catch &.{};
-            enhanced_band_ranges = allocator.alloc(BandRange, @as(usize, @intCast(row_count))) catch &.{};
-
-            if (low_power_spectrum.len > 0 and enhanced_band_ranges.len > 0) {
-                createBandRangesForSampleRate(
-                    enhanced_band_ranges,
-                    band_ranges,
-                    fft_size,
-                    effective_sample_rate,
-                    safe_min_frequency,
-                    low_frequency_maximum,
-                );
-                use_low_frequency_enhancement = true;
+    switch (analysis_type) {
+        .mel => {
+            mel_bands = allocator.alloc(MelBand, @as(usize, @intCast(row_count))) catch return 0;
+            createMelBands(mel_bands, fft_size, g_session.sample_rate, safe_min_frequency, safe_max_frequency);
+        },
+        .spectrogram => {
+            band_ranges = allocator.alloc(BandRange, @as(usize, @intCast(row_count))) catch return 0;
+            switch (frequency_scale) {
+                .linear => createLinearBandRanges(band_ranges, fft_size, g_session.sample_rate, safe_min_frequency, safe_max_frequency),
+                .log => createLogBandRanges(band_ranges, fft_size, g_session.sample_rate, safe_min_frequency, safe_max_frequency),
             }
-        }
-    }
 
-    const output = @as([*]u8, @ptrFromInt(@as(usize, @intCast(output_ptr))));
-    const safe_tile_span = maxF32(1.0 / g_session.sample_rate, @as(f32, @floatCast(tile_end - tile_start)));
-    const output_width = @as(usize, @intCast(column_count));
+            if (decimation_factor > 1) {
+                const effective_sample_rate = g_session.sample_rate / @as(f32, @floatFromInt(decimation_factor));
+                low_frequency_maximum = minF32(
+                    low_frequency_enhancement_max_frequency,
+                    minF32((effective_sample_rate / 2.0) * 0.92, safe_max_frequency),
+                );
+
+                if (low_frequency_maximum > safe_min_frequency * 1.25) {
+                    low_power_spectrum = allocator.alloc(f32, power_spectrum_length) catch &.{};
+                    enhanced_band_ranges = allocator.alloc(BandRange, @as(usize, @intCast(row_count))) catch &.{};
+
+                    if (low_power_spectrum.len > 0 and enhanced_band_ranges.len > 0) {
+                        createBandRangesForSampleRate(
+                            enhanced_band_ranges,
+                            band_ranges,
+                            fft_size,
+                            effective_sample_rate,
+                            safe_min_frequency,
+                            low_frequency_maximum,
+                        );
+                        use_low_frequency_enhancement = true;
+                    }
+                }
+            }
+        },
+        .scalogram => return 0,
+    }
 
     var column_index: i32 = 0;
     while (column_index < column_count) : (column_index += 1) {
@@ -751,33 +1000,26 @@ pub export fn wave_render_spectrogram_tile_rgba(
 
         var row: i32 = 0;
         while (row < row_count) : (row += 1) {
-            const base_range = band_ranges[@as(usize, @intCast(row))];
-            const use_low_band = use_low_frequency_enhancement and base_range.end_frequency <= low_frequency_maximum;
-            const active_range = if (use_low_band)
-                enhanced_band_ranges[@as(usize, @intCast(row))]
-            else
-                base_range;
-            const active_power = if (use_low_band) low_power_spectrum else power_spectrum;
+            const normalized = switch (analysis_type) {
+                .mel => normalizeMagnitudeToDecibels(computeMelBandRms(
+                    power_spectrum,
+                    mel_bands[@as(usize, @intCast(row))],
+                    fft_size,
+                    g_session.sample_rate,
+                )),
+                .spectrogram => blk: {
+                    const base_range = band_ranges[@as(usize, @intCast(row))];
+                    const use_low_band = use_low_frequency_enhancement and base_range.end_frequency <= low_frequency_maximum;
+                    const active_range = if (use_low_band)
+                        enhanced_band_ranges[@as(usize, @intCast(row))]
+                    else
+                        base_range;
+                    const active_power = if (use_low_band) low_power_spectrum else power_spectrum;
+                    break :blk normalizeMagnitudeToDecibels(computeBandRms(active_power, active_range));
+                },
+                .scalogram => 0.0,
+            };
 
-            const band_size = maxI32(1, active_range.end_bin - active_range.start_bin);
-            var weighted_energy: f32 = 0.0;
-            var total_weight: f32 = 0.0;
-            var bin = active_range.start_bin;
-
-            while (bin < active_range.end_bin) : (bin += 1) {
-                const position = if (band_size == 1)
-                    0.5
-                else
-                    (@as(f32, @floatFromInt(bin - active_range.start_bin)) + 0.5) / @as(f32, @floatFromInt(band_size));
-                const taper = 1.0 - @abs((position * 2.0) - 1.0);
-                const weight = 0.7 + (taper * 0.3);
-                weighted_energy += active_power[@as(usize, @intCast(bin))] * weight;
-                total_weight += weight;
-            }
-
-            const rms = @sqrt(weighted_energy / maxF32(total_weight, 1e-8));
-            const decibels = 20.0 * @log10(rms + 1e-7);
-            const normalized = (decibels - min_db) / (max_db - min_db);
             const target_row = row_count - row - 1;
             const pixel_offset = ((@as(usize, @intCast(target_row)) * output_width) + @as(usize, @intCast(column_index))) * 4;
             writePaletteColor(normalized, output[pixel_offset .. pixel_offset + 4]);
@@ -785,4 +1027,90 @@ pub export fn wave_render_spectrogram_tile_rgba(
     }
 
     return 1;
+}
+
+fn renderScalogramTile(
+    tile_start: f64,
+    tile_end: f64,
+    column_count: i32,
+    row_count: i32,
+    min_frequency: f32,
+    max_frequency: f32,
+    output_ptr: i32,
+) i32 {
+    const safe_min_frequency = maxF32(g_session.min_frequency, min_frequency);
+    const safe_max_frequency = minF32(g_session.max_frequency, max_frequency);
+    const output = @as([*]u8, @ptrFromInt(@as(usize, @intCast(output_ptr))));
+    const safe_tile_span = maxF32(1.0 / g_session.sample_rate, @as(f32, @floatCast(tile_end - tile_start)));
+    const output_width = @as(usize, @intCast(column_count));
+
+    var column_index: i32 = 0;
+    while (column_index < column_count) : (column_index += 1) {
+        const center_ratio = if (column_count == 1)
+            0.5
+        else
+            (@as(f64, @floatFromInt(column_index)) + 0.5) / @as(f64, @floatFromInt(column_count));
+        const center_time = tile_start + (center_ratio * @as(f64, safe_tile_span));
+        const center_sample = @as(i32, @intFromFloat(@round(center_time * @as(f64, g_session.sample_rate))));
+
+        var row: i32 = 0;
+        while (row < row_count) : (row += 1) {
+            const frequency = frequencyForScalogramRow(row, row_count, safe_min_frequency, safe_max_frequency);
+            const normalized = normalizeMagnitudeToDecibels(computeMorletMagnitude(center_sample, frequency));
+            const target_row = row_count - row - 1;
+            const pixel_offset = ((@as(usize, @intCast(target_row)) * output_width) + @as(usize, @intCast(column_index))) * 4;
+            writePaletteColor(normalized, output[pixel_offset .. pixel_offset + 4]);
+        }
+    }
+
+    return 1;
+}
+
+pub export fn wave_render_spectrogram_tile_rgba(
+    tile_start: f64,
+    tile_end: f64,
+    column_count: i32,
+    row_count: i32,
+    fft_size: i32,
+    decimation_factor: i32,
+    min_frequency: f32,
+    max_frequency: f32,
+    analysis_type_value: i32,
+    frequency_scale_value: i32,
+    output_ptr: i32,
+) i32 {
+    if (g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or tile_end <= tile_start) {
+        return 0;
+    }
+
+    const analysis_type = decodeAnalysisType(analysis_type_value);
+    const frequency_scale = decodeFrequencyScale(frequency_scale_value);
+
+    return switch (analysis_type) {
+        .scalogram => renderScalogramTile(
+            tile_start,
+            tile_end,
+            column_count,
+            row_count,
+            min_frequency,
+            max_frequency,
+            output_ptr,
+        ),
+        .mel, .spectrogram => if (fft_size > 0)
+            renderStftDerivedTile(
+                analysis_type,
+                frequency_scale,
+                tile_start,
+                tile_end,
+                column_count,
+                row_count,
+                fft_size,
+                decimation_factor,
+                min_frequency,
+                max_frequency,
+                output_ptr,
+            )
+        else
+            0,
+    };
 }

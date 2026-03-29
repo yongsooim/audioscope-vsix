@@ -28,6 +28,20 @@ const QUALITY_PRESETS = {
 
 const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875];
+const ANALYSIS_TYPE_CODES = {
+  spectrogram: 0,
+  mel: 1,
+  scalogram: 2,
+};
+const FREQUENCY_SCALE_CODES = {
+  log: 0,
+  linear: 1,
+};
+const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
+  balanced: 2048,
+  high: 1024,
+  max: 512,
+};
 
 let runtimePromise = null;
 let requestQueue = Promise.resolve();
@@ -73,10 +87,12 @@ self.onmessage = (event) => {
       });
       return;
     case 'renderOverview':
+      registerActiveConfigVersion(message.body?.configVersion);
       pendingOverviewRequest = message.body ?? null;
       void pumpOverviewLoop();
       return;
     case 'renderVisibleRange':
+      registerActiveConfigVersion(message.body?.configVersion);
       if (message.body) {
         updateCurrentDisplayRange(message.body);
       }
@@ -128,6 +144,7 @@ function createEmptyAnalysisState() {
     minFrequency: MIN_FREQUENCY,
     maxFrequency: MAX_FREQUENCY,
     runtimeVariant: null,
+    activeConfigVersion: 0,
     generationStatus: new Map(),
     tileCache: new Map(),
     overview: createEmptyLayerState('overview'),
@@ -161,6 +178,22 @@ function getRuntime() {
 
 function normalizeQualityPreset(value) {
   return value === 'balanced' || value === 'max' ? value : 'high';
+}
+
+function normalizeAnalysisType(value) {
+  return value === 'mel' || value === 'scalogram' ? value : 'spectrogram';
+}
+
+function normalizeFrequencyScale(value) {
+  return value === 'linear' ? 'linear' : 'log';
+}
+
+function getEffectiveFrequencyScale(analysisType, value) {
+  return analysisType === 'spectrogram' ? normalizeFrequencyScale(value) : 'log';
+}
+
+function getScalogramHopSamples(quality) {
+  return SCALOGRAM_HOP_SAMPLES_BY_QUALITY[quality] ?? SCALOGRAM_HOP_SAMPLES_BY_QUALITY.high;
 }
 
 function initializeCanvas(options) {
@@ -299,6 +332,30 @@ function isGenerationCancelled(generation) {
   return analysisState.generationStatus.get(generation)?.cancelled === true;
 }
 
+function normalizeConfigVersion(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.trunc(Number(value))) : 0;
+}
+
+function getRequestConfigVersion(request) {
+  return normalizeConfigVersion(request?.configVersion);
+}
+
+function registerActiveConfigVersion(value) {
+  const nextConfigVersion = normalizeConfigVersion(value);
+
+  if (nextConfigVersion === analysisState.activeConfigVersion) {
+    return;
+  }
+
+  analysisState.activeConfigVersion = nextConfigVersion;
+  analysisState.generationStatus.clear();
+  analysisState.overview = createEmptyLayerState('overview');
+  analysisState.visible = createEmptyLayerState('visible');
+  pendingOverviewRequest = null;
+  pendingVisibleRequest = null;
+  paintSpectrogramDisplay();
+}
+
 async function pumpOverviewLoop() {
   if (overviewRenderLoopActive) {
     return;
@@ -334,7 +391,13 @@ async function pumpOverviewLoop() {
         requestPending: true,
       };
 
-      await ensurePlanTiles(runtime, plan);
+      const completed = await ensurePlanTiles(runtime, plan, {
+        shouldAbort: () => shouldAbortOverviewPlan(plan),
+      });
+
+      if (!completed || shouldAbortOverviewPlan(plan)) {
+        continue;
+      }
 
       analysisState.overview = {
         generation: 0,
@@ -435,14 +498,34 @@ async function pumpVisibleLoop() {
 }
 
 function shouldAbortVisiblePlan(plan) {
+  if (plan.configVersion !== analysisState.activeConfigVersion) {
+    return true;
+  }
+
   if (isGenerationCancelled(plan.generation)) {
     return true;
   }
 
   return Boolean(
     pendingVisibleRequest
-    && Number.isFinite(pendingVisibleRequest.generation)
-    && Number(pendingVisibleRequest.generation) !== plan.generation
+    && (
+      getRequestConfigVersion(pendingVisibleRequest) !== plan.configVersion
+      || (
+        Number.isFinite(pendingVisibleRequest.generation)
+        && Number(pendingVisibleRequest.generation) !== plan.generation
+      )
+    )
+  );
+}
+
+function shouldAbortOverviewPlan(plan) {
+  if (plan.configVersion !== analysisState.activeConfigVersion) {
+    return true;
+  }
+
+  return Boolean(
+    pendingOverviewRequest
+    && getRequestConfigVersion(pendingOverviewRequest) !== plan.configVersion
   );
 }
 
@@ -492,6 +575,8 @@ function renderTile(runtime, plan, tileIndex, tileStart, tileEnd) {
     plan.decimationFactor,
     analysisState.minFrequency,
     analysisState.maxFrequency,
+    ANALYSIS_TYPE_CODES[plan.analysisType] ?? ANALYSIS_TYPE_CODES.spectrogram,
+    FREQUENCY_SCALE_CODES[plan.frequencyScale] ?? FREQUENCY_SCALE_CODES.log,
     analysisState.spectrogramOutputPointer,
   );
 
@@ -624,6 +709,7 @@ function createRequestPlan(request) {
   const preset = QUALITY_PRESETS[analysisState.quality];
   const requestKind = request?.requestKind === 'overview' ? 'overview' : 'visible';
   const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
+  const configVersion = getRequestConfigVersion(request);
   const requestedStart = Number.isFinite(request?.viewStart) ? Number(request.viewStart) : 0;
   const requestedEnd = Number.isFinite(request?.viewEnd) ? Number(request.viewEnd) : analysisState.duration;
   const viewStart = clamp(requestedStart, 0, analysisState.duration);
@@ -632,17 +718,29 @@ function createRequestPlan(request) {
     viewStart + (1 / analysisState.sampleRate),
     analysisState.duration,
   );
+  const requestedDisplayStart = Number.isFinite(request?.displayStart) ? Number(request.displayStart) : viewStart;
+  const displayStart = clamp(requestedDisplayStart, 0, analysisState.duration);
+  const requestedDisplayEnd = Number.isFinite(request?.displayEnd) ? Number(request.displayEnd) : viewEnd;
+  const displayEnd = clamp(
+    Math.max(displayStart + (1 / analysisState.sampleRate), requestedDisplayEnd),
+    displayStart + (1 / analysisState.sampleRate),
+    analysisState.duration,
+  );
   const pixelWidth = Math.max(1, Math.round(Number(request?.pixelWidth) || surfaceState.pixelWidth || 1));
   const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1));
   const dprBucket = Math.max(2, Math.round(Number(request?.dpr) || 2));
-  const fftSize = normalizeFftSize(request?.fftSize);
-  const overlapRatio = normalizeOverlapRatio(request?.overlapRatio);
+  const analysisType = normalizeAnalysisType(request?.analysisType);
+  const frequencyScale = getEffectiveFrequencyScale(analysisType, request?.frequencyScale);
+  const fftSize = analysisType === 'scalogram' ? 0 : normalizeFftSize(request?.fftSize);
+  const overlapRatio = analysisType === 'scalogram' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
   const rowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), ROW_BUCKET_SIZE);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
   );
-  const hopSamples = Math.max(1, Math.round(fftSize * (1 - overlapRatio)));
+  const hopSamples = analysisType === 'scalogram'
+    ? getScalogramHopSamples(analysisState.quality)
+    : Math.max(1, Math.round(fftSize * (1 - overlapRatio)));
   const secondsPerColumn = hopSamples / analysisState.sampleRate;
   const tileDuration = Math.max(secondsPerColumn * TILE_COLUMN_COUNT, 1 / analysisState.sampleRate);
   const startTileIndex = Math.max(0, Math.floor(viewStart / tileDuration));
@@ -650,15 +748,30 @@ function createRequestPlan(request) {
     startTileIndex,
     Math.floor(Math.max(viewStart, viewEnd - (secondsPerColumn * 0.5)) / tileDuration),
   );
-  const windowSeconds = fftSize / analysisState.sampleRate;
-  const configKey = `fft${fftSize}-ov${Math.round(overlapRatio * 1000)}-rows${rowCount}`;
+  const windowSeconds = analysisType === 'scalogram' ? 0 : fftSize / analysisState.sampleRate;
+  const decimationFactor = analysisType === 'spectrogram'
+    ? Math.max(1, preset.lowFrequencyDecimationFactor || 1)
+    : 1;
+  const configKey = [
+    `type${analysisType}`,
+    `scale${frequencyScale}`,
+    `fft${fftSize}`,
+    `ov${Math.round(overlapRatio * 1000)}`,
+    `hop${hopSamples}`,
+    `rows${rowCount}`,
+  ].join('-');
 
   return {
-    decimationFactor: Math.max(1, preset.lowFrequencyDecimationFactor || 1),
+    analysisType,
+    decimationFactor,
     configKey,
+    configVersion,
+    displayEnd,
+    displayStart,
     dprBucket,
     endTileIndex,
     fftSize,
+    frequencyScale,
     generation,
     hopSamples,
     hopSeconds: secondsPerColumn,
@@ -687,8 +800,13 @@ function buildTileCacheKey(plan, tileIndex) {
 
 function createLayerReadyBody(plan) {
   return {
+    analysisType: plan.analysisType,
+    configVersion: plan.configVersion,
     decimationFactor: plan.decimationFactor,
+    displayEnd: plan.displayEnd,
+    displayStart: plan.displayStart,
     fftSize: plan.fftSize,
+    frequencyScale: plan.frequencyScale,
     generation: plan.generation,
     hopSamples: plan.hopSamples,
     hopSeconds: plan.hopSeconds,
@@ -711,12 +829,15 @@ function isEquivalentPlan(left, right) {
   }
 
   return left.requestKind === right.requestKind
+    && left.configVersion === right.configVersion
+    && left.analysisType === right.analysisType
     && left.dprBucket === right.dprBucket
     && left.pixelWidth === right.pixelWidth
     && left.pixelHeight === right.pixelHeight
     && left.rowCount === right.rowCount
     && left.targetColumns === right.targetColumns
     && left.fftSize === right.fftSize
+    && left.frequencyScale === right.frequencyScale
     && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-6
     && Math.abs(left.viewStart - right.viewStart) <= 1e-6
     && Math.abs(left.viewEnd - right.viewEnd) <= 1e-6;

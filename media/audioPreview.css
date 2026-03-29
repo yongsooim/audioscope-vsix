@@ -346,6 +346,8 @@ body {
   width: 100%;
   height: 100%;
   cursor: pointer;
+  transform-origin: left center;
+  will-change: width, transform;
 }
 
 .spectrogram-meta {
@@ -401,6 +403,11 @@ body {
   outline: none !important;
   border-color: rgba(191, 219, 254, 0.16);
   box-shadow: none !important;
+}
+
+.spectrogram-control-select:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
 }
 
 .spectrogram-hit-target {

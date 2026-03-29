@@ -17,6 +17,7 @@ const RUNTIME_TRANSPORT_MODE = getRuntimeTransportMode();
 const SPECTROGRAM_MIN_FREQUENCY = 20;
 const SPECTROGRAM_MAX_FREQUENCY = 20000;
 const SPECTROGRAM_TICKS = [20000, 16000, 12000, 8000, 4000, 2000, 1000, 400, 100, 40, 20];
+const SPECTROGRAM_LINEAR_TICK_COUNT = 6;
 const SPECTROGRAM_OVERVIEW_WIDTH_SCALE = 0.45;
 const SPECTROGRAM_OVERVIEW_HEIGHT_SCALE = 0.7;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
@@ -87,8 +88,10 @@ const elements = {
   spectrogramLoopStart: document.getElementById('spectrogram-loop-start'),
   spectrogramLoopEnd: document.getElementById('spectrogram-loop-end'),
   spectrogramMeta: document.getElementById('spectrogram-meta'),
+  spectrogramTypeSelect: document.getElementById('spectrogram-type-select'),
   spectrogramFftSelect: document.getElementById('spectrogram-fft-select'),
   spectrogramOverlapSelect: document.getElementById('spectrogram-overlap-select'),
+  spectrogramScaleSelect: document.getElementById('spectrogram-scale-select'),
   spectrogramHoverTooltip: document.getElementById('spectrogram-hover-tooltip'),
   spectrogramAxis: document.getElementById('spectrogram-axis'),
   spectrogramGuides: document.getElementById('spectrogram-guides'),
@@ -137,7 +140,9 @@ const state = {
   followPlayback: true,
   transportMode: RUNTIME_TRANSPORT_MODE,
   spectrogramRenderConfig: {
+    analysisType: 'spectrogram',
     fftSize: 8192,
+    frequencyScale: 'log',
     overlapRatio: 0.75,
   },
   analysis: null,
@@ -149,6 +154,7 @@ const state = {
   waveformRenderWidth: 0,
   waveformRenderHeight: 0,
   waveformRenderVisibleSpan: 0,
+  spectrogramRenderRange: { start: 0, end: 0 },
   waveformAxisRenderRange: { start: 0, end: 0 },
   waveformAxisRenderWidth: 0,
   playbackFrame: 0,
@@ -237,9 +243,33 @@ function normalizeSpectrogramFftSize(value) {
   return SPECTROGRAM_FFT_OPTIONS.includes(numericValue) ? numericValue : 8192;
 }
 
+function normalizeSpectrogramAnalysisType(value) {
+  return value === 'mel' || value === 'scalogram' ? value : 'spectrogram';
+}
+
+function normalizeSpectrogramFrequencyScale(value) {
+  return value === 'linear' ? 'linear' : 'log';
+}
+
 function normalizeSpectrogramOverlapRatio(value) {
   const numericValue = Number(value);
   return SPECTROGRAM_OVERLAP_OPTIONS.includes(numericValue) ? numericValue : 0.75;
+}
+
+function getEffectiveSpectrogramRenderConfig(config = state.spectrogramRenderConfig) {
+  const analysisType = normalizeSpectrogramAnalysisType(config?.analysisType);
+  const fftSize = normalizeSpectrogramFftSize(config?.fftSize);
+  const overlapRatio = normalizeSpectrogramOverlapRatio(config?.overlapRatio);
+  const frequencyScale = analysisType === 'spectrogram'
+    ? normalizeSpectrogramFrequencyScale(config?.frequencyScale)
+    : 'log';
+
+  return {
+    analysisType,
+    fftSize,
+    frequencyScale,
+    overlapRatio,
+  };
 }
 
 window.addEventListener('keydown', (event) => {
@@ -829,6 +859,7 @@ function handleAnalysisWorkerMessage(loadToken, message) {
     state.analysis.sampleCount = body.sampleCount;
     state.analysis.minFrequency = body.minFrequency;
     state.analysis.maxFrequency = body.maxFrequency;
+    state.spectrogramRenderRange = { start: 0, end: 0 };
 
     renderSpectrogramScale();
     renderSpectrogramMeta();
@@ -842,9 +873,12 @@ function handleAnalysisWorkerMessage(loadToken, message) {
 
     state.analysis.overview = {
       ...state.analysis.overview,
+      analysisType: body.analysisType,
       complete: true,
+      configVersion: body.configVersion,
       decimationFactor: body.decimationFactor,
       fftSize: body.fftSize,
+      frequencyScale: body.frequencyScale,
       hopSamples: body.hopSamples,
       hopSeconds: body.hopSeconds,
       overlapRatio: body.overlapRatio,
@@ -869,7 +903,14 @@ function handleAnalysisWorkerMessage(loadToken, message) {
     const { body } = message;
 
     state.analysis.activeVisibleRequest = {
+      analysisType: body.analysisType,
+      configVersion: body.configVersion,
+      displayEnd: body.displayEnd,
+      displayStart: body.displayStart,
+      fftSize: body.fftSize,
+      frequencyScale: body.frequencyScale,
       generation: body.generation,
+      overlapRatio: body.overlapRatio,
       pixelHeight: body.pixelHeight,
       pixelWidth: body.pixelWidth,
       viewEnd: body.viewEnd,
@@ -877,9 +918,14 @@ function handleAnalysisWorkerMessage(loadToken, message) {
     };
     state.analysis.visible = {
       ...state.analysis.visible,
+      analysisType: body.analysisType,
       complete: true,
+      configVersion: body.configVersion,
       decimationFactor: body.decimationFactor,
+      displayEnd: body.displayEnd,
+      displayStart: body.displayStart,
       fftSize: body.fftSize,
+      frequencyScale: body.frequencyScale,
       generation: body.generation,
       hopSamples: body.hopSamples,
       hopSeconds: body.hopSeconds,
@@ -895,6 +941,11 @@ function handleAnalysisWorkerMessage(loadToken, message) {
       viewStart: body.viewStart,
       windowSeconds: body.windowSeconds,
     };
+    state.spectrogramRenderRange = {
+      end: body.displayEnd,
+      start: body.displayStart,
+    };
+    applySpectrogramCanvasTransform();
     setAnalysisStatus('Ready');
     renderSpectrogramMeta();
     return;
@@ -953,12 +1004,16 @@ function scheduleSpectrogramRender({ force = false } = {}) {
     }
 
     const { displayRange, pixelHeight, pixelWidth, requestRange } = getVisibleSpectrogramRequestMetrics();
+    const renderConfig = getEffectiveSpectrogramRenderConfig();
 
     if (displayRange.end <= displayRange.start) {
       return;
     }
 
+    applySpectrogramCanvasTransform(displayRange);
+
     const previousGeneration = state.analysis.generation;
+    const configVersion = state.analysis.configVersion ?? 0;
     const needsNewGeneration = force || !isSameVisibleRequest(
       state.analysis.activeVisibleRequest,
       requestRange,
@@ -969,7 +1024,14 @@ function scheduleSpectrogramRender({ force = false } = {}) {
     if (needsNewGeneration) {
       state.analysis.generation = generation;
       state.analysis.activeVisibleRequest = {
+        analysisType: renderConfig.analysisType,
+        configVersion,
+        displayEnd: displayRange.end,
+        displayStart: displayRange.start,
+        fftSize: renderConfig.fftSize,
+        frequencyScale: renderConfig.frequencyScale,
         generation,
+        overlapRatio: renderConfig.overlapRatio,
         pixelHeight,
         pixelWidth,
         viewEnd: requestRange.end,
@@ -977,8 +1039,15 @@ function scheduleSpectrogramRender({ force = false } = {}) {
       };
       state.analysis.visible = {
         ...createSpectrogramLayerState('visible'),
+        analysisType: renderConfig.analysisType,
+        configVersion,
         dpr: DISPLAY_PIXEL_RATIO,
+        displayEnd: displayRange.end,
+        displayStart: displayRange.start,
+        fftSize: renderConfig.fftSize,
+        frequencyScale: renderConfig.frequencyScale,
         generation,
+        overlapRatio: renderConfig.overlapRatio,
         pixelHeight,
         pixelWidth,
         requestPending: true,
@@ -999,12 +1068,15 @@ function scheduleSpectrogramRender({ force = false } = {}) {
     state.analysisWorker.postMessage({
       type: 'renderVisibleRange',
       body: {
+        analysisType: renderConfig.analysisType,
+        configVersion,
         displayEnd: displayRange.end,
         displayStart: displayRange.start,
         dpr: DISPLAY_PIXEL_RATIO,
-        fftSize: state.spectrogramRenderConfig.fftSize,
+        fftSize: renderConfig.fftSize,
+        frequencyScale: renderConfig.frequencyScale,
         generation,
-        overlapRatio: state.spectrogramRenderConfig.overlapRatio,
+        overlapRatio: renderConfig.overlapRatio,
         pixelHeight,
         pixelWidth,
         requestEnd: requestRange.end,
@@ -1016,6 +1088,10 @@ function scheduleSpectrogramRender({ force = false } = {}) {
 
 function createSpectrogramLayerState(kind) {
   return {
+    analysisType: 'spectrogram',
+    configVersion: 0,
+    displayEnd: 0,
+    displayStart: 0,
     kind,
     generation: kind === 'overview' ? 0 : -1,
     viewStart: 0,
@@ -1031,6 +1107,7 @@ function createSpectrogramLayerState(kind) {
     targetRows: 0,
     targetColumns: 0,
     fftSize: 0,
+    frequencyScale: 'log',
     hopSamples: 0,
     hopSeconds: 0,
     overlapRatio: 0,
@@ -1042,6 +1119,7 @@ function createSpectrogramLayerState(kind) {
 
 function createSpectrogramAnalysisState({ duration, quality, minFrequency, maxFrequency, sampleCount, sampleRate }) {
   return {
+    configVersion: 0,
     duration,
     generation: 0,
     initialized: false,
@@ -1101,10 +1179,16 @@ function requestOverviewSpectrogram({ force = false } = {}) {
   }
 
   const { pixelHeight, pixelWidth } = getOverviewSpectrogramRequestSize();
+  const renderConfig = getEffectiveSpectrogramRenderConfig();
+  const configVersion = state.analysis.configVersion ?? 0;
 
   if (
     !force
     && (state.analysis.overview.requestPending || state.analysis.overview.ready)
+    && state.analysis.overview.analysisType === renderConfig.analysisType
+    && state.analysis.overview.frequencyScale === renderConfig.frequencyScale
+    && state.analysis.overview.fftSize === renderConfig.fftSize
+    && Math.abs((state.analysis.overview.overlapRatio ?? 0) - renderConfig.overlapRatio) <= 1e-6
     && Math.abs((state.analysis.overview.pixelWidth ?? 0) - pixelWidth) <= 1
     && Math.abs((state.analysis.overview.pixelHeight ?? 0) - pixelHeight) <= 1
   ) {
@@ -1113,7 +1197,12 @@ function requestOverviewSpectrogram({ force = false } = {}) {
 
   state.analysis.overview = {
     ...createSpectrogramLayerState('overview'),
+    analysisType: renderConfig.analysisType,
+    configVersion,
     dpr: DISPLAY_PIXEL_RATIO,
+    fftSize: renderConfig.fftSize,
+    frequencyScale: renderConfig.frequencyScale,
+    overlapRatio: renderConfig.overlapRatio,
     pixelHeight,
     pixelWidth,
     requestPending: true,
@@ -1125,9 +1214,12 @@ function requestOverviewSpectrogram({ force = false } = {}) {
   state.analysisWorker.postMessage({
     type: 'renderOverview',
     body: {
+      analysisType: renderConfig.analysisType,
+      configVersion,
       dpr: DISPLAY_PIXEL_RATIO,
-      fftSize: state.spectrogramRenderConfig.fftSize,
-      overlapRatio: state.spectrogramRenderConfig.overlapRatio,
+      fftSize: renderConfig.fftSize,
+      frequencyScale: renderConfig.frequencyScale,
+      overlapRatio: renderConfig.overlapRatio,
       pixelHeight,
       pixelWidth,
     },
@@ -1143,8 +1235,15 @@ function isSameVisibleRequest(activeRequest, range, size) {
     return false;
   }
 
+  const renderConfig = getEffectiveSpectrogramRenderConfig();
+
   return Math.abs(activeRequest.viewStart - range.start) <= SPECTROGRAM_RANGE_EPSILON_SECONDS
     && Math.abs(activeRequest.viewEnd - range.end) <= SPECTROGRAM_RANGE_EPSILON_SECONDS
+    && (activeRequest.configVersion ?? 0) === (state.analysis?.configVersion ?? 0)
+    && activeRequest.analysisType === renderConfig.analysisType
+    && activeRequest.fftSize === renderConfig.fftSize
+    && activeRequest.frequencyScale === renderConfig.frequencyScale
+    && Math.abs((activeRequest.overlapRatio ?? 0) - renderConfig.overlapRatio) <= 1e-6
     && Math.abs(activeRequest.pixelWidth - size.pixelWidth) <= 1
     && Math.abs(activeRequest.pixelHeight - size.pixelHeight) <= 1;
 }
@@ -1196,13 +1295,13 @@ function handleWaveformReady(body) {
 function renderSpectrogramScale() {
   const minFrequency = state.analysis?.minFrequency ?? SPECTROGRAM_MIN_FREQUENCY;
   const maxFrequency = state.analysis?.maxFrequency ?? SPECTROGRAM_MAX_FREQUENCY;
-  const visibleTicks = SPECTROGRAM_TICKS.filter((tick) => tick >= minFrequency && tick <= maxFrequency);
+  const visibleTicks = getVisibleSpectrogramTicks(minFrequency, maxFrequency);
 
   elements.spectrogramAxis.replaceChildren();
   elements.spectrogramGuides.replaceChildren();
 
   visibleTicks.forEach((tick, index) => {
-    const position = getLogFrequencyPosition(tick, minFrequency, maxFrequency);
+    const position = getSpectrogramFrequencyPosition(tick, minFrequency, maxFrequency);
     const axisTick = document.createElement('div');
     axisTick.className = 'spectrogram-tick';
     if (index === 0) {
@@ -1231,14 +1330,28 @@ function getActiveSpectrogramMetaLayer() {
 }
 
 function renderSpectrogramMeta() {
-  if (!elements.spectrogramMeta || !elements.spectrogramFftSelect || !elements.spectrogramOverlapSelect) {
+  if (
+    !elements.spectrogramMeta
+    || !elements.spectrogramTypeSelect
+    || !elements.spectrogramFftSelect
+    || !elements.spectrogramOverlapSelect
+    || !elements.spectrogramScaleSelect
+  ) {
     return;
   }
 
-  const layer = getActiveSpectrogramMetaLayer();
+  const layer = getEffectiveSpectrogramRenderConfig(getActiveSpectrogramMetaLayer());
+  const isScalogram = layer.analysisType === 'scalogram';
+  const supportsScale = layer.analysisType === 'spectrogram';
 
-  elements.spectrogramFftSelect.value = String(normalizeSpectrogramFftSize(layer?.fftSize));
-  elements.spectrogramOverlapSelect.value = String(normalizeSpectrogramOverlapRatio(layer?.overlapRatio));
+  elements.spectrogramTypeSelect.value = layer.analysisType;
+  elements.spectrogramFftSelect.value = String(layer.fftSize);
+  elements.spectrogramOverlapSelect.value = String(layer.overlapRatio);
+  elements.spectrogramScaleSelect.value = layer.frequencyScale;
+
+  elements.spectrogramFftSelect.disabled = isScalogram;
+  elements.spectrogramOverlapSelect.disabled = isScalogram;
+  elements.spectrogramScaleSelect.disabled = !supportsScale;
 }
 
 function refreshSpectrogramAnalysisConfig() {
@@ -1246,6 +1359,7 @@ function refreshSpectrogramAnalysisConfig() {
     return;
   }
 
+  state.analysis.configVersion = (state.analysis.configVersion ?? 0) + 1;
   state.analysis.activeVisibleRequest = null;
   state.analysis.overview = createSpectrogramLayerState('overview');
   state.analysis.visible = createSpectrogramLayerState('visible');
@@ -1257,6 +1371,8 @@ function refreshSpectrogramAnalysisConfig() {
     });
   }
 
+  renderSpectrogramScale();
+  renderSpectrogramMeta();
   requestOverviewSpectrogram({ force: true });
   scheduleSpectrogramRender({ force: true });
 }
@@ -2039,7 +2155,7 @@ function getFrequencyAtSpectrogramPointerEvent(event) {
   const maxFrequency = state.analysis?.maxFrequency ?? SPECTROGRAM_MAX_FREQUENCY;
   const position = clamp((event.clientY - rect.top) / rect.height, 0, 1);
 
-  return getFrequencyAtLogPosition(position, minFrequency, maxFrequency);
+  return getFrequencyAtSpectrogramPosition(position, minFrequency, maxFrequency);
 }
 
 function updateSpectrogramHoverTooltip(event) {
@@ -2305,6 +2421,13 @@ function handleSharedViewportWheel(event, targetElement) {
 }
 
 function attachUiEvents() {
+  elements.spectrogramTypeSelect?.addEventListener('change', () => {
+    state.spectrogramRenderConfig.analysisType = normalizeSpectrogramAnalysisType(elements.spectrogramTypeSelect.value);
+    renderSpectrogramScale();
+    renderSpectrogramMeta();
+    refreshSpectrogramAnalysisConfig();
+  });
+
   elements.spectrogramFftSelect?.addEventListener('change', () => {
     state.spectrogramRenderConfig.fftSize = normalizeSpectrogramFftSize(elements.spectrogramFftSelect.value);
     renderSpectrogramMeta();
@@ -2313,6 +2436,13 @@ function attachUiEvents() {
 
   elements.spectrogramOverlapSelect?.addEventListener('change', () => {
     state.spectrogramRenderConfig.overlapRatio = normalizeSpectrogramOverlapRatio(elements.spectrogramOverlapSelect.value);
+    renderSpectrogramMeta();
+    refreshSpectrogramAnalysisConfig();
+  });
+
+  elements.spectrogramScaleSelect?.addEventListener('change', () => {
+    state.spectrogramRenderConfig.frequencyScale = normalizeSpectrogramFrequencyScale(elements.spectrogramScaleSelect.value);
+    renderSpectrogramScale();
     renderSpectrogramMeta();
     refreshSpectrogramAnalysisConfig();
   });
@@ -2512,6 +2642,7 @@ function attachResizeObservers() {
     renderWaveformUi();
     void syncWaveformView();
     renderSpectrogramScale();
+    applySpectrogramCanvasTransform();
     requestOverviewSpectrogram({ force: true });
     queueVisibleSpectrogramRequest({ force: true });
     scheduleSpectrogramRender({ force: true });
@@ -2565,6 +2696,7 @@ function destroySession() {
   state.waveformRenderWidth = 0;
   state.waveformRenderHeight = 0;
   state.waveformRenderVisibleSpan = 0;
+  state.spectrogramRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
   state.sourceArrayBuffer = null;
@@ -2609,6 +2741,7 @@ function disposeSpectrogramSurface() {
   replacement.setAttribute('aria-label', 'Spectrogram');
   elements.spectrogram.replaceWith(replacement);
   elements.spectrogram = replacement;
+  resetSpectrogramCanvasTransform();
 }
 
 function disposeWaveformRenderer() {
@@ -3145,6 +3278,38 @@ function applyWaveformAxisTransform(displayRange = getWaveformRange()) {
   axisContent.style.transform = `translate3d(${translateX}px, 0, 0)`;
 }
 
+function resetSpectrogramCanvasTransform() {
+  elements.spectrogram.style.width = '100%';
+  elements.spectrogram.style.transform = 'translate3d(0px, 0, 0)';
+}
+
+function applySpectrogramCanvasTransform(displayRange = getWaveformRange()) {
+  const renderRange = state.spectrogramRenderRange;
+  const viewportWidth = Math.max(1, elements.spectrogram.clientWidth || elements.spectrogram.parentElement?.clientWidth || 1);
+  const renderSpan = Math.max(0, renderRange.end - renderRange.start);
+  const displaySpan = Math.max(0, displayRange.end - displayRange.start);
+
+  if (
+    !(displayRange.end > displayRange.start)
+    || renderSpan <= 0
+    || displaySpan <= 0
+    || Math.abs(renderRange.start - displayRange.start) <= SPECTROGRAM_RANGE_EPSILON_SECONDS
+    && Math.abs(renderRange.end - displayRange.end) <= SPECTROGRAM_RANGE_EPSILON_SECONDS
+  ) {
+    resetSpectrogramCanvasTransform();
+    return;
+  }
+
+  const scaledWidth = Math.max(viewportWidth, Math.round(viewportWidth * (renderSpan / displaySpan)));
+  const secondsPerPixel = renderSpan / viewportWidth;
+  const unclampedOffset = -((displayRange.start - renderRange.start) / secondsPerPixel);
+  const minOffset = Math.min(0, viewportWidth - scaledWidth);
+  const translateX = clamp(unclampedOffset, minOffset, 0);
+
+  elements.spectrogram.style.width = `${scaledWidth}px`;
+  elements.spectrogram.style.transform = `translate3d(${translateX}px, 0, 0)`;
+}
+
 function getVisibleSpectrogramRequestMetrics(displayRange = getWaveformRange()) {
   const duration = getEffectiveDuration();
   const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
@@ -3297,20 +3462,144 @@ function formatAxisLabel(seconds) {
   return `${minutes}:${String(secondsPart).padStart(2, '0')}:${tenths}`;
 }
 
+function getActiveSpectrogramAxisMode() {
+  const { analysisType, frequencyScale } = getEffectiveSpectrogramRenderConfig();
+
+  if (analysisType === 'mel') {
+    return 'mel';
+  }
+
+  if (analysisType === 'spectrogram' && frequencyScale === 'linear') {
+    return 'linear';
+  }
+
+  return 'log';
+}
+
+function getVisibleSpectrogramTicks(minFrequency, maxFrequency) {
+  if (getActiveSpectrogramAxisMode() === 'linear') {
+    return buildLinearFrequencyTicks(minFrequency, maxFrequency);
+  }
+
+  return SPECTROGRAM_TICKS.filter((tick) => tick >= minFrequency && tick <= maxFrequency);
+}
+
+function buildLinearFrequencyTicks(minFrequency, maxFrequency) {
+  const safeMin = Math.max(0, minFrequency);
+  const safeMax = Math.max(safeMin + 1, maxFrequency);
+  const roughStep = Math.max(1, (safeMax - safeMin) / Math.max(1, SPECTROGRAM_LINEAR_TICK_COUNT - 1));
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const normalized = roughStep / magnitude;
+  let multiplier = 1;
+
+  if (normalized > 5) {
+    multiplier = 10;
+  } else if (normalized > 2) {
+    multiplier = 5;
+  } else if (normalized > 1) {
+    multiplier = 2;
+  }
+
+  const step = multiplier * magnitude;
+  const ticks = [safeMax, safeMin];
+  let value = Math.ceil(safeMin / step) * step;
+
+  while (value < safeMax) {
+    if (value > safeMin && value < safeMax) {
+      ticks.push(value);
+    }
+    value += step;
+  }
+
+  return [...new Set(ticks.map((tick) => Math.round(tick)))]
+    .filter((tick) => tick >= safeMin && tick <= safeMax)
+    .sort((left, right) => right - left);
+}
+
+function getSpectrogramFrequencyPosition(frequency, minFrequency, maxFrequency) {
+  switch (getActiveSpectrogramAxisMode()) {
+    case 'linear':
+      return getLinearFrequencyPosition(frequency, minFrequency, maxFrequency);
+    case 'mel':
+      return getMelFrequencyPosition(frequency, minFrequency, maxFrequency);
+    default:
+      return getLogFrequencyPosition(frequency, minFrequency, maxFrequency);
+  }
+}
+
+function getFrequencyAtSpectrogramPosition(position, minFrequency, maxFrequency) {
+  switch (getActiveSpectrogramAxisMode()) {
+    case 'linear':
+      return getFrequencyAtLinearPosition(position, minFrequency, maxFrequency);
+    case 'mel':
+      return getFrequencyAtMelPosition(position, minFrequency, maxFrequency);
+    default:
+      return getFrequencyAtLogPosition(position, minFrequency, maxFrequency);
+  }
+}
+
+function getLinearFrequencyPosition(frequency, minFrequency, maxFrequency) {
+  const safeMin = Math.max(0, minFrequency);
+  const safeMax = Math.max(safeMin + 1, maxFrequency);
+  const current = clamp(frequency, safeMin, safeMax);
+
+  return 1 - ((current - safeMin) / (safeMax - safeMin));
+}
+
+function getFrequencyAtLinearPosition(position, minFrequency, maxFrequency) {
+  const safeMin = Math.max(0, minFrequency);
+  const safeMax = Math.max(safeMin + 1, maxFrequency);
+  const ratio = 1 - clamp(position, 0, 1);
+
+  return safeMin + ratio * (safeMax - safeMin);
+}
+
 function getLogFrequencyPosition(frequency, minFrequency, maxFrequency) {
-  const start = Math.log(minFrequency);
-  const end = Math.log(maxFrequency);
-  const current = Math.log(clamp(frequency, minFrequency, maxFrequency));
+  const safeMin = Math.max(1, minFrequency);
+  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const start = Math.log(safeMin);
+  const end = Math.log(safeMax);
+  const current = Math.log(clamp(frequency, safeMin, safeMax));
 
   return 1 - ((current - start) / (end - start));
 }
 
 function getFrequencyAtLogPosition(position, minFrequency, maxFrequency) {
-  const start = Math.log(minFrequency);
-  const end = Math.log(maxFrequency);
+  const safeMin = Math.max(1, minFrequency);
+  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const start = Math.log(safeMin);
+  const end = Math.log(safeMax);
   const ratio = 1 - clamp(position, 0, 1);
 
   return Math.exp(start + ratio * (end - start));
+}
+
+function getMelFrequencyPosition(frequency, minFrequency, maxFrequency) {
+  const safeMin = Math.max(1, minFrequency);
+  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const start = frequencyToMel(safeMin);
+  const end = frequencyToMel(safeMax);
+  const current = frequencyToMel(clamp(frequency, safeMin, safeMax));
+
+  return 1 - ((current - start) / (end - start));
+}
+
+function getFrequencyAtMelPosition(position, minFrequency, maxFrequency) {
+  const safeMin = Math.max(1, minFrequency);
+  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const start = frequencyToMel(safeMin);
+  const end = frequencyToMel(safeMax);
+  const ratio = 1 - clamp(position, 0, 1);
+
+  return melToFrequency(start + ratio * (end - start));
+}
+
+function frequencyToMel(frequency) {
+  return 1127 * Math.log(1 + (frequency / 700));
+}
+
+function melToFrequency(melValue) {
+  return 700 * (Math.exp(melValue / 1127) - 1);
 }
 
 function formatFrequencyLabel(frequency) {
