@@ -7,8 +7,9 @@ const projectRoot = path.resolve(scriptDirectory, '..');
 
 await build({
   entryPoints: [
-    path.join(projectRoot, 'src-webview', 'audioAnalysisWorker.js'),
-    path.join(projectRoot, 'src-webview', 'interactiveWaveformWorker.js'),
+    path.join(projectRoot, 'src-webview', 'audioPreview.ts'),
+    path.join(projectRoot, 'src-webview', 'audioAnalysisWorker.ts'),
+    path.join(projectRoot, 'src-webview', 'interactiveWaveformWorker.ts'),
   ],
   outdir: path.join(projectRoot, 'media'),
   bundle: true,

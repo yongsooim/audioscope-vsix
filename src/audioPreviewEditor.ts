@@ -165,6 +165,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
             },
           });
         }
+        return;
       }
     });
   }
@@ -216,27 +217,38 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
   </head>
   <body data-worker-src="${workerUri}" data-waveform-worker-src="${waveformWorkerUri}">
     <main class="app-shell">
-      <section class="viewport" aria-label="Waveform and spectrogram preview">
-        <div class="wave-panel">
-          <div class="wave-toolbar">
+      <section id="preview-viewport" class="viewport" aria-label="Waveform and spectrogram preview">
+        <div id="wave-panel" class="wave-panel">
+          <div id="wave-toolbar" class="wave-toolbar">
             <div id="wave-toolbar-info" class="wave-toolbar-info">
               <div id="media-metadata-panel" class="media-metadata-panel" data-state="idle" aria-label="Audio metadata">
                 <div id="media-metadata-summary" class="media-metadata-summary" tabindex="0">Checking metadata…</div>
-                <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true"></div>
+                <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true" hidden></div>
               </div>
-              <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Loop not set</div>
-              <div id="wave-zoom-chip" class="wave-toolbar-pill" aria-live="polite">Zoom 1.0x</div>
               <div id="wave-hint" hidden>Click to seek. Drag to set a loop. Wheel to zoom or pan.</div>
             </div>
             <div class="wave-toolbar-actions">
-              <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-wide" type="button" hidden>Clear</button>
-              <button id="wave-zoom-out" class="wave-tool-button" type="button" aria-label="Zoom out waveform">-</button>
-              <button id="wave-zoom-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform zoom">1.0x</button>
-              <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform">+</button>
-              <label class="wave-follow-toggle">
-                <input id="wave-follow" type="checkbox" checked />
-                <span>Follow</span>
-              </label>
+              <div class="wave-toolbar-group wave-toolbar-group-zoom">
+                <div id="wave-zoom-chip" class="wave-toolbar-pill wave-toolbar-pill-zoom" aria-live="polite">Zoom 1.0x</div>
+                <button id="wave-zoom-out" class="wave-tool-button" type="button" aria-label="Zoom out waveform">-</button>
+                <button id="wave-zoom-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform zoom">1.0x</button>
+                <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform">+</button>
+              </div>
+              <div class="wave-toolbar-group wave-toolbar-group-follow">
+                <label class="wave-follow-toggle">
+                  <input id="wave-follow" class="wave-follow-toggle-input" type="checkbox" checked />
+                  <span class="wave-follow-toggle-button">
+                    <span class="wave-follow-toggle-track" aria-hidden="true">
+                      <span class="wave-follow-toggle-thumb"></span>
+                    </span>
+                    <span class="wave-follow-toggle-text">Follow</span>
+                  </span>
+                </label>
+              </div>
+              <div class="wave-toolbar-group wave-toolbar-group-loop">
+                <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Loop not set</div>
+                <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" hidden>Clear</button>
+              </div>
             </div>
           </div>
           <div id="waveform-viewport" class="waveform-viewport" aria-label="Waveform">
@@ -251,9 +263,24 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           </div>
           <div id="waveform-axis" class="waveform-axis" aria-hidden="true"></div>
         </div>
-        <div class="spectrogram-panel">
+        <div
+          id="viewport-splitter"
+          class="viewport-splitter"
+          role="separator"
+          aria-controls="wave-panel spectrogram-panel"
+          aria-label="Resize waveform and spectrogram panels"
+          aria-orientation="horizontal"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="50"
+          aria-valuetext="Waveform 50%, spectrogram 50%"
+          tabindex="0"
+        >
+          <div class="viewport-splitter-handle" aria-hidden="true"></div>
+        </div>
+        <div id="spectrogram-panel" class="spectrogram-panel">
           <div id="spectrogram-axis" class="spectrogram-axis" aria-hidden="true"></div>
-          <div class="spectrogram-stage">
+          <div id="spectrogram-stage" class="spectrogram-stage">
             <canvas id="spectrogram" class="spectrogram-canvas" aria-label="Spectrogram"></canvas>
             <div id="spectrogram-meta" class="spectrogram-meta">
               <label class="spectrogram-control">
@@ -269,8 +296,8 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
                 <select id="spectrogram-fft-select" class="spectrogram-control-select" aria-label="Spectrogram FFT size">
                   <option value="1024">1024</option>
                   <option value="2048">2048</option>
-                  <option value="4096">4096</option>
-                  <option value="8192" selected>8192</option>
+                  <option value="4096" selected>4096</option>
+                  <option value="8192">8192</option>
                   <option value="16384">16384</option>
                 </select>
               </label>
@@ -305,12 +332,12 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         <button id="seek-backward" class="transport-button" type="button" disabled>-5s</button>
         <button id="play-toggle" class="play-toggle" type="button" disabled>Play</button>
         <button id="seek-forward" class="transport-button" type="button" disabled>+5s</button>
+        <div id="time-readout" class="time-readout">0:00 / --:--</div>
         <div id="waveform-overview" class="timeline-shell">
           <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>
           <div id="timeline-hover-tooltip" class="timeline-hover-tooltip" aria-hidden="true"></div>
           <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.001" value="0" disabled />
         </div>
-        <div id="time-readout" class="time-readout">0:00 / --:--</div>
         <div id="loudness-summary" class="loudness-summary" data-state="idle" aria-label="Loudness summary" aria-live="polite" hidden>
           <div class="loudness-chip">
             <span class="loudness-chip-label">I</span>

@@ -13,9 +13,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:wavePreview.openActiveAudioPreview",
-    "onCustomEditor:wavePreview.audioPreview"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -103,17 +101,17 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "build:wave-core": "node ./scripts/build-wave-core.mjs",
-    "build:webview": "node ./scripts/build-webview.mjs",
-    "compile": "npm run build:wave-core && npm run build:webview && tsc -p ./",
+    "vscode:prepublish": "bun run compile",
+    "build:wave-core": "tsx ./scripts/build-wave-core.mts",
+    "build:webview": "tsx ./scripts/build-webview.mts",
+    "compile": "bun run build:wave-core && npm run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
     "watch": "tsc -w -p ./"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "@types/vscode": "^1.100.0",
     "esbuild": "^0.27.4",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.2"
-  },
-  "dependencies": {}
+  }
 }

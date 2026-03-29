@@ -8,9 +8,11 @@ export interface ExternalToolStatusPayload {
   ffmpegAvailable: boolean;
   ffmpegCommand: string;
   ffmpegPath: string | null;
+  ffmpegVersion: string | null;
   ffprobeAvailable: boolean;
   ffprobeCommand: string;
   ffprobePath: string | null;
+  ffprobeVersion: string | null;
   fileBacked: boolean;
   guidance: string;
 }
@@ -138,6 +140,7 @@ interface ExecutableStatus {
   available: boolean;
   command: string;
   path: string | null;
+  version: string | null;
 }
 
 interface ResolvedExternalTools {
@@ -183,7 +186,12 @@ function getExecErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function execFileAsync(command: string, args: string[], timeout: number): Promise<{ stdout: string; stderr: string }> {
+function execFileAsync(
+  command: string,
+  args: string[],
+  timeout: number,
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(
       command,
@@ -191,6 +199,7 @@ function execFileAsync(command: string, args: string[], timeout: number): Promis
       {
         encoding: 'utf8',
         maxBuffer: EXEC_MAX_BUFFER_BYTES,
+        signal,
         timeout,
         windowsHide: true,
       },
@@ -235,19 +244,41 @@ async function locateCommand(command: string): Promise<string | null> {
 
 async function resolveExecutable(command: string): Promise<ExecutableStatus> {
   try {
-    await execFileAsync(command, ['-version'], EXECUTABLE_VERSION_TIMEOUT_MS);
+    const { stdout, stderr } = await execFileAsync(command, ['-version'], EXECUTABLE_VERSION_TIMEOUT_MS);
     return {
       available: true,
       command,
       path: await locateCommand(command),
+      version: parseExecutableVersion(stdout || stderr, command),
     };
   } catch {
     return {
       available: false,
       command,
       path: path.isAbsolute(command) ? command : null,
+      version: null,
     };
   }
+}
+
+function parseExecutableVersion(output: string, command: string): string | null {
+  const firstLine = output
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+
+  if (!firstLine) {
+    return null;
+  }
+
+  const versionMatch = firstLine.match(/^([^\s]+)\s+version\s+([^\s]+)/iu);
+
+  if (versionMatch) {
+    return `${versionMatch[1]} ${versionMatch[2]}`;
+  }
+
+  const executableName = path.basename(command);
+  return firstLine.startsWith(executableName) ? firstLine : `${executableName} ${firstLine}`;
 }
 
 async function resolveExternalTools(resource: vscode.Uri): Promise<ResolvedExternalTools> {
@@ -297,9 +328,11 @@ export async function getExternalToolStatus(resource: vscode.Uri): Promise<Exter
     ffmpegAvailable: tools.ffmpeg.available,
     ffmpegCommand: tools.ffmpeg.command,
     ffmpegPath: tools.ffmpeg.path,
+    ffmpegVersion: tools.ffmpeg.version,
     ffprobeAvailable: tools.ffprobe.available,
     ffprobeCommand: tools.ffprobe.command,
     ffprobePath: tools.ffprobe.path,
+    ffprobeVersion: tools.ffprobe.version,
     fileBacked,
     guidance: buildExternalToolGuidance(fileBacked, tools),
   };
@@ -316,6 +349,18 @@ function parseNumberValue(value: unknown): number | null {
   }
 
   return null;
+}
+
+function getPrimaryAudioStream(rawPayload: FfprobeJsonPayload): FfprobeStreamSection | null {
+  const streams = Array.isArray(rawPayload.streams) ? rawPayload.streams : [];
+  return streams.find((stream) => stream.codec_type === 'audio') ?? null;
+}
+
+function getAudioDurationSeconds(rawPayload: FfprobeJsonPayload): number | null {
+  const primaryAudioStream = getPrimaryAudioStream(rawPayload);
+  const formatSection = rawPayload.format;
+
+  return parseNumberValue(primaryAudioStream?.duration) ?? parseNumberValue(formatSection?.duration);
 }
 
 function formatFrequencyText(value: number | null): string | null {
@@ -505,7 +550,10 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
   };
 }
 
-async function runFfprobe(resource: vscode.Uri): Promise<{ metadata: MediaMetadataPayload; toolStatus: ExternalToolStatusPayload }> {
+async function runFfprobe(
+  resource: vscode.Uri,
+  signal?: AbortSignal,
+): Promise<{ metadata: MediaMetadataPayload; rawPayload: FfprobeJsonPayload; toolStatus: ExternalToolStatusPayload }> {
   const toolStatus = await getExternalToolStatus(resource);
   const filePath = getCliFilePath(resource);
 
@@ -530,6 +578,7 @@ async function runFfprobe(resource: vscode.Uri): Promise<{ metadata: MediaMetada
       filePath,
     ],
     EXTERNAL_TOOL_TIMEOUT_MS,
+    signal,
   );
 
   let parsed: FfprobeJsonPayload;
@@ -542,6 +591,7 @@ async function runFfprobe(resource: vscode.Uri): Promise<{ metadata: MediaMetada
 
   return {
     metadata: summarizeMetadata(parsed, toolStatus),
+    rawPayload: parsed,
     toolStatus,
   };
 }
