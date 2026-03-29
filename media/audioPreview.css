@@ -30,6 +30,7 @@
   --selection-border: rgba(191, 219, 254, 0.28);
   --cursor: rgba(191, 219, 254, 0.92);
   --surface-inline-padding: 20px;
+  --viewport-splitter-size: 12px;
 }
 
 *,
@@ -83,14 +84,16 @@ body {
 .media-metadata-panel {
   position: relative;
   z-index: 8;
-  flex: 1 1 320px;
-  min-width: min(100%, 260px);
+  flex: 0 1 auto;
+  width: fit-content;
+  min-width: 0;
   max-width: min(100%, 560px);
 }
 
 .media-metadata-summary {
   display: block;
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-width: 0;
   padding: 8px 12px;
   border: 1px solid rgba(148, 163, 184, 0.18);
@@ -203,7 +206,7 @@ body {
 
 .viewport {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) var(--viewport-splitter-size) minmax(0, 1fr);
   width: 100%;
   max-width: 100%;
   margin: 0 !important;
@@ -211,6 +214,60 @@ body {
   width: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+.viewport-splitter {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: var(--viewport-splitter-size);
+  cursor: row-resize;
+  touch-action: none;
+  user-select: none;
+  background:
+    linear-gradient(180deg, rgba(116, 143, 189, 0.04) 0%, rgba(116, 143, 189, 0.16) 50%, rgba(116, 143, 189, 0.04) 100%);
+}
+
+.viewport-splitter::before {
+  content: "";
+  position: absolute;
+  inset-inline: var(--surface-inline-padding);
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+  background: rgba(116, 143, 189, 0.18);
+}
+
+.viewport-splitter-handle {
+  position: relative;
+  z-index: 1;
+  width: 56px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(191, 219, 254, 0.72);
+  box-shadow:
+    0 0 0 1px rgba(148, 163, 184, 0.16),
+    0 10px 20px rgba(0, 0, 0, 0.24);
+  opacity: 0.82;
+  transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
+}
+
+.viewport-splitter:hover .viewport-splitter-handle,
+.viewport-splitter:focus-visible .viewport-splitter-handle,
+.viewport-splitter[data-dragging="true"] .viewport-splitter-handle {
+  transform: scaleX(1.12);
+  opacity: 1;
+  background: rgba(219, 234, 254, 0.94);
+}
+
+.viewport-splitter:focus,
+.viewport-splitter:focus-visible {
+  outline: none;
+}
+
+.viewport-splitter:focus-visible::before,
+.viewport-splitter[data-dragging="true"]::before {
+  background: rgba(96, 165, 250, 0.35);
 }
 
 .wave-panel {
@@ -224,8 +281,8 @@ body {
 }
 
 .wave-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px 16px;
   padding: 10px 0 8px;
@@ -235,7 +292,8 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: nowrap;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
@@ -282,8 +340,8 @@ body {
   align-items: center;
   gap: 8px;
   flex-wrap: nowrap;
-  justify-content: flex-end;
-  justify-self: end;
+  flex: 0 0 auto;
+  justify-content: flex-start;
   padding: 5px 6px;
   border: 1px solid rgba(116, 143, 189, 0.14);
   border-radius: 14px;
@@ -505,7 +563,7 @@ body {
   padding: 0;
   width: 100%;
   height: 100%;
-  min-height: 0;
+  min-height: 140px;
   overflow: hidden;
   border: 1px solid var(--spectrogram-axis-border);
   border-left: 0;
@@ -722,7 +780,7 @@ body {
 
 .transport {
   display: grid;
-  grid-template-columns: auto auto auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto auto auto auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
   width: 100%;
@@ -992,14 +1050,13 @@ body {
 
 @media (max-width: 960px) {
   .wave-toolbar {
-    grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
-    row-gap: 8px;
+    gap: 8px 12px;
   }
 
   .media-metadata-panel {
-    flex: 1 1 100%;
-    max-width: none;
+    flex: 0 1 auto;
+    max-width: min(100%, 560px);
   }
 
   .wave-toolbar-actions {
@@ -1015,8 +1072,8 @@ body {
   .transport {
     grid-template-columns: auto auto auto minmax(180px, 1fr);
     grid-template-areas:
-      "back play forward slider"
-      "time time time time"
+      "back play forward ."
+      "time slider slider slider"
       "loudness loudness loudness loudness";
     row-gap: 8px;
   }
@@ -1055,6 +1112,7 @@ body {
 @media (max-width: 720px) {
   :root {
     --surface-inline-padding: 12px;
+    --viewport-splitter-size: 14px;
   }
 
   .wave-toolbar-row {
@@ -1066,7 +1124,10 @@ body {
     font-size: 10px;
   }
 
-  .media-metadata-panel,
+  .media-metadata-panel {
+    max-width: 100%;
+  }
+
   .wave-loop-label {
     width: 100%;
     max-width: none;
@@ -1079,6 +1140,10 @@ body {
   .spectrogram-axis {
     inset: 0 auto 0 0;
     width: 60px;
+  }
+
+  .viewport-splitter-handle {
+    width: 44px;
   }
 
 }

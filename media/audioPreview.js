@@ -22,6 +22,12 @@ const SPECTROGRAM_OVERVIEW_WIDTH_SCALE = 0.45;
 const SPECTROGRAM_OVERVIEW_HEIGHT_SCALE = 0.7;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
 const SPECTROGRAM_ROW_BUCKET_SIZE = 32;
+const DEFAULT_VIEWPORT_SPLIT_RATIO = 0.5;
+const VIEWPORT_SPLIT_STEP = 0.05;
+const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 12;
+const VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX = 140;
+const VIEWPORT_RATIO_MIN = 0.15;
+const VIEWPORT_RATIO_MAX = 0.85;
 
 const WAVEFORM_COLOR = '#7dd3fc';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
@@ -66,6 +72,9 @@ const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875];
 
 const elements = {
+  viewport: document.getElementById('preview-viewport'),
+  wavePanel: document.getElementById('wave-panel'),
+  waveToolbar: document.getElementById('wave-toolbar'),
   mediaMetadataPanel: document.getElementById('media-metadata-panel'),
   mediaMetadataSummary: document.getElementById('media-metadata-summary'),
   mediaMetadataDetail: document.getElementById('media-metadata-detail'),
@@ -91,6 +100,9 @@ const elements = {
   waveZoomReset: document.getElementById('wave-zoom-reset'),
   waveZoomIn: document.getElementById('wave-zoom-in'),
   waveFollow: document.getElementById('wave-follow'),
+  viewportSplitter: document.getElementById('viewport-splitter'),
+  spectrogramPanel: document.getElementById('spectrogram-panel'),
+  spectrogramStage: document.getElementById('spectrogram-stage'),
   spectrogram: document.getElementById('spectrogram'),
   spectrogramSelection: document.getElementById('spectrogram-selection'),
   spectrogramProgress: document.getElementById('spectrogram-progress'),
@@ -158,6 +170,8 @@ const state = {
   waveformViewRange: { start: 0, end: 0 },
   waveformHoverClientPoint: null,
   waveformSeekPointerId: null,
+  viewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
+  viewportResizeDrag: null,
   selectionDrag: null,
   selectionDraft: null,
   loopHandleDrag: null,
@@ -218,6 +232,7 @@ if (
   initializeKeyboardFocus();
   state.followPlayback = elements.waveFollow.checked;
   attachUiEvents();
+  applyViewportSplit(true);
   attachResizeObservers();
   renderWaveformUi();
   renderSpectrogramScale();
@@ -423,9 +438,11 @@ function createExternalToolStatusState() {
     ffmpegAvailable: false,
     ffmpegCommand: 'ffmpeg',
     ffmpegPath: null,
+    ffmpegVersion: null,
     ffprobeAvailable: false,
     ffprobeCommand: 'ffprobe',
     ffprobePath: null,
+    ffprobeVersion: null,
     fileBacked: false,
     guidance: 'Install ffmpeg CLI to view metadata and decode unsupported audio files.',
   };
@@ -449,6 +466,9 @@ function normalizeExternalToolStatus(status) {
     ffmpegPath: typeof status.ffmpegPath === 'string' && status.ffmpegPath.trim().length > 0
       ? status.ffmpegPath
       : null,
+    ffmpegVersion: typeof status.ffmpegVersion === 'string' && status.ffmpegVersion.trim().length > 0
+      ? status.ffmpegVersion
+      : null,
     ffprobeAvailable: Boolean(status.ffprobeAvailable),
     ffprobeCommand: typeof status.ffprobeCommand === 'string' && status.ffprobeCommand.trim().length > 0
       ? status.ffprobeCommand
@@ -456,11 +476,26 @@ function normalizeExternalToolStatus(status) {
     ffprobePath: typeof status.ffprobePath === 'string' && status.ffprobePath.trim().length > 0
       ? status.ffprobePath
       : null,
+    ffprobeVersion: typeof status.ffprobeVersion === 'string' && status.ffprobeVersion.trim().length > 0
+      ? status.ffprobeVersion
+      : null,
     fileBacked: Boolean(status.fileBacked),
     guidance: typeof status.guidance === 'string' && status.guidance.trim().length > 0
       ? status.guidance
       : base.guidance,
   };
+}
+
+function formatExternalToolVersion(available, version, command) {
+  if (!available) {
+    return `Unavailable (${command || 'tool'})`;
+  }
+
+  if (typeof version === 'string' && version.trim().length > 0) {
+    return version;
+  }
+
+  return command || 'Available';
 }
 
 function createMediaMetadataState(status = 'idle') {
@@ -751,16 +786,20 @@ function renderMediaMetadata() {
   appendMetadataDetailRow(
     toolSection,
     'ffmpeg',
-    state.externalTools.ffmpegAvailable
-      ? state.externalTools.ffmpegPath || state.externalTools.ffmpegCommand || 'ffmpeg'
-      : `Unavailable (${state.externalTools.ffmpegCommand || 'ffmpeg'})`,
+    formatExternalToolVersion(
+      state.externalTools.ffmpegAvailable,
+      state.externalTools.ffmpegVersion,
+      state.externalTools.ffmpegCommand,
+    ),
   );
   appendMetadataDetailRow(
     toolSection,
     'ffprobe',
-    state.externalTools.ffprobeAvailable
-      ? state.externalTools.ffprobePath || state.externalTools.ffprobeCommand || 'ffprobe'
-      : `Unavailable (${state.externalTools.ffprobeCommand || 'ffprobe'})`,
+    formatExternalToolVersion(
+      state.externalTools.ffprobeAvailable,
+      state.externalTools.ffprobeVersion,
+      state.externalTools.ffprobeCommand,
+    ),
   );
   appendMetadataDetailRow(
     toolSection,
@@ -1332,7 +1371,7 @@ async function startAnalysis(loadToken, payload) {
       return;
     }
 
-    setAnalysisStatus('Initializing wasm pipelines…');
+    setAnalysisStatus('Initializing analysis workers…');
     await Promise.all([
       state.analysisRuntimeReadyPromise,
       state.waveformRuntimeReadyPromise,
@@ -1370,7 +1409,11 @@ async function startAnalysis(loadToken, payload) {
       return;
     }
 
-    state.waveformSamples = monoSamples.slice();
+    const waveformSamples = state.transportMode === 'shared'
+      ? monoSamples
+      : monoSamples.slice();
+
+    state.waveformSamples = waveformSamples;
 
     state.analysis = createSpectrogramAnalysisState({
       duration: decodedAudio.duration,
@@ -1420,8 +1463,6 @@ async function startAnalysis(loadToken, payload) {
         body: sharedBody,
       });
     } else {
-      const waveformSamples = monoSamples.slice();
-
       waveformWorker.postMessage({
         type: 'attachAudioSession',
         body: {
@@ -3175,6 +3216,225 @@ function bindLoopHandle(handleElement, edge, targetElement) {
   });
 }
 
+function normalizeViewportSplitRatio(value) {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_VIEWPORT_SPLIT_RATIO;
+  }
+
+  return clamp(value, VIEWPORT_RATIO_MIN, VIEWPORT_RATIO_MAX);
+}
+
+function getNumericStyleSize(element, propertyName, fallback = 0) {
+  if (!element) {
+    return fallback;
+  }
+
+  const computedValue = Number.parseFloat(window.getComputedStyle(element)[propertyName]);
+  return Number.isFinite(computedValue) ? computedValue : fallback;
+}
+
+function getViewportSplitterSize() {
+  return Math.max(
+    1,
+    elements.viewportSplitter?.offsetHeight
+      || getNumericStyleSize(elements.viewportSplitter, 'minHeight', VIEWPORT_SPLITTER_FALLBACK_SIZE_PX),
+  );
+}
+
+function getWavePanelMinimumHeight() {
+  const waveformViewportMinHeight = getNumericStyleSize(elements.waveformViewport, 'minHeight', 168);
+
+  return Math.max(
+    waveformViewportMinHeight,
+    (elements.waveToolbar?.offsetHeight || 0)
+      + (elements.waveformAxis?.offsetHeight || 0)
+      + waveformViewportMinHeight,
+  );
+}
+
+function getSpectrogramPanelMinimumHeight() {
+  return Math.max(
+    VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX,
+    getNumericStyleSize(elements.spectrogramStage, 'minHeight', VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX),
+  );
+}
+
+function resolveViewportPanelHeights(availableHeight, ratio = state.viewportSplitRatio) {
+  const safeAvailableHeight = Math.max(0, availableHeight);
+
+  if (safeAvailableHeight <= 0) {
+    return { waveHeight: 0, spectrogramHeight: 0 };
+  }
+
+  const desiredWaveHeight = safeAvailableHeight * normalizeViewportSplitRatio(ratio);
+  const minimumWaveHeight = Math.min(getWavePanelMinimumHeight(), safeAvailableHeight);
+  const minimumSpectrogramHeight = Math.min(getSpectrogramPanelMinimumHeight(), safeAvailableHeight);
+
+  if ((minimumWaveHeight + minimumSpectrogramHeight) >= safeAvailableHeight) {
+    const waveHeight = Math.round(clamp(desiredWaveHeight, 0, safeAvailableHeight));
+
+    return {
+      waveHeight,
+      spectrogramHeight: Math.max(0, safeAvailableHeight - waveHeight),
+    };
+  }
+
+  const waveHeight = Math.round(clamp(
+    desiredWaveHeight,
+    minimumWaveHeight,
+    safeAvailableHeight - minimumSpectrogramHeight,
+  ));
+
+  return {
+    waveHeight,
+    spectrogramHeight: Math.max(0, safeAvailableHeight - waveHeight),
+  };
+}
+
+function updateViewportSplitterAccessibility(waveHeight, availableHeight) {
+  if (!elements.viewportSplitter) {
+    return;
+  }
+
+  const wavePercentage = availableHeight > 0
+    ? Math.round((waveHeight / availableHeight) * 100)
+    : Math.round(state.viewportSplitRatio * 100);
+  const spectrogramPercentage = Math.max(0, 100 - wavePercentage);
+
+  elements.viewportSplitter.setAttribute('aria-valuenow', String(wavePercentage));
+  elements.viewportSplitter.setAttribute(
+    'aria-valuetext',
+    `Waveform ${wavePercentage}%, spectrogram ${spectrogramPercentage}%`,
+  );
+}
+
+function applyViewportSplit(force = false) {
+  if (!elements.viewport || !elements.viewportSplitter) {
+    return;
+  }
+
+  const splitterSize = getViewportSplitterSize();
+  const availableHeight = Math.max(0, elements.viewport.clientHeight - splitterSize);
+
+  if (availableHeight <= 0) {
+    updateViewportSplitterAccessibility(0, 0);
+    return;
+  }
+
+  const { waveHeight, spectrogramHeight } = resolveViewportPanelHeights(availableHeight);
+  const nextTemplate = `${waveHeight}px ${splitterSize}px ${spectrogramHeight}px`;
+
+  if (!force && elements.viewport.style.gridTemplateRows === nextTemplate) {
+    updateViewportSplitterAccessibility(waveHeight, availableHeight);
+    return;
+  }
+
+  elements.viewport.style.gridTemplateRows = nextTemplate;
+  updateViewportSplitterAccessibility(waveHeight, availableHeight);
+}
+
+function setViewportSplitRatio(ratio, force = false) {
+  const nextRatio = normalizeViewportSplitRatio(ratio);
+  const ratioChanged = Math.abs(state.viewportSplitRatio - nextRatio) > 0.001;
+
+  state.viewportSplitRatio = nextRatio;
+
+  if (ratioChanged || force) {
+    applyViewportSplit(force);
+  }
+}
+
+function updateViewportSplitRatioFromClientY(clientY) {
+  if (!elements.viewport) {
+    return;
+  }
+
+  const splitterSize = getViewportSplitterSize();
+  const viewportRect = elements.viewport.getBoundingClientRect();
+  const availableHeight = Math.max(0, viewportRect.height - splitterSize);
+
+  if (availableHeight <= 0) {
+    return;
+  }
+
+  const proposedWaveHeight = clamp(clientY - viewportRect.top - (splitterSize / 2), 0, availableHeight);
+  const { waveHeight } = resolveViewportPanelHeights(availableHeight, proposedWaveHeight / availableHeight);
+  setViewportSplitRatio(waveHeight / availableHeight, true);
+}
+
+function beginViewportSplitDrag(event) {
+  if (!elements.viewportSplitter) {
+    return;
+  }
+
+  if (event.pointerType === 'mouse' && event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  elements.viewportSplitter.dataset.dragging = 'true';
+  elements.viewportSplitter.setPointerCapture(event.pointerId);
+  state.viewportResizeDrag = { pointerId: event.pointerId };
+  updateViewportSplitRatioFromClientY(event.clientY);
+}
+
+function updateViewportSplitDrag(event) {
+  const dragState = state.viewportResizeDrag;
+
+  if (!dragState || dragState.pointerId !== event.pointerId) {
+    return;
+  }
+
+  event.preventDefault();
+  updateViewportSplitRatioFromClientY(event.clientY);
+}
+
+function endViewportSplitDrag(event, cancelled = false) {
+  const dragState = state.viewportResizeDrag;
+
+  if (!dragState || dragState.pointerId !== event.pointerId || !elements.viewportSplitter) {
+    return;
+  }
+
+  if (elements.viewportSplitter.hasPointerCapture?.(event.pointerId)) {
+    elements.viewportSplitter.releasePointerCapture(event.pointerId);
+  }
+
+  delete elements.viewportSplitter.dataset.dragging;
+  state.viewportResizeDrag = null;
+
+  if (!cancelled) {
+    updateViewportSplitRatioFromClientY(event.clientY);
+  }
+}
+
+function resetViewportSplit() {
+  setViewportSplitRatio(DEFAULT_VIEWPORT_SPLIT_RATIO, true);
+}
+
+function handleViewportSplitterKeydown(event) {
+  let nextRatio = null;
+
+  if (event.key === 'ArrowUp') {
+    nextRatio = state.viewportSplitRatio - VIEWPORT_SPLIT_STEP;
+  } else if (event.key === 'ArrowDown') {
+    nextRatio = state.viewportSplitRatio + VIEWPORT_SPLIT_STEP;
+  } else if (event.key === 'Home') {
+    nextRatio = VIEWPORT_RATIO_MIN;
+  } else if (event.key === 'End') {
+    nextRatio = VIEWPORT_RATIO_MAX;
+  } else if (event.key === 'Enter' || event.key === ' ') {
+    nextRatio = DEFAULT_VIEWPORT_SPLIT_RATIO;
+  }
+
+  if (nextRatio === null) {
+    return;
+  }
+
+  event.preventDefault();
+  setViewportSplitRatio(nextRatio, true);
+}
+
 function handleSharedViewportWheel(event, targetElement) {
   const duration = getEffectiveDuration();
   const range = getWaveformRange();
@@ -3246,6 +3506,25 @@ function handleSharedViewportWheel(event, targetElement) {
 }
 
 function attachUiEvents() {
+  elements.viewportSplitter?.addEventListener('pointerdown', (event) => {
+    beginViewportSplitDrag(event);
+  });
+  elements.viewportSplitter?.addEventListener('pointermove', (event) => {
+    updateViewportSplitDrag(event);
+  });
+  elements.viewportSplitter?.addEventListener('pointerup', (event) => {
+    endViewportSplitDrag(event);
+  });
+  elements.viewportSplitter?.addEventListener('pointercancel', (event) => {
+    endViewportSplitDrag(event, true);
+  });
+  elements.viewportSplitter?.addEventListener('dblclick', () => {
+    resetViewportSplit();
+  });
+  elements.viewportSplitter?.addEventListener('keydown', (event) => {
+    handleViewportSplitterKeydown(event);
+  });
+
   elements.spectrogramTypeSelect?.addEventListener('change', () => {
     state.spectrogramRenderConfig.analysisType = normalizeSpectrogramAnalysisType(elements.spectrogramTypeSelect.value);
     renderSpectrogramScale();
@@ -3401,6 +3680,7 @@ function attachUiEvents() {
 
 function attachResizeObservers() {
   const resizeObserver = new ResizeObserver(() => {
+    applyViewportSplit();
     const { height, width } = getWaveformViewportSize();
     const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
     const overviewWidth = Math.max(1, elements.waveformOverview.clientWidth);
@@ -3466,6 +3746,7 @@ function attachResizeObservers() {
   });
 
   resizeObserver.observe(document.body);
+  resizeObserver.observe(elements.viewport);
   resizeObserver.observe(elements.waveformViewport);
   resizeObserver.observe(elements.waveformOverview);
 }

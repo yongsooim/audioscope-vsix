@@ -8,9 +8,11 @@ export interface ExternalToolStatusPayload {
   ffmpegAvailable: boolean;
   ffmpegCommand: string;
   ffmpegPath: string | null;
+  ffmpegVersion: string | null;
   ffprobeAvailable: boolean;
   ffprobeCommand: string;
   ffprobePath: string | null;
+  ffprobeVersion: string | null;
   fileBacked: boolean;
   guidance: string;
 }
@@ -138,6 +140,7 @@ interface ExecutableStatus {
   available: boolean;
   command: string;
   path: string | null;
+  version: string | null;
 }
 
 interface ResolvedExternalTools {
@@ -235,19 +238,41 @@ async function locateCommand(command: string): Promise<string | null> {
 
 async function resolveExecutable(command: string): Promise<ExecutableStatus> {
   try {
-    await execFileAsync(command, ['-version'], EXECUTABLE_VERSION_TIMEOUT_MS);
+    const { stdout, stderr } = await execFileAsync(command, ['-version'], EXECUTABLE_VERSION_TIMEOUT_MS);
     return {
       available: true,
       command,
       path: await locateCommand(command),
+      version: parseExecutableVersion(stdout || stderr, command),
     };
   } catch {
     return {
       available: false,
       command,
       path: path.isAbsolute(command) ? command : null,
+      version: null,
     };
   }
+}
+
+function parseExecutableVersion(output: string, command: string): string | null {
+  const firstLine = output
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+
+  if (!firstLine) {
+    return null;
+  }
+
+  const versionMatch = firstLine.match(/^([^\s]+)\s+version\s+([^\s]+)/iu);
+
+  if (versionMatch) {
+    return `${versionMatch[1]} ${versionMatch[2]}`;
+  }
+
+  const executableName = path.basename(command);
+  return firstLine.startsWith(executableName) ? firstLine : `${executableName} ${firstLine}`;
 }
 
 async function resolveExternalTools(resource: vscode.Uri): Promise<ResolvedExternalTools> {
@@ -297,9 +322,11 @@ export async function getExternalToolStatus(resource: vscode.Uri): Promise<Exter
     ffmpegAvailable: tools.ffmpeg.available,
     ffmpegCommand: tools.ffmpeg.command,
     ffmpegPath: tools.ffmpeg.path,
+    ffmpegVersion: tools.ffmpeg.version,
     ffprobeAvailable: tools.ffprobe.available,
     ffprobeCommand: tools.ffprobe.command,
     ffprobePath: tools.ffprobe.path,
+    ffprobeVersion: tools.ffprobe.version,
     fileBacked,
     guidance: buildExternalToolGuidance(fileBacked, tools),
   };

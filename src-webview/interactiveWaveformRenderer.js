@@ -10,15 +10,29 @@ const LINE_BLEND_END_SAMPLES_PER_PIXEL = 1;
 const SYMMETRIC_BLEND_START_SAMPLES_PER_PIXEL = 12;
 const SYMMETRIC_BLEND_END_SAMPLES_PER_PIXEL = 2;
 
-export function buildInteractiveWaveformData(channelData) {
-  const samples = normalizeInteractiveWaveformSamples(channelData);
-  const levels = getInteractiveWaveformBlockSizes(samples.length).map((blockSize) =>
-    buildInteractiveWaveformLevel(samples, blockSize));
+export function buildInteractiveWaveformData(channelData, options = {}) {
+  const samples = normalizeInteractiveWaveformSamples(channelData, options);
+  const levels = [];
+  let previousLevel = null;
+
+  for (const blockSize of getInteractiveWaveformBlockSizes(samples.length)) {
+    const level = previousLevel && blockSize === previousLevel.blockSize * LEVEL_SCALE_FACTOR
+      ? buildPeakLevelFromPrevious(previousLevel)
+      : buildInteractiveWaveformLevel(samples, blockSize);
+    levels.push(level);
+    previousLevel = level;
+  }
 
   return { samples, levels };
 }
 
-export function normalizeInteractiveWaveformSamples(channelData) {
+export function normalizeInteractiveWaveformSamples(channelData, options = {}) {
+  const shouldCopy = options?.copy !== false || !(channelData instanceof Float32Array);
+
+  if (!shouldCopy) {
+    return channelData;
+  }
+
   const sampleCount = channelData.length;
   const samples = new Float32Array(sampleCount);
 
@@ -53,6 +67,53 @@ export function getInteractiveWaveformBlockSizes(sampleCount) {
 
 export function buildInteractiveWaveformLevel(samples, blockSize) {
   return buildPeakLevel(samples, blockSize);
+}
+
+export function extractInteractiveWaveformSlice(
+  waveformData,
+  duration,
+  viewStart,
+  viewEnd,
+  columnCount,
+  output = null,
+) {
+  const safeColumnCount = Math.max(1, Math.round(columnCount || 0));
+  const target = output instanceof Float32Array && output.length >= safeColumnCount * 2
+    ? output
+    : new Float32Array(safeColumnCount * 2);
+
+  if (!waveformData || duration <= 0 || viewEnd <= viewStart || safeColumnCount <= 0) {
+    target.fill(0, 0, safeColumnCount * 2);
+    return target;
+  }
+
+  const clampedStart = clamp(viewStart, 0, duration);
+  const clampedEnd = clamp(viewEnd, clampedStart + 1e-4, duration);
+  const sampleCount = waveformData.samples.length;
+
+  if (sampleCount <= 0) {
+    target.fill(0, 0, safeColumnCount * 2);
+    return target;
+  }
+
+  const startSample = Math.floor((clampedStart / duration) * sampleCount);
+  const endSample = Math.ceil((clampedEnd / duration) * sampleCount);
+  const visibleSamples = Math.max(1, endSample - startSample);
+  const samplesPerColumn = Math.max(1, visibleSamples / safeColumnCount);
+  const selectedLevel = pickLevel(waveformData.levels, samplesPerColumn);
+
+  for (let columnIndex = 0; columnIndex < safeColumnCount; columnIndex += 1) {
+    const columnStartSample = Math.floor(startSample + (columnIndex / safeColumnCount) * visibleSamples);
+    const columnEndSample = Math.ceil(startSample + ((columnIndex + 1) / safeColumnCount) * visibleSamples);
+    const range = selectedLevel
+      ? getLevelRange(selectedLevel, columnStartSample, columnEndSample)
+      : getSampleRange(waveformData.samples, columnStartSample, columnEndSample);
+    const targetIndex = columnIndex * 2;
+    target[targetIndex] = range.min;
+    target[targetIndex + 1] = range.max;
+  }
+
+  return target;
 }
 
 export function resizeInteractiveWaveformSurface(surface, width, height, renderScale) {
@@ -174,7 +235,7 @@ function buildPeakLevel(samples, blockSize) {
     let maxPeak = -1;
 
     for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
-      const value = samples[sampleIndex] ?? 0;
+      const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
 
       if (value < minPeak) {
         minPeak = value;
@@ -190,6 +251,41 @@ function buildPeakLevel(samples, blockSize) {
   }
 
   return { blockSize, minPeaks, maxPeaks };
+}
+
+function buildPeakLevelFromPrevious(previousLevel) {
+  const blockCount = Math.ceil(previousLevel.maxPeaks.length / LEVEL_SCALE_FACTOR);
+  const minPeaks = new Float32Array(blockCount);
+  const maxPeaks = new Float32Array(blockCount);
+
+  for (let blockIndex = 0; blockIndex < blockCount; blockIndex += 1) {
+    const start = blockIndex * LEVEL_SCALE_FACTOR;
+    const end = Math.min(previousLevel.maxPeaks.length, start + LEVEL_SCALE_FACTOR);
+    let minPeak = 1;
+    let maxPeak = -1;
+
+    for (let peakIndex = start; peakIndex < end; peakIndex += 1) {
+      const blockMin = previousLevel.minPeaks[peakIndex] ?? 0;
+      const blockMax = previousLevel.maxPeaks[peakIndex] ?? 0;
+
+      if (blockMin < minPeak) {
+        minPeak = blockMin;
+      }
+
+      if (blockMax > maxPeak) {
+        maxPeak = blockMax;
+      }
+    }
+
+    minPeaks[blockIndex] = minPeak;
+    maxPeaks[blockIndex] = maxPeak;
+  }
+
+  return {
+    blockSize: previousLevel.blockSize * LEVEL_SCALE_FACTOR,
+    minPeaks,
+    maxPeaks,
+  };
 }
 
 function getLevelRange(level, startSample, endSample) {
@@ -219,7 +315,7 @@ function getSampleRange(samples, startSample, endSample) {
   let max = -1;
 
   for (let sampleIndex = Math.max(0, startSample); sampleIndex < Math.min(samples.length, endSample); sampleIndex += 1) {
-    const value = samples[sampleIndex] ?? 0;
+    const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
 
     if (value < min) {
       min = value;
@@ -291,8 +387,8 @@ function getInterpolatedSample(samples, position) {
   const index = Math.floor(position);
   const nextIndex = Math.min(samples.length - 1, index + 1);
   const fraction = position - index;
-  const a = samples[index] ?? 0;
-  const b = samples[nextIndex] ?? 0;
+  const a = clamp(samples[index] ?? 0, -1, 1);
+  const b = clamp(samples[nextIndex] ?? 0, -1, 1);
 
   return a + (b - a) * fraction;
 }

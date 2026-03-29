@@ -1,4 +1,8 @@
-import { loadWaveCoreRuntime } from './waveCoreRuntime.js';
+import {
+  buildInteractiveWaveformData,
+  extractInteractiveWaveformSlice,
+  resizeInteractiveWaveformSurface,
+} from './interactiveWaveformRenderer.js';
 
 const TOP_PADDING = 10;
 const BOTTOM_PADDING = 10;
@@ -7,8 +11,8 @@ const SYMMETRIC_ENVELOPE_GAIN = 0.76;
 const SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 8;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
 const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
+const WAVEFORM_RUNTIME_VARIANT = 'waveform-js-worker';
 
-let runtimePromise = null;
 let requestQueue = Promise.resolve();
 let renderLoopActive = false;
 let pendingRenderRequest = null;
@@ -30,14 +34,11 @@ self.onmessage = (event) => {
 
   switch (message.type) {
     case 'bootstrapRuntime':
-      enqueueRequest(async () => {
-        const runtime = await getRuntime();
-        self.postMessage({
-          type: 'runtimeReady',
-          body: {
-            runtimeVariant: runtime.variant,
-          },
-        });
+      self.postMessage({
+        type: 'runtimeReady',
+        body: {
+          runtimeVariant: WAVEFORM_RUNTIME_VARIANT,
+        },
       });
       return;
     case 'initCanvas':
@@ -50,14 +51,12 @@ self.onmessage = (event) => {
       return;
     case 'attachAudioSession':
       enqueueRequest(async () => {
-        const runtime = await getRuntime();
-        attachAudioSession(runtime, message.body);
+        attachAudioSession(message.body);
       });
       return;
     case 'buildWaveformPyramid':
       enqueueRequest(async () => {
-        const runtime = await getRuntime();
-        buildWaveformPyramid(runtime);
+        buildWaveformPyramid();
         void pumpRenderLoop();
       });
       return;
@@ -74,8 +73,7 @@ self.onmessage = (event) => {
     case 'disposeSession':
       resolvePendingPresentation(null, false);
       enqueueRequest(async () => {
-        const runtime = await getRuntime();
-        disposeSession(runtime);
+        disposeSession();
         clearCanvas();
       });
       return;
@@ -100,9 +98,10 @@ function createEmptyAnalysisState() {
     sampleRate: 0,
     sampleCount: 0,
     duration: 0,
-    runtimeVariant: null,
-    waveformOutputPointer: 0,
-    waveformOutputCapacity: 0,
+    runtimeVariant: WAVEFORM_RUNTIME_VARIANT,
+    waveformData: null,
+    waveformSlice: null,
+    waveformSliceCapacity: 0,
   };
 }
 
@@ -112,14 +111,6 @@ function enqueueRequest(task) {
     .catch((error) => {
       postError(error);
     });
-}
-
-function getRuntime() {
-  if (!runtimePromise) {
-    runtimePromise = loadWaveCoreRuntime();
-  }
-
-  return runtimePromise;
 }
 
 function initializeCanvas(options) {
@@ -159,8 +150,12 @@ function resizeSurface() {
     return;
   }
 
-  surfaceState.canvas.width = Math.max(1, Math.round(surfaceState.width * surfaceState.renderScale));
-  surfaceState.canvas.height = Math.max(1, Math.round(surfaceState.height * surfaceState.renderScale));
+  resizeInteractiveWaveformSurface(
+    surfaceState.canvas,
+    surfaceState.width,
+    surfaceState.height,
+    surfaceState.renderScale,
+  );
 }
 
 function clearCanvas() {
@@ -172,8 +167,7 @@ function clearCanvas() {
   surfaceState.context.clearRect(0, 0, surfaceState.canvas.width, surfaceState.canvas.height);
 }
 
-function attachAudioSession(runtime, options) {
-  const module = runtime.module;
+function attachAudioSession(options) {
   const transportMode = options?.transportMode === 'transfer' ? 'transfer' : 'shared';
   const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
@@ -195,53 +189,56 @@ function attachAudioSession(runtime, options) {
   const isNewAudioSession = sessionVersion !== analysisState.attachedSessionVersion;
 
   if (isNewAudioSession) {
-    disposeWasmSession(module);
-
-    if (!module._wave_prepare_session(sampleCount, sampleRate, duration)) {
-      throw new Error('Failed to allocate waveform session.');
-    }
-
-    const pcmPointer = module._wave_get_pcm_ptr();
-
-    if (!pcmPointer) {
-      throw new Error('Wasm PCM allocation failed.');
-    }
-
-    const pcmSource = transportMode === 'shared'
+    const samples = transportMode === 'shared'
       ? new Float32Array(options.pcmSab)
       : new Float32Array(options.samplesBuffer);
-    const pcmTarget = getHeapF32View(module, pcmPointer, sampleCount);
-    pcmTarget.set(pcmSource);
+
+    analysisState.waveformData = {
+      samples,
+      levels: [],
+    };
+    analysisState.waveformBuilt = false;
+    analysisState.waveformSlice = null;
+    analysisState.waveformSliceCapacity = 0;
   }
 
   analysisState.initialized = true;
-  analysisState.waveformBuilt = false;
   analysisState.transportMode = transportMode;
   analysisState.attachedSessionVersion = sessionVersion;
   analysisState.sampleRate = sampleRate;
   analysisState.sampleCount = sampleCount;
   analysisState.duration = duration;
-  analysisState.runtimeVariant = runtime.variant;
 
   self.postMessage({
     type: 'analysisInitialized',
     body: {
       duration,
-      runtimeVariant: runtime.variant,
+      runtimeVariant: analysisState.runtimeVariant,
       sampleCount,
       sampleRate,
     },
   });
 }
 
-function buildWaveformPyramid(runtime) {
+function buildWaveformPyramid() {
   assertInitialized();
 
-  if (!runtime.module._wave_build_waveform_pyramid()) {
-    throw new Error('Waveform pyramid build failed.');
+  if (analysisState.waveformBuilt) {
+    self.postMessage({
+      type: 'waveformPyramidReady',
+    });
+    return;
   }
 
+  const samples = analysisState.waveformData?.samples;
+
+  if (!(samples instanceof Float32Array)) {
+    throw new Error('Waveform samples are unavailable.');
+  }
+
+  analysisState.waveformData = buildInteractiveWaveformData(samples, { copy: false });
   analysisState.waveformBuilt = true;
+
   self.postMessage({
     type: 'waveformPyramidReady',
   });
@@ -270,8 +267,7 @@ async function pumpRenderLoop() {
         continue;
       }
 
-      const runtime = await getRuntime();
-      await renderWaveform(runtime, request);
+      await renderWaveform(request);
     }
   } catch (error) {
     postError(error);
@@ -280,8 +276,7 @@ async function pumpRenderLoop() {
   }
 }
 
-async function renderWaveform(runtime, request) {
-  const module = runtime.module;
+async function renderWaveform(request) {
   const viewStart = clamp(Number(request?.viewStart) || 0, 0, analysisState.duration);
   const viewEnd = clamp(
     Number(request?.viewEnd) || analysisState.duration,
@@ -308,20 +303,15 @@ async function renderWaveform(runtime, request) {
   surfaceState.color = color;
   resizeSurface();
 
-  ensureWaveformOutputCapacity(module, columnCount * 2);
-
-  const ok = module._wave_extract_waveform_slice(
+  const slice = ensureWaveformSliceCapacity(columnCount * 2);
+  extractInteractiveWaveformSlice(
+    analysisState.waveformData,
+    analysisState.duration,
     viewStart,
     viewEnd,
     columnCount,
-    analysisState.waveformOutputPointer,
+    slice,
   );
-
-  if (!ok) {
-    throw new Error('Waveform slice extraction failed.');
-  }
-
-  const slice = getHeapF32View(module, analysisState.waveformOutputPointer, columnCount * 2);
 
   self.postMessage({
     type: 'waveformReady',
@@ -467,38 +457,17 @@ function resolvePendingPresentation(body, shouldPresent) {
   resolve(shouldPresent);
 }
 
-function ensureWaveformOutputCapacity(module, floatCount) {
-  if (analysisState.waveformOutputCapacity >= floatCount && analysisState.waveformOutputPointer) {
-    return;
+function ensureWaveformSliceCapacity(floatCount) {
+  if (analysisState.waveformSliceCapacity >= floatCount && analysisState.waveformSlice) {
+    return analysisState.waveformSlice;
   }
 
-  if (analysisState.waveformOutputPointer) {
-    module._free(analysisState.waveformOutputPointer);
-  }
-
-  analysisState.waveformOutputPointer = module._malloc(floatCount * Float32Array.BYTES_PER_ELEMENT);
-  analysisState.waveformOutputCapacity = floatCount;
+  analysisState.waveformSlice = new Float32Array(floatCount);
+  analysisState.waveformSliceCapacity = floatCount;
+  return analysisState.waveformSlice;
 }
 
-function getHeapF32View(module, pointer, length) {
-  return new Float32Array(module.HEAPF32.buffer, pointer, length);
-}
-
-function disposeWasmSession(module) {
-  if (analysisState.waveformOutputPointer) {
-    module._free(analysisState.waveformOutputPointer);
-  }
-
-  module._wave_dispose_session();
-  analysisState.waveformOutputPointer = 0;
-  analysisState.waveformOutputCapacity = 0;
-}
-
-function disposeSession(runtime) {
-  if (analysisState.initialized) {
-    disposeWasmSession(runtime.module);
-  }
-
+function disposeSession() {
   analysisState = createEmptyAnalysisState();
 }
 

@@ -95,6 +95,8 @@ const FftResource = struct {
     output: ?[]align(16) f32 = null,
     work: ?[]align(16) f32 = null,
     window: []f32 = &.{},
+    power_spectrum: []f32 = &.{},
+    low_power_spectrum: []f32 = &.{},
     next: ?*FftResource = null,
 
     fn deinit(self: *FftResource) void {
@@ -103,6 +105,8 @@ const FftResource = struct {
         if (self.output) |buffer| pffft_aligned_free(@ptrCast(buffer.ptr));
         if (self.work) |buffer| pffft_aligned_free(@ptrCast(buffer.ptr));
         if (self.window.len > 0) allocator.free(self.window);
+        if (self.power_spectrum.len > 0) allocator.free(self.power_spectrum);
+        if (self.low_power_spectrum.len > 0) allocator.free(self.low_power_spectrum);
         self.* = .{};
     }
 };
@@ -234,6 +238,42 @@ const ScalogramKernelBank = struct {
     }
 };
 
+const BandLayoutResource = struct {
+    analysis_type: AnalysisType = .spectrogram,
+    frequency_scale: FrequencyScale = .log,
+    fft_size: i32 = 0,
+    decimation_factor: i32 = 1,
+    row_count: i32 = 0,
+    min_frequency: f32 = 0.0,
+    max_frequency: f32 = 0.0,
+    band_ranges: []BandRange = &.{},
+    mel_bands: []MelBand = &.{},
+    enhanced_band_ranges: []BandRange = &.{},
+    use_low_frequency_enhancement: bool = false,
+    low_frequency_maximum: f32 = 0.0,
+    next: ?*BandLayoutResource = null,
+
+    fn deinit(self: *BandLayoutResource) void {
+        if (self.band_ranges.len > 0) allocator.free(self.band_ranges);
+        if (self.mel_bands.len > 0) allocator.free(self.mel_bands);
+        if (self.enhanced_band_ranges.len > 0) allocator.free(self.enhanced_band_ranges);
+        self.* = .{};
+    }
+};
+
+const ScalogramResource = struct {
+    row_count: i32 = 0,
+    min_frequency: f32 = 0.0,
+    max_frequency: f32 = 0.0,
+    bank: ScalogramKernelBank = .{},
+    next: ?*ScalogramResource = null,
+
+    fn deinit(self: *ScalogramResource) void {
+        self.bank.deinit();
+        self.* = .{};
+    }
+};
+
 const WaveSession = struct {
     samples: []f32 = &.{},
     sample_count: i32 = 0,
@@ -243,6 +283,8 @@ const WaveSession = struct {
     max_frequency: f32 = hard_max_frequency,
     levels: []WaveLevel = &.{},
     fft_resources: ?*FftResource = null,
+    band_layout_resources: ?*BandLayoutResource = null,
+    scalogram_resources: ?*ScalogramResource = null,
 };
 
 var g_session: WaveSession = .{};
@@ -350,6 +392,10 @@ fn maxF32(left: f32, right: f32) f32 {
     return @max(left, right);
 }
 
+fn approxEqF32(left: f32, right: f32) bool {
+    return @abs(left - right) <= 0.001;
+}
+
 fn decodeAnalysisType(value: i32) AnalysisType {
     return switch (value) {
         1 => .mel,
@@ -431,6 +477,8 @@ fn reduceMinMax(values: []const f32, comptime clamp_samples: bool) RangeResult {
 fn resetSessionState() void {
     freeWaveLevels();
     freeFftResources();
+    freeBandLayoutResources();
+    freeScalogramResources();
     if (g_session.samples.len > 0) allocator.free(g_session.samples);
     g_session = .{};
 }
@@ -451,6 +499,28 @@ fn freeFftResources() void {
         current = next;
     }
     g_session.fft_resources = null;
+}
+
+fn freeBandLayoutResources() void {
+    var current = g_session.band_layout_resources;
+    while (current) |node| {
+        const next = node.next;
+        node.deinit();
+        allocator.destroy(node);
+        current = next;
+    }
+    g_session.band_layout_resources = null;
+}
+
+fn freeScalogramResources() void {
+    var current = g_session.scalogram_resources;
+    while (current) |node| {
+        const next = node.next;
+        node.deinit();
+        allocator.destroy(node);
+        current = next;
+    }
+    g_session.scalogram_resources = null;
 }
 
 fn computeLevelCount(sample_count: i32) i32 {
@@ -489,6 +559,9 @@ fn getFftResource(fft_size_i32: i32) ?*FftResource {
     resource.output = makeAlignedF32Buffer(fft_size * @sizeOf(f32)) orelse return null;
     resource.work = makeAlignedF32Buffer(fft_size * @sizeOf(f32)) orelse return null;
     resource.window = allocator.alloc(f32, fft_size) catch return null;
+    const power_spectrum_length = @as(usize, @intCast(maxI32(2, @divTrunc(fft_size_i32, 2) + 1)));
+    resource.power_spectrum = allocator.alloc(f32, power_spectrum_length) catch return null;
+    resource.low_power_spectrum = allocator.alloc(f32, power_spectrum_length) catch return null;
 
     const denominator = @as(f32, @floatFromInt(fft_size - 1));
     for (resource.window, 0..) |*value, index| {
@@ -498,6 +571,112 @@ fn getFftResource(fft_size_i32: i32) ?*FftResource {
 
     resource.next = g_session.fft_resources;
     g_session.fft_resources = resource;
+    return resource;
+}
+
+fn getBandLayoutResource(
+    analysis_type: AnalysisType,
+    frequency_scale: FrequencyScale,
+    fft_size: i32,
+    decimation_factor: i32,
+    row_count: i32,
+    min_frequency: f32,
+    max_frequency: f32,
+) ?*BandLayoutResource {
+    var current = g_session.band_layout_resources;
+    while (current) |resource| : (current = resource.next) {
+        if (resource.analysis_type == analysis_type and
+            resource.frequency_scale == frequency_scale and
+            resource.fft_size == fft_size and
+            resource.decimation_factor == decimation_factor and
+            resource.row_count == row_count and
+            approxEqF32(resource.min_frequency, min_frequency) and
+            approxEqF32(resource.max_frequency, max_frequency))
+        {
+            return resource;
+        }
+    }
+
+    const resource = allocator.create(BandLayoutResource) catch return null;
+    resource.* = .{
+        .analysis_type = analysis_type,
+        .frequency_scale = frequency_scale,
+        .fft_size = fft_size,
+        .decimation_factor = decimation_factor,
+        .row_count = row_count,
+        .min_frequency = min_frequency,
+        .max_frequency = max_frequency,
+    };
+    errdefer {
+        resource.deinit();
+        allocator.destroy(resource);
+    }
+
+    switch (analysis_type) {
+        .mel => {
+            resource.mel_bands = allocator.alloc(MelBand, @as(usize, @intCast(row_count))) catch return null;
+            createMelBands(resource.mel_bands, fft_size, g_session.sample_rate, min_frequency, max_frequency);
+        },
+        .spectrogram => {
+            resource.band_ranges = allocator.alloc(BandRange, @as(usize, @intCast(row_count))) catch return null;
+            switch (frequency_scale) {
+                .linear => createLinearBandRanges(resource.band_ranges, fft_size, g_session.sample_rate, min_frequency, max_frequency),
+                .log => createLogBandRanges(resource.band_ranges, fft_size, g_session.sample_rate, min_frequency, max_frequency),
+            }
+
+            if (decimation_factor > 1) {
+                const effective_sample_rate = g_session.sample_rate / @as(f32, @floatFromInt(decimation_factor));
+                resource.low_frequency_maximum = minF32(
+                    low_frequency_enhancement_max_frequency,
+                    minF32((effective_sample_rate / 2.0) * 0.92, max_frequency),
+                );
+
+                if (resource.low_frequency_maximum > min_frequency * 1.25) {
+                    resource.enhanced_band_ranges = allocator.alloc(BandRange, @as(usize, @intCast(row_count))) catch return null;
+                    createBandRangesForSampleRate(
+                        resource.enhanced_band_ranges,
+                        resource.band_ranges,
+                        fft_size,
+                        effective_sample_rate,
+                        min_frequency,
+                        resource.low_frequency_maximum,
+                    );
+                    resource.use_low_frequency_enhancement = true;
+                }
+            }
+        },
+        .scalogram => return null,
+    }
+
+    resource.next = g_session.band_layout_resources;
+    g_session.band_layout_resources = resource;
+    return resource;
+}
+
+fn getScalogramResource(row_count: i32, min_frequency: f32, max_frequency: f32) ?*ScalogramResource {
+    var current = g_session.scalogram_resources;
+    while (current) |resource| : (current = resource.next) {
+        if (resource.row_count == row_count and
+            approxEqF32(resource.min_frequency, min_frequency) and
+            approxEqF32(resource.max_frequency, max_frequency))
+        {
+            return resource;
+        }
+    }
+
+    const resource = allocator.create(ScalogramResource) catch return null;
+    resource.* = .{
+        .row_count = row_count,
+        .min_frequency = min_frequency,
+        .max_frequency = max_frequency,
+        .bank = ScalogramKernelBank.init(row_count, min_frequency, max_frequency) catch {
+            allocator.destroy(resource);
+            return null;
+        },
+    };
+
+    resource.next = g_session.scalogram_resources;
+    g_session.scalogram_resources = resource;
     return resource;
 }
 
@@ -1050,6 +1229,7 @@ pub export fn wave_build_waveform_pyramid() i32 {
     for (g_session.levels) |*level| level.* = .{};
 
     var block_size = min_level_block_size;
+    var previous_level: ?*WaveLevel = null;
     for (g_session.levels, 0..) |*level, block_index| {
         _ = block_index;
         const block_count = ceilDivI32(g_session.sample_count, block_size);
@@ -1065,16 +1245,37 @@ pub export fn wave_build_waveform_pyramid() i32 {
         };
 
         var sample_block_index: usize = 0;
-        while (sample_block_index < level.min_peaks.len) : (sample_block_index += 1) {
-            const start = @as(i32, @intCast(sample_block_index)) * block_size;
-            const end = minI32(g_session.sample_count, start + block_size);
-            const result = reduceMinMax(
-                g_session.samples[@as(usize, @intCast(start))..@as(usize, @intCast(end))],
-                true,
-            );
-            level.min_peaks[sample_block_index] = result.min;
-            level.max_peaks[sample_block_index] = result.max;
+        if (previous_level) |parent_level| {
+            while (sample_block_index < level.min_peaks.len) : (sample_block_index += 1) {
+                const start = @as(i32, @intCast(sample_block_index)) * level_scale_factor;
+                const end = minI32(parent_level.block_count, start + level_scale_factor);
+                var min_peak: f32 = 1.0;
+                var max_peak: f32 = -1.0;
+                var parent_index = start;
+
+                while (parent_index < end) : (parent_index += 1) {
+                    const parent_usize = @as(usize, @intCast(parent_index));
+                    min_peak = minF32(min_peak, parent_level.min_peaks[parent_usize]);
+                    max_peak = maxF32(max_peak, parent_level.max_peaks[parent_usize]);
+                }
+
+                level.min_peaks[sample_block_index] = min_peak;
+                level.max_peaks[sample_block_index] = max_peak;
+            }
+        } else {
+            while (sample_block_index < level.min_peaks.len) : (sample_block_index += 1) {
+                const start = @as(i32, @intCast(sample_block_index)) * block_size;
+                const end = minI32(g_session.sample_count, start + block_size);
+                const result = reduceMinMax(
+                    g_session.samples[@as(usize, @intCast(start))..@as(usize, @intCast(end))],
+                    true,
+                );
+                level.min_peaks[sample_block_index] = result.min;
+                level.max_peaks[sample_block_index] = result.max;
+            }
         }
+
+        previous_level = level;
 
         if (ceilDivI32(g_session.sample_count, block_size) <= min_level_buckets) break;
         block_size *= level_scale_factor;
@@ -1140,67 +1341,23 @@ fn renderStftDerivedTile(
     output_ptr: i32,
 ) i32 {
     const resource = getFftResource(fft_size) orelse return 0;
-    const power_spectrum_length = @as(usize, @intCast(maxI32(2, @divTrunc(fft_size, 2) + 1)));
-    const power_spectrum = allocator.alloc(f32, power_spectrum_length) catch return 0;
-    defer allocator.free(power_spectrum);
 
     const safe_min_frequency = maxF32(g_session.min_frequency, min_frequency);
     const safe_max_frequency = minF32(g_session.max_frequency, max_frequency);
+    const layout = getBandLayoutResource(
+        analysis_type,
+        frequency_scale,
+        fft_size,
+        decimation_factor,
+        row_count,
+        safe_min_frequency,
+        safe_max_frequency,
+    ) orelse return 0;
     const output = @as([*]u8, @ptrFromInt(@as(usize, @intCast(output_ptr))));
     const safe_tile_span = maxF32(1.0 / g_session.sample_rate, @as(f32, @floatCast(tile_end - tile_start)));
     const output_width = @as(usize, @intCast(column_count));
-
-    var band_ranges: []BandRange = &.{};
-    var mel_bands: []MelBand = &.{};
-    var use_low_frequency_enhancement = false;
-    var low_frequency_maximum: f32 = 0.0;
-    var low_power_spectrum: []f32 = &.{};
-    var enhanced_band_ranges: []BandRange = &.{};
-
-    defer if (band_ranges.len > 0) allocator.free(band_ranges);
-    defer if (mel_bands.len > 0) allocator.free(mel_bands);
-    defer if (low_power_spectrum.len > 0) allocator.free(low_power_spectrum);
-    defer if (enhanced_band_ranges.len > 0) allocator.free(enhanced_band_ranges);
-
-    switch (analysis_type) {
-        .mel => {
-            mel_bands = allocator.alloc(MelBand, @as(usize, @intCast(row_count))) catch return 0;
-            createMelBands(mel_bands, fft_size, g_session.sample_rate, safe_min_frequency, safe_max_frequency);
-        },
-        .spectrogram => {
-            band_ranges = allocator.alloc(BandRange, @as(usize, @intCast(row_count))) catch return 0;
-            switch (frequency_scale) {
-                .linear => createLinearBandRanges(band_ranges, fft_size, g_session.sample_rate, safe_min_frequency, safe_max_frequency),
-                .log => createLogBandRanges(band_ranges, fft_size, g_session.sample_rate, safe_min_frequency, safe_max_frequency),
-            }
-
-            if (decimation_factor > 1) {
-                const effective_sample_rate = g_session.sample_rate / @as(f32, @floatFromInt(decimation_factor));
-                low_frequency_maximum = minF32(
-                    low_frequency_enhancement_max_frequency,
-                    minF32((effective_sample_rate / 2.0) * 0.92, safe_max_frequency),
-                );
-
-                if (low_frequency_maximum > safe_min_frequency * 1.25) {
-                    low_power_spectrum = allocator.alloc(f32, power_spectrum_length) catch &.{};
-                    enhanced_band_ranges = allocator.alloc(BandRange, @as(usize, @intCast(row_count))) catch &.{};
-
-                    if (low_power_spectrum.len > 0 and enhanced_band_ranges.len > 0) {
-                        createBandRangesForSampleRate(
-                            enhanced_band_ranges,
-                            band_ranges,
-                            fft_size,
-                            effective_sample_rate,
-                            safe_min_frequency,
-                            low_frequency_maximum,
-                        );
-                        use_low_frequency_enhancement = true;
-                    }
-                }
-            }
-        },
-        .scalogram => return 0,
-    }
+    const power_spectrum = resource.power_spectrum;
+    const low_power_spectrum = resource.low_power_spectrum;
 
     var column_index: i32 = 0;
     while (column_index < column_count) : (column_index += 1) {
@@ -1219,7 +1376,7 @@ fn renderStftDerivedTile(
         pffft_transform_ordered(setup, input.ptr, output_buffer.ptr, work_buffer.ptr, .forward);
         writePowerSpectrum(resource, power_spectrum);
 
-        if (use_low_frequency_enhancement) {
+        if (layout.use_low_frequency_enhancement) {
             writeDecimatedInput(resource, center_sample, decimation_factor);
             pffft_transform_ordered(setup, input.ptr, output_buffer.ptr, work_buffer.ptr, .forward);
             writePowerSpectrum(resource, low_power_spectrum);
@@ -1230,15 +1387,15 @@ fn renderStftDerivedTile(
             const normalized = switch (analysis_type) {
                 .mel => normalizeMagnitudeToDecibels(computeMelBandRms(
                     power_spectrum,
-                    mel_bands[@as(usize, @intCast(row))],
+                    layout.mel_bands[@as(usize, @intCast(row))],
                     fft_size,
                     g_session.sample_rate,
                 )),
                 .spectrogram => blk: {
-                    const base_range = band_ranges[@as(usize, @intCast(row))];
-                    const use_low_band = use_low_frequency_enhancement and base_range.end_frequency <= low_frequency_maximum;
+                    const base_range = layout.band_ranges[@as(usize, @intCast(row))];
+                    const use_low_band = layout.use_low_frequency_enhancement and base_range.end_frequency <= layout.low_frequency_maximum;
                     const active_range = if (use_low_band)
-                        enhanced_band_ranges[@as(usize, @intCast(row))]
+                        layout.enhanced_band_ranges[@as(usize, @intCast(row))]
                     else
                         base_range;
                     const active_power = if (use_low_band) low_power_spectrum else power_spectrum;
@@ -1267,12 +1424,11 @@ fn renderScalogramTile(
 ) i32 {
     const safe_min_frequency = maxF32(g_session.min_frequency, min_frequency);
     const safe_max_frequency = minF32(g_session.max_frequency, max_frequency);
+    const resource = getScalogramResource(row_count, safe_min_frequency, safe_max_frequency) orelse return 0;
+    const kernel_bank = &resource.bank;
     const output = @as([*]u8, @ptrFromInt(@as(usize, @intCast(output_ptr))));
     const safe_tile_span = maxF32(1.0 / g_session.sample_rate, @as(f32, @floatCast(tile_end - tile_start)));
     const output_width = @as(usize, @intCast(column_count));
-
-    var kernel_bank = ScalogramKernelBank.init(row_count, safe_min_frequency, safe_max_frequency) catch return 0;
-    defer kernel_bank.deinit();
 
     const center_samples = allocator.alloc(i32, @as(usize, @intCast(column_count))) catch return 0;
     defer allocator.free(center_samples);

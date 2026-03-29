@@ -216,9 +216,9 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
   </head>
   <body data-worker-src="${workerUri}" data-waveform-worker-src="${waveformWorkerUri}">
     <main class="app-shell">
-      <section class="viewport" aria-label="Waveform and spectrogram preview">
-        <div class="wave-panel">
-          <div class="wave-toolbar">
+      <section id="preview-viewport" class="viewport" aria-label="Waveform and spectrogram preview">
+        <div id="wave-panel" class="wave-panel">
+          <div id="wave-toolbar" class="wave-toolbar">
             <div id="wave-toolbar-info" class="wave-toolbar-info">
               <div id="media-metadata-panel" class="media-metadata-panel" data-state="idle" aria-label="Audio metadata">
                 <div id="media-metadata-summary" class="media-metadata-summary" tabindex="0">Checking metadata…</div>
@@ -251,9 +251,24 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           </div>
           <div id="waveform-axis" class="waveform-axis" aria-hidden="true"></div>
         </div>
-        <div class="spectrogram-panel">
+        <div
+          id="viewport-splitter"
+          class="viewport-splitter"
+          role="separator"
+          aria-controls="wave-panel spectrogram-panel"
+          aria-label="Resize waveform and spectrogram panels"
+          aria-orientation="horizontal"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="50"
+          aria-valuetext="Waveform 50%, spectrogram 50%"
+          tabindex="0"
+        >
+          <div class="viewport-splitter-handle" aria-hidden="true"></div>
+        </div>
+        <div id="spectrogram-panel" class="spectrogram-panel">
           <div id="spectrogram-axis" class="spectrogram-axis" aria-hidden="true"></div>
-          <div class="spectrogram-stage">
+          <div id="spectrogram-stage" class="spectrogram-stage">
             <canvas id="spectrogram" class="spectrogram-canvas" aria-label="Spectrogram"></canvas>
             <div id="spectrogram-meta" class="spectrogram-meta">
               <label class="spectrogram-control">
@@ -305,12 +320,12 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         <button id="seek-backward" class="transport-button" type="button" disabled>-5s</button>
         <button id="play-toggle" class="play-toggle" type="button" disabled>Play</button>
         <button id="seek-forward" class="transport-button" type="button" disabled>+5s</button>
+        <div id="time-readout" class="time-readout">0:00 / --:--</div>
         <div id="waveform-overview" class="timeline-shell">
           <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>
           <div id="timeline-hover-tooltip" class="timeline-hover-tooltip" aria-hidden="true"></div>
           <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.001" value="0" disabled />
         </div>
-        <div id="time-readout" class="time-readout">0:00 / --:--</div>
         <div id="loudness-summary" class="loudness-summary" data-state="idle" aria-label="Loudness summary" aria-live="polite" hidden>
           <div class="loudness-chip">
             <span class="loudness-chip-label">I</span>
