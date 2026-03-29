@@ -118,6 +118,8 @@ var QUALITY_PRESETS = {
 };
 var FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 var OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875];
+var SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
+var SCALOGRAM_ROW_BLOCK_SIZE = 32;
 var ANALYSIS_TYPE_CODES = {
   spectrogram: 0,
   mel: 1,
@@ -539,31 +541,60 @@ async function ensurePlanTiles(runtime, plan, options = {}) {
       return false;
     }
     const cacheKey = buildTileCacheKey(plan, tileIndex);
-    if (!analysisState.tileCache.has(cacheKey)) {
-      const tileStart = tileIndex * plan.tileDuration;
-      const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
-      const tileCanvas = renderTile(runtime, plan, tileIndex, tileStart, tileEnd);
-      analysisState.tileCache.set(cacheKey, {
-        canvas: tileCanvas,
-        columnCount: TILE_COLUMN_COUNT,
-        rowCount: plan.rowCount,
-        tileEnd,
-        tileIndex,
-        tileKey: cacheKey,
-        tileStart
+    const tileStart = tileIndex * plan.tileDuration;
+    const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
+    const existingTile = analysisState.tileCache.get(cacheKey) ?? null;
+    if (!existingTile || existingTile.complete !== true) {
+      const tileRecord = await renderTile(runtime, plan, tileIndex, tileStart, tileEnd, {
+        cacheKey,
+        existingTile,
+        onChunkReady: onTileReady,
+        shouldAbort
       });
+      if (!tileRecord) {
+        return false;
+      }
     }
     onTileReady?.();
     await yieldToEventLoop();
   }
   return true;
 }
-function renderTile(runtime, plan, tileIndex, tileStart, tileEnd) {
-  ensureSpectrogramOutputCapacity(runtime.module, TILE_COLUMN_COUNT * plan.rowCount * 4);
-  const ok = runtime.module._wave_render_spectrogram_tile_rgba(
-    tileStart,
+function createTileRecord({ cacheKey, rowCount, tileEnd, tileIndex, tileStart }) {
+  const canvas = new OffscreenCanvas(TILE_COLUMN_COUNT, rowCount);
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) {
+    throw new Error("OffscreenCanvas 2D context is unavailable.");
+  }
+  context.clearRect(0, 0, TILE_COLUMN_COUNT, rowCount);
+  return {
+    canvas,
+    columnCount: TILE_COLUMN_COUNT,
+    complete: false,
+    context,
+    renderedColumns: 0,
+    rowCount,
     tileEnd,
-    TILE_COLUMN_COUNT,
+    tileIndex,
+    tileKey: cacheKey,
+    tileStart
+  };
+}
+function drawTileChunk(tileRecord, rgba, columnOffset, columnCount, rowCount) {
+  const imageData = tileRecord.context.createImageData(columnCount, rowCount);
+  imageData.data.set(new Uint8ClampedArray(rgba));
+  tileRecord.context.putImageData(imageData, columnOffset, 0);
+}
+function renderTileChunk(runtime, plan, tileIndex, tileStart, tileEnd, tileRecord, startColumn, columnCount) {
+  const tileSpan = tileEnd - tileStart;
+  const chunkStart = tileStart + startColumn / TILE_COLUMN_COUNT * tileSpan;
+  const chunkEnd = tileStart + (startColumn + columnCount) / TILE_COLUMN_COUNT * tileSpan;
+  const byteLength = columnCount * plan.rowCount * 4;
+  ensureSpectrogramOutputCapacity(runtime.module, byteLength);
+  const ok = runtime.module._wave_render_spectrogram_tile_rgba(
+    chunkStart,
+    chunkEnd,
+    columnCount,
     plan.rowCount,
     plan.fftSize,
     plan.decimationFactor,
@@ -574,21 +605,46 @@ function renderTile(runtime, plan, tileIndex, tileStart, tileEnd) {
     analysisState.spectrogramOutputPointer
   );
   if (!ok) {
-    throw new Error(`Spectrogram tile render failed for tile ${tileIndex}.`);
+    throw new Error(`Spectrogram tile render failed for tile ${tileIndex} chunk ${startColumn}.`);
   }
-  const rgba = getHeapU8View(runtime.module, analysisState.spectrogramOutputPointer, TILE_COLUMN_COUNT * plan.rowCount * 4);
-  return createTileCanvas(rgba, TILE_COLUMN_COUNT, plan.rowCount);
+  const rgba = getHeapU8View(runtime.module, analysisState.spectrogramOutputPointer, byteLength);
+  drawTileChunk(tileRecord, rgba, startColumn, columnCount, plan.rowCount);
 }
-function createTileCanvas(rgba, columnCount, rowCount) {
-  const tileCanvas = new OffscreenCanvas(columnCount, rowCount);
-  const tileContext = tileCanvas.getContext("2d", { alpha: false });
-  if (!tileContext) {
-    throw new Error("OffscreenCanvas 2D context is unavailable.");
+async function renderTile(runtime, plan, tileIndex, tileStart, tileEnd, options = {}) {
+  const cacheKey = typeof options.cacheKey === "string" ? options.cacheKey : buildTileCacheKey(plan, tileIndex);
+  const shouldAbort = typeof options.shouldAbort === "function" ? options.shouldAbort : null;
+  const onChunkReady = typeof options.onChunkReady === "function" ? options.onChunkReady : null;
+  const chunkColumnCount = plan.analysisType === "scalogram" ? SCALOGRAM_COLUMN_CHUNK_SIZE : TILE_COLUMN_COUNT;
+  const existingTile = options.existingTile;
+  const tileRecord = existingTile ?? createTileRecord({
+    cacheKey,
+    rowCount: plan.rowCount,
+    tileEnd,
+    tileIndex,
+    tileStart
+  });
+  if (!tileRecord.context) {
+    tileRecord.context = tileRecord.canvas.getContext("2d", { alpha: false });
+    if (!tileRecord.context) {
+      throw new Error("OffscreenCanvas 2D context is unavailable.");
+    }
   }
-  const imageData = tileContext.createImageData(columnCount, rowCount);
-  imageData.data.set(new Uint8ClampedArray(rgba));
-  tileContext.putImageData(imageData, 0, 0);
-  return tileCanvas;
+  analysisState.tileCache.set(cacheKey, tileRecord);
+  while (tileRecord.renderedColumns < TILE_COLUMN_COUNT) {
+    if (shouldAbort?.()) {
+      return null;
+    }
+    const startColumn = tileRecord.renderedColumns;
+    const columnCount = Math.min(chunkColumnCount, TILE_COLUMN_COUNT - startColumn);
+    renderTileChunk(runtime, plan, tileIndex, tileStart, tileEnd, tileRecord, startColumn, columnCount);
+    tileRecord.renderedColumns += columnCount;
+    tileRecord.complete = tileRecord.renderedColumns >= TILE_COLUMN_COUNT;
+    onChunkReady?.();
+    if (chunkColumnCount < TILE_COLUMN_COUNT) {
+      await yieldToEventLoop();
+    }
+  }
+  return tileRecord;
 }
 function paintSpectrogramDisplay() {
   const context = surfaceState.context;
@@ -640,7 +696,12 @@ function paintLayer(context, plan, displayRange, { smoothing, smoothingQuality }
     }
     const tileSpan = Math.max(1e-6, tile.tileEnd - tile.tileStart);
     const overlapStart = Math.max(displayRange.start, tile.tileStart);
-    const overlapEnd = Math.min(displayRange.end, tile.tileEnd);
+    const availableColumns = tile.complete ? tile.columnCount : Math.max(0, tile.renderedColumns ?? 0);
+    if (availableColumns <= 0) {
+      continue;
+    }
+    const availableTileEnd = tile.tileStart + availableColumns / tile.columnCount * tileSpan;
+    const overlapEnd = Math.min(displayRange.end, availableTileEnd);
     if (overlapEnd <= overlapStart) {
       continue;
     }
@@ -649,10 +710,13 @@ function paintLayer(context, plan, displayRange, { smoothing, smoothingQuality }
     const destinationStartRatio = (overlapStart - displayRange.start) / span;
     const destinationEndRatio = (overlapEnd - displayRange.start) / span;
     const sourceX = clamp(Math.floor(sourceStartRatio * tile.columnCount), 0, Math.max(0, tile.columnCount - 1));
+    if (sourceX >= availableColumns) {
+      continue;
+    }
     const sourceWidth = Math.max(
       1,
       Math.min(
-        tile.columnCount - sourceX,
+        availableColumns - sourceX,
         Math.ceil((sourceEndRatio - sourceStartRatio) * tile.columnCount)
       )
     );
@@ -702,7 +766,8 @@ function createRequestPlan(request) {
   const frequencyScale = getEffectiveFrequencyScale(analysisType, request?.frequencyScale);
   const fftSize = analysisType === "scalogram" ? 0 : normalizeFftSize(request?.fftSize);
   const overlapRatio = analysisType === "scalogram" ? 0 : normalizeOverlapRatio(request?.overlapRatio);
-  const rowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), ROW_BUCKET_SIZE);
+  const rowBucketSize = analysisType === "scalogram" ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
+  const rowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), rowBucketSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2)

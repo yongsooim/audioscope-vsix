@@ -42,6 +42,10 @@ const ANALYSIS_IDLE_TIMEOUT_MS = 1500;
 const ANALYSIS_FALLBACK_DELAY_MS = 240;
 const SEEK_COMMIT_TOLERANCE_SECONDS = 0.02;
 const SEEK_COMMIT_TIMEOUT_MS = 250;
+const WAVEFORM_TOP_PADDING_PX = 10;
+const WAVEFORM_BOTTOM_PADDING_PX = 10;
+const WAVEFORM_AMPLITUDE_HEIGHT_RATIO = 0.38;
+const WAVEFORM_SAMPLE_DETAIL_MIN_RENDER_PIXELS = 1;
 
 const QUALITY_PRESETS = {
   balanced: {
@@ -66,6 +70,7 @@ const elements = {
   waveformCanvasHost: document.getElementById('waveform-canvas-host'),
   waveformHitTarget: document.getElementById('waveform-hit-target'),
   waveformHoverTooltip: document.getElementById('waveform-hover-tooltip'),
+  waveformSampleMarker: document.getElementById('waveform-sample-marker'),
   waveformSelection: document.getElementById('waveform-selection'),
   waveformProgress: document.getElementById('waveform-progress'),
   waveformCursor: document.getElementById('waveform-cursor'),
@@ -114,6 +119,7 @@ const state = {
   audio: null,
   audioBlobUrl: null,
   sourceArrayBuffer: null,
+  waveformSamples: null,
   sourceFetchController: null,
   fetchController: null,
   analysisWorker: null,
@@ -131,6 +137,7 @@ const state = {
   spectrogramSurfaceReadyPromise: null,
   waveformCanvas: null,
   waveformViewRange: { start: 0, end: 0 },
+  waveformHoverClientPoint: null,
   waveformSeekPointerId: null,
   selectionDrag: null,
   selectionDraft: null,
@@ -166,6 +173,21 @@ const state = {
   observedSpectrogramPixelHeight: 0,
   observedOverviewWidth: 0,
 };
+
+function ensureWaveformSampleMarkerElement() {
+  if (elements.waveformSampleMarker || !elements.waveformViewport) {
+    return;
+  }
+
+  const marker = document.createElement('div');
+  marker.id = 'waveform-sample-marker';
+  marker.className = 'waveform-sample-marker';
+  marker.setAttribute('aria-hidden', 'true');
+  elements.waveformViewport.append(marker);
+  elements.waveformSampleMarker = marker;
+}
+
+ensureWaveformSampleMarkerElement();
 
 if (
   typeof elements.spectrogram?.transferControlToOffscreen !== 'function'
@@ -669,6 +691,8 @@ async function startAnalysis(loadToken, payload) {
     if (loadToken !== state.loadToken) {
       return;
     }
+
+    state.waveformSamples = monoSamples.slice();
 
     state.analysis = createSpectrogramAnalysisState({
       duration: decodedAudio.duration,
@@ -1739,6 +1763,7 @@ function renderWaveformUi() {
   syncWaveformSelection();
   applyWaveformPlaybackTime(state.audio?.currentTime ?? 0);
   applyWaveformCanvasTransform(range);
+  refreshWaveformHoverPresentation();
   scheduleSpectrogramRender();
 }
 
@@ -2118,24 +2143,126 @@ function updateSurfaceHoverTooltip(tooltipElement, targetElement, event, label) 
   tooltipElement.style.top = `${clamp(localY - tooltipHeight - 14, 12, maxTop)}px`;
 }
 
-function updateWaveformHoverTooltip(event) {
-  const duration = getEffectiveDuration();
-
-  if (!state.audio || duration <= 0) {
-    hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
+function hideWaveformSampleMarker() {
+  if (!elements.waveformSampleMarker) {
     return;
   }
+
+  elements.waveformSampleMarker.style.display = 'none';
+  elements.waveformSampleMarker.style.left = '0px';
+  elements.waveformSampleMarker.style.top = '0px';
+}
+
+function showWaveformSampleMarker(sampleInfo) {
+  if (!elements.waveformSampleMarker || !sampleInfo?.showMarker) {
+    hideWaveformSampleMarker();
+    return;
+  }
+
+  elements.waveformSampleMarker.style.display = 'block';
+  elements.waveformSampleMarker.style.left = `${sampleInfo.markerX}px`;
+  elements.waveformSampleMarker.style.top = `${sampleInfo.markerY}px`;
+}
+
+function getWaveformSampleInfoAtClientX(clientX) {
+  const samples = state.waveformSamples;
+  const sampleRate = Number(state.analysis?.sampleRate);
+  const targetElement = elements.waveformHitTarget ?? elements.waveformViewport;
+  const range = getWaveformRange();
+  const span = Math.max(0, range.end - range.start);
+
+  if (!samples || samples.length === 0 || !Number.isFinite(sampleRate) || sampleRate <= 0 || !targetElement || span <= 0) {
+    return null;
+  }
+
+  const { offsetX, width } = getWaveformPointerMetrics(clientX);
+  const rect = targetElement.getBoundingClientRect();
+
+  if (width <= 0 || rect.height <= 0) {
+    return null;
+  }
+
+  const visibleSampleCount = Math.max(1, span * sampleRate);
+  const renderPixelsPerSample = (width * Math.max(1, WAVEFORM_RENDER_SCALE)) / visibleSampleCount;
+  const maxSampleIndex = Math.max(0, samples.length - 1);
+  const samplePosition = (range.start * sampleRate) + ((offsetX / width) * visibleSampleCount);
+  const sampleIndex = clamp(Math.round(samplePosition), 0, maxSampleIndex);
+  const sampleTime = sampleIndex / sampleRate;
+  const sampleValue = samples[sampleIndex] ?? 0;
+  const markerX = clamp(((sampleTime - range.start) / span) * width, 0, width);
+  const chartTop = WAVEFORM_TOP_PADDING_PX;
+  const chartBottom = Math.max(chartTop + 1, rect.height - WAVEFORM_BOTTOM_PADDING_PX);
+  const chartHeight = Math.max(1, chartBottom - chartTop);
+  const markerY = clamp(
+    chartTop + (chartHeight * 0.5) - (sampleValue * chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO),
+    chartTop,
+    chartBottom,
+  );
+
+  return {
+    markerX,
+    markerY,
+    sampleIndex,
+    sampleNumber: sampleIndex + 1,
+    sampleTime,
+    sampleValue,
+    showMarker: renderPixelsPerSample >= WAVEFORM_SAMPLE_DETAIL_MIN_RENDER_PIXELS,
+  };
+}
+
+function formatWaveformSampleOrdinal(sampleNumber) {
+  return Number.isFinite(sampleNumber) && sampleNumber > 0
+    ? Math.round(sampleNumber).toLocaleString()
+    : '0';
+}
+
+function formatWaveformSampleValue(sampleValue) {
+  const normalized = Math.abs(sampleValue) < 0.00005 ? 0 : sampleValue;
+  return normalized.toFixed(4);
+}
+
+function refreshWaveformHoverPresentation() {
+  const duration = getEffectiveDuration();
+  const point = state.waveformHoverClientPoint;
+
+  if (!point || !state.audio || duration <= 0) {
+    hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
+    hideWaveformSampleMarker();
+    return;
+  }
+
+  const sampleInfo = getWaveformSampleInfoAtClientX(point.clientX);
+  const timeLabel = formatAxisLabel(sampleInfo?.sampleTime ?? getTimeAtWaveformClientX(point.clientX));
+  const label = sampleInfo
+    ? `${timeLabel} - Sample ${formatWaveformSampleOrdinal(sampleInfo.sampleNumber)}, Value ${formatWaveformSampleValue(sampleInfo.sampleValue)}`
+    : timeLabel;
 
   updateSurfaceHoverTooltip(
     elements.waveformHoverTooltip,
     elements.waveformViewport ?? elements.waveformHitTarget,
-    event,
-    formatAxisLabel(getTimeAtWaveformPointerEvent(event)),
+    point,
+    label,
   );
+  showWaveformSampleMarker(sampleInfo);
+}
+
+function updateWaveformHoverTooltip(event) {
+  if (!Number.isFinite(event?.clientX) || !Number.isFinite(event?.clientY)) {
+    hideWaveformHoverTooltip();
+    return;
+  }
+
+  state.waveformHoverClientPoint = {
+    clientX: event.clientX,
+    clientY: event.clientY,
+  };
+  refreshWaveformHoverPresentation();
 }
 
 function hideWaveformHoverTooltip() {
+  state.waveformHoverClientPoint = null;
   hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
+  hideWaveformSampleMarker();
 }
 
 function getFrequencyAtSpectrogramPointerEvent(event) {
@@ -2700,7 +2827,9 @@ function destroySession() {
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
   state.sourceArrayBuffer = null;
+  state.waveformSamples = null;
   state.waveformViewRange = { start: 0, end: 0 };
+  state.waveformHoverClientPoint = null;
   state.waveformSeekPointerId = null;
   state.selectionDrag = null;
   state.selectionDraft = null;

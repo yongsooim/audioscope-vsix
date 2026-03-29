@@ -19,6 +19,7 @@ const morlet_omega0: f32 = 6.0;
 const morlet_support_sigma: f32 = 3.0;
 const morlet_max_support_samples: i32 = 4096;
 const morlet_target_steps: i32 = 96;
+const scalogram_row_block_size: i32 = 32;
 
 const RangeResult = struct {
     min: f32,
@@ -111,6 +112,117 @@ const MelBand = struct {
     start_frequency: f32 = 0,
     center_frequency: f32 = 0,
     end_frequency: f32 = 0,
+};
+
+const ScalogramRowKernel = struct {
+    frequency: f32 = 0.0,
+    scale_seconds: f32 = 0.0,
+    support_samples: i32 = 0,
+    stride: i32 = 1,
+    normalization: f32 = 0.0,
+    offsets: []i32 = &.{},
+    real_weights: []f32 = &.{},
+    imag_weights: []f32 = &.{},
+    norm_weights: []f32 = &.{},
+};
+
+const ScalogramKernelBank = struct {
+    rows: []ScalogramRowKernel = &.{},
+    offsets: []i32 = &.{},
+    real_weights: []f32 = &.{},
+    imag_weights: []f32 = &.{},
+    norm_weights: []f32 = &.{},
+
+    fn init(row_count: i32, min_frequency: f32, max_frequency: f32) !ScalogramKernelBank {
+        var bank: ScalogramKernelBank = .{};
+        errdefer bank.deinit();
+
+        bank.rows = try allocator.alloc(ScalogramRowKernel, @as(usize, @intCast(row_count)));
+        for (bank.rows) |*row| row.* = .{};
+
+        var total_tap_count: usize = 0;
+        for (bank.rows, 0..) |*row_kernel, row_usize| {
+            const row = @as(i32, @intCast(row_usize));
+            const frequency = frequencyForScalogramRow(row, row_count, min_frequency, max_frequency);
+            const safe_frequency = maxF32(1.0, frequency);
+            const scale_seconds = morlet_omega0 / (2.0 * std.math.pi * safe_frequency);
+            const support_samples = minI32(
+                morlet_max_support_samples,
+                maxI32(24, @as(i32, @intFromFloat(@ceil(scale_seconds * morlet_support_sigma * g_session.sample_rate)))),
+            );
+            const stride = maxI32(1, @divTrunc(support_samples, morlet_target_steps));
+            const tap_count = @as(usize, @intCast(@divFloor(support_samples * 2, stride) + 1));
+
+            row_kernel.* = .{
+                .frequency = frequency,
+                .scale_seconds = scale_seconds,
+                .support_samples = support_samples,
+                .stride = stride,
+            };
+            total_tap_count += tap_count;
+        }
+
+        bank.offsets = try allocator.alloc(i32, total_tap_count);
+        bank.real_weights = try allocator.alloc(f32, total_tap_count);
+        bank.imag_weights = try allocator.alloc(f32, total_tap_count);
+        bank.norm_weights = try allocator.alloc(f32, total_tap_count);
+
+        var tap_cursor: usize = 0;
+        for (bank.rows) |*row_kernel| {
+            const tap_count = @as(usize, @intCast(@divFloor(row_kernel.support_samples * 2, row_kernel.stride) + 1));
+            const offsets = bank.offsets[tap_cursor .. tap_cursor + tap_count];
+            const real_weights = bank.real_weights[tap_cursor .. tap_cursor + tap_count];
+            const imag_weights = bank.imag_weights[tap_cursor .. tap_cursor + tap_count];
+            const norm_weights = bank.norm_weights[tap_cursor .. tap_cursor + tap_count];
+
+            row_kernel.offsets = offsets;
+            row_kernel.real_weights = real_weights;
+            row_kernel.imag_weights = imag_weights;
+            row_kernel.norm_weights = norm_weights;
+
+            const phase_step = (2.0 * std.math.pi * row_kernel.frequency * @as(f32, @floatFromInt(row_kernel.stride))) / g_session.sample_rate;
+            const step_cos = @cos(phase_step);
+            const step_sin = @sin(phase_step);
+            const initial_phase = (2.0 * std.math.pi * row_kernel.frequency * @as(f32, @floatFromInt(-row_kernel.support_samples))) / g_session.sample_rate;
+            var phase_cos = @cos(initial_phase);
+            var phase_sin = @sin(initial_phase);
+            var normalization: f32 = 0.0;
+            var offset = -row_kernel.support_samples;
+            var tap_index: usize = 0;
+
+            while (tap_index < tap_count) : (tap_index += 1) {
+                const time = @as(f32, @floatFromInt(offset)) / g_session.sample_rate;
+                const normalized_time = time / row_kernel.scale_seconds;
+                const gaussian = @exp(-0.5 * normalized_time * normalized_time);
+                const norm_weight = gaussian * gaussian;
+
+                offsets[tap_index] = offset;
+                real_weights[tap_index] = gaussian * phase_cos;
+                imag_weights[tap_index] = -gaussian * phase_sin;
+                norm_weights[tap_index] = norm_weight;
+                normalization += norm_weight;
+
+                const next_phase_cos = (phase_cos * step_cos) - (phase_sin * step_sin);
+                phase_sin = (phase_sin * step_cos) + (phase_cos * step_sin);
+                phase_cos = next_phase_cos;
+                offset += row_kernel.stride;
+            }
+
+            row_kernel.normalization = normalization;
+            tap_cursor += tap_count;
+        }
+
+        return bank;
+    }
+
+    fn deinit(self: *ScalogramKernelBank) void {
+        if (self.rows.len > 0) allocator.free(self.rows);
+        if (self.offsets.len > 0) allocator.free(self.offsets);
+        if (self.real_weights.len > 0) allocator.free(self.real_weights);
+        if (self.imag_weights.len > 0) allocator.free(self.imag_weights);
+        if (self.norm_weights.len > 0) allocator.free(self.norm_weights);
+        self.* = .{};
+    }
 };
 
 const WaveSession = struct {
@@ -690,32 +802,83 @@ fn normalizeMagnitudeToDecibels(magnitude: f32) f32 {
     return (decibels - min_db) / (max_db - min_db);
 }
 
-fn computeMorletMagnitude(center_sample: i32, frequency: f32) f32 {
-    const safe_frequency = maxF32(1.0, frequency);
-    const scale_seconds = morlet_omega0 / (2.0 * std.math.pi * safe_frequency);
-    const support_samples = minI32(
-        morlet_max_support_samples,
-        maxI32(24, @as(i32, @intFromFloat(@ceil(scale_seconds * morlet_support_sigma * g_session.sample_rate)))),
-    );
-    const stride = maxI32(1, @divTrunc(support_samples, morlet_target_steps));
+fn computeScalogramKernelMagnitude(center_sample: i32, kernel: *const ScalogramRowKernel) f32 {
+    if (kernel.offsets.len == 0) return 0.0;
+
+    const first_sample = center_sample + kernel.offsets[0];
+    const last_sample = center_sample + kernel.offsets[kernel.offsets.len - 1];
+    const use_full_normalization = first_sample >= 0 and last_sample < g_session.sample_count;
+
+    if (kernel.stride == 1) {
+        const tap_count_i32 = @as(i32, @intCast(kernel.offsets.len));
+        const valid_tap_start = clampi32(-first_sample, 0, tap_count_i32);
+        const valid_tap_end = clampi32(g_session.sample_count - first_sample, valid_tap_start, tap_count_i32);
+        if (valid_tap_end <= valid_tap_start) return 0.0;
+
+        const valid_start = @as(usize, @intCast(valid_tap_start));
+        const valid_end = @as(usize, @intCast(valid_tap_end));
+        const sample_start = @as(usize, @intCast(first_sample + valid_tap_start));
+        const sample_end = sample_start + (valid_end - valid_start);
+        const samples = g_session.samples[sample_start..sample_end];
+        const real_weights = kernel.real_weights[valid_start..valid_end];
+        const imag_weights = kernel.imag_weights[valid_start..valid_end];
+        const norm_weights = kernel.norm_weights[valid_start..valid_end];
+        var real: f32 = 0.0;
+        var imaginary: f32 = 0.0;
+        var norm: f32 = if (use_full_normalization) kernel.normalization else 0.0;
+        var index: usize = 0;
+
+        if (comptime simd_enabled) {
+            var real_vec: Vec4f = @splat(0.0);
+            var imaginary_vec: Vec4f = @splat(0.0);
+            var norm_vec: Vec4f = @splat(0.0);
+
+            while (index + 4 <= samples.len) : (index += 4) {
+                const sample_vec = @as(Vec4f, samples[index..][0..4].*);
+                const real_weight_vec = @as(Vec4f, real_weights[index..][0..4].*);
+                const imag_weight_vec = @as(Vec4f, imag_weights[index..][0..4].*);
+
+                real_vec += sample_vec * real_weight_vec;
+                imaginary_vec += sample_vec * imag_weight_vec;
+                if (!use_full_normalization) {
+                    norm_vec += @as(Vec4f, norm_weights[index..][0..4].*);
+                }
+            }
+
+            real += @reduce(.Add, real_vec);
+            imaginary += @reduce(.Add, imaginary_vec);
+            if (!use_full_normalization) {
+                norm += @reduce(.Add, norm_vec);
+            }
+        }
+
+        while (index < samples.len) : (index += 1) {
+            const sample = samples[index];
+            real += sample * real_weights[index];
+            imaginary += sample * imag_weights[index];
+            if (!use_full_normalization) {
+                norm += norm_weights[index];
+            }
+        }
+
+        if (norm <= 1e-8) return 0.0;
+        return @sqrt((real * real) + (imaginary * imaginary)) / @sqrt(norm);
+    }
+
     var real: f32 = 0.0;
     var imaginary: f32 = 0.0;
-    var norm: f32 = 0.0;
-    var offset: i32 = -support_samples;
+    var norm: f32 = if (use_full_normalization) kernel.normalization else 0.0;
 
-    while (offset <= support_samples) : (offset += stride) {
+    for (kernel.offsets, kernel.real_weights, kernel.imag_weights, kernel.norm_weights) |offset, real_weight, imag_weight, norm_weight| {
         const sample_index = center_sample + offset;
         if (sample_index < 0 or sample_index >= g_session.sample_count) continue;
 
-        const time = @as(f32, @floatFromInt(offset)) / g_session.sample_rate;
-        const normalized_time = time / scale_seconds;
-        const gaussian = @exp(-0.5 * normalized_time * normalized_time);
-        const phase = morlet_omega0 * normalized_time;
         const sample = g_session.samples[@as(usize, @intCast(sample_index))];
-
-        real += sample * gaussian * @cos(phase);
-        imaginary -= sample * gaussian * @sin(phase);
-        norm += gaussian * gaussian;
+        real += sample * real_weight;
+        imaginary += sample * imag_weight;
+        if (!use_full_normalization) {
+            norm += norm_weight;
+        }
     }
 
     if (norm <= 1e-8) return 0.0;
@@ -1044,6 +1207,12 @@ fn renderScalogramTile(
     const safe_tile_span = maxF32(1.0 / g_session.sample_rate, @as(f32, @floatCast(tile_end - tile_start)));
     const output_width = @as(usize, @intCast(column_count));
 
+    var kernel_bank = ScalogramKernelBank.init(row_count, safe_min_frequency, safe_max_frequency) catch return 0;
+    defer kernel_bank.deinit();
+
+    const center_samples = allocator.alloc(i32, @as(usize, @intCast(column_count))) catch return 0;
+    defer allocator.free(center_samples);
+
     var column_index: i32 = 0;
     while (column_index < column_count) : (column_index += 1) {
         const center_ratio = if (column_count == 1)
@@ -1051,15 +1220,30 @@ fn renderScalogramTile(
         else
             (@as(f64, @floatFromInt(column_index)) + 0.5) / @as(f64, @floatFromInt(column_count));
         const center_time = tile_start + (center_ratio * @as(f64, safe_tile_span));
-        const center_sample = @as(i32, @intFromFloat(@round(center_time * @as(f64, g_session.sample_rate))));
+        center_samples[@as(usize, @intCast(column_index))] = @as(i32, @intFromFloat(@round(center_time * @as(f64, g_session.sample_rate))));
+    }
 
-        var row: i32 = 0;
-        while (row < row_count) : (row += 1) {
-            const frequency = frequencyForScalogramRow(row, row_count, safe_min_frequency, safe_max_frequency);
-            const normalized = normalizeMagnitudeToDecibels(computeMorletMagnitude(center_sample, frequency));
+    var row_block_start: i32 = 0;
+    while (row_block_start < row_count) : (row_block_start += scalogram_row_block_size) {
+        const row_block_end = minI32(row_count, row_block_start + scalogram_row_block_size);
+        var row = row_block_start;
+
+        while (row < row_block_end) : (row += 1) {
+            const kernel = &kernel_bank.rows[@as(usize, @intCast(row))];
             const target_row = row_count - row - 1;
-            const pixel_offset = ((@as(usize, @intCast(target_row)) * output_width) + @as(usize, @intCast(column_index))) * 4;
-            writePaletteColor(normalized, output[pixel_offset .. pixel_offset + 4]);
+            const row_offset = @as(usize, @intCast(target_row)) * output_width * 4;
+            var active_column: i32 = 0;
+
+            while (active_column < column_count) : (active_column += 1) {
+                const normalized = normalizeMagnitudeToDecibels(
+                    computeScalogramKernelMagnitude(
+                        center_samples[@as(usize, @intCast(active_column))],
+                        kernel,
+                    ),
+                );
+                const pixel_offset = row_offset + (@as(usize, @intCast(active_column)) * 4);
+                writePaletteColor(normalized, output[pixel_offset .. pixel_offset + 4]);
+            }
         }
     }
 
