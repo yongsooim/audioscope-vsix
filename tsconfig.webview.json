@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "target": "ES2024",
+    "lib": [
+      "ES2024",
+      "DOM",
+      "WebWorker"
+    ],
+    "skipLibCheck": true,
+    "noEmit": true,
+    "noCheck": true
+  },
+  "include": [
+    "src-webview/**/*.ts",
+    "src-webview/**/*.d.ts"
+  ]
+}

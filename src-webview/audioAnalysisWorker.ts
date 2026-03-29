@@ -1,8 +1,8 @@
-import { loadWaveCoreRuntime } from './waveCoreRuntime.js';
+import { loadWaveCoreRuntime } from './waveCoreRuntime';
 import {
   TILE_COLUMN_COUNT,
   quantizeCeil,
-} from './sharedBuffers.js';
+} from './sharedBuffers';
 
 const MIN_FREQUENCY = 20;
 const MAX_FREQUENCY = 20000;
@@ -592,13 +592,14 @@ function createTileRecord({ cacheKey, rowCount, tileEnd, tileIndex, tileStart })
     throw new Error('OffscreenCanvas 2D context is unavailable.');
   }
 
-  context.clearRect(0, 0, TILE_COLUMN_COUNT, rowCount);
+  const imageData = context.createImageData(TILE_COLUMN_COUNT, rowCount);
 
   return {
     canvas,
     columnCount: TILE_COLUMN_COUNT,
     complete: false,
     context,
+    imageData,
     renderedColumns: 0,
     rowCount,
     tileEnd,
@@ -609,9 +610,24 @@ function createTileRecord({ cacheKey, rowCount, tileEnd, tileIndex, tileStart })
 }
 
 function drawTileChunk(tileRecord, rgba, columnOffset, columnCount, rowCount) {
-  const imageData = tileRecord.context.createImageData(columnCount, rowCount);
-  imageData.data.set(new Uint8ClampedArray(rgba));
-  tileRecord.context.putImageData(imageData, columnOffset, 0);
+  const destination = tileRecord.imageData.data;
+
+  if (columnOffset === 0 && columnCount === tileRecord.columnCount) {
+    destination.set(rgba);
+  } else {
+    const sourceRowLength = columnCount * 4;
+    const destinationRowLength = tileRecord.columnCount * 4;
+    const destinationOffset = columnOffset * 4;
+
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const sourceStart = rowIndex * sourceRowLength;
+      const sourceEnd = sourceStart + sourceRowLength;
+      const destinationStart = rowIndex * destinationRowLength + destinationOffset;
+      destination.set(rgba.subarray(sourceStart, sourceEnd), destinationStart);
+    }
+  }
+
+  tileRecord.context.putImageData(tileRecord.imageData, 0, 0, columnOffset, 0, columnCount, rowCount);
 }
 
 function renderTileChunk(runtime, plan, tileIndex, tileStart, tileEnd, tileRecord, startColumn, columnCount) {
@@ -663,6 +679,7 @@ async function renderTile(runtime, plan, tileIndex, tileStart, tileEnd, options 
     if (!tileRecord.context) {
       throw new Error('OffscreenCanvas 2D context is unavailable.');
     }
+    tileRecord.imageData = tileRecord.context.createImageData(tileRecord.columnCount, tileRecord.rowCount);
   }
 
   analysisState.tileCache.set(cacheKey, tileRecord);
@@ -939,7 +956,7 @@ function isEquivalentPlan(left, right) {
 
 function normalizeFftSize(value) {
   const numericValue = Number(value);
-  return FFT_SIZE_OPTIONS.includes(numericValue) ? numericValue : 8192;
+  return FFT_SIZE_OPTIONS.includes(numericValue) ? numericValue : 4096;
 }
 
 function normalizeOverlapRatio(value) {

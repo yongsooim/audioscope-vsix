@@ -1,7 +1,7 @@
 import {
   DISPLAY_MIN_DPR,
   TILE_COLUMN_COUNT,
-} from '../src-webview/sharedBuffers.js';
+} from './sharedBuffers';
 
 const vscode = acquireVsCodeApi();
 const analysisWorkerScriptUri = document.body.dataset.workerSrc;
@@ -22,6 +22,12 @@ const SPECTROGRAM_OVERVIEW_WIDTH_SCALE = 0.45;
 const SPECTROGRAM_OVERVIEW_HEIGHT_SCALE = 0.7;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
 const SPECTROGRAM_ROW_BUCKET_SIZE = 32;
+const DEFAULT_VIEWPORT_SPLIT_RATIO = 0.5;
+const VIEWPORT_SPLIT_STEP = 0.05;
+const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 12;
+const VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX = 140;
+const VIEWPORT_RATIO_MIN = 0.15;
+const VIEWPORT_RATIO_MAX = 0.85;
 
 const WAVEFORM_COLOR = '#7dd3fc';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
@@ -66,6 +72,9 @@ const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875];
 
 const elements = {
+  viewport: document.getElementById('preview-viewport'),
+  wavePanel: document.getElementById('wave-panel'),
+  waveToolbar: document.getElementById('wave-toolbar'),
   mediaMetadataPanel: document.getElementById('media-metadata-panel'),
   mediaMetadataSummary: document.getElementById('media-metadata-summary'),
   mediaMetadataDetail: document.getElementById('media-metadata-detail'),
@@ -91,6 +100,9 @@ const elements = {
   waveZoomReset: document.getElementById('wave-zoom-reset'),
   waveZoomIn: document.getElementById('wave-zoom-in'),
   waveFollow: document.getElementById('wave-follow'),
+  viewportSplitter: document.getElementById('viewport-splitter'),
+  spectrogramPanel: document.getElementById('spectrogram-panel'),
+  spectrogramStage: document.getElementById('spectrogram-stage'),
   spectrogram: document.getElementById('spectrogram'),
   spectrogramSelection: document.getElementById('spectrogram-selection'),
   spectrogramProgress: document.getElementById('spectrogram-progress'),
@@ -133,6 +145,7 @@ const state = {
   fetchController: null,
   externalTools: createExternalToolStatusState(),
   mediaMetadata: createMediaMetadataState('idle'),
+  mediaMetadataDetailOpen: false,
   playbackSourceKind: 'native',
   analysisSourceKind: 'native',
   decodeFallbackLoadToken: 0,
@@ -148,6 +161,7 @@ const state = {
   analysisIdleCallbackId: null,
   analysisTimeoutId: null,
   analysisStartedForLoadToken: 0,
+  analysisQueuedForLoadToken: 0,
   waveformWorker: null,
   waveformWorkerBootstrapUrl: null,
   waveformRuntimeReadyPromise: null,
@@ -158,6 +172,8 @@ const state = {
   waveformViewRange: { start: 0, end: 0 },
   waveformHoverClientPoint: null,
   waveformSeekPointerId: null,
+  viewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
+  viewportResizeDrag: null,
   selectionDrag: null,
   selectionDraft: null,
   loopHandleDrag: null,
@@ -167,7 +183,7 @@ const state = {
   transportMode: RUNTIME_TRANSPORT_MODE,
   spectrogramRenderConfig: {
     analysisType: 'spectrogram',
-    fftSize: 8192,
+    fftSize: 4096,
     frequencyScale: 'log',
     overlapRatio: 0.75,
   },
@@ -187,6 +203,7 @@ const state = {
   playbackFrame: 0,
   spectrogramFrame: 0,
   spectrogramRequestFrame: 0,
+  waveformPyramidFrame: 0,
   observedWaveformViewportWidth: 0,
   observedWaveformViewportHeight: 0,
   observedSpectrogramPixelWidth: 0,
@@ -218,6 +235,7 @@ if (
   initializeKeyboardFocus();
   state.followPlayback = elements.waveFollow.checked;
   attachUiEvents();
+  applyViewportSplit(true);
   attachResizeObservers();
   renderWaveformUi();
   renderSpectrogramScale();
@@ -333,7 +351,9 @@ window.addEventListener('message', (event) => {
     state.resolveDecodeFallback = null;
     state.rejectDecodeFallback = null;
     renderMediaMetadata();
+    return;
   }
+
 });
 
 function initializeKeyboardFocus() {
@@ -384,7 +404,7 @@ function getRuntimeTransportMode() {
 
 function normalizeSpectrogramFftSize(value) {
   const numericValue = Number(value);
-  return SPECTROGRAM_FFT_OPTIONS.includes(numericValue) ? numericValue : 8192;
+  return SPECTROGRAM_FFT_OPTIONS.includes(numericValue) ? numericValue : 4096;
 }
 
 function normalizeSpectrogramAnalysisType(value) {
@@ -423,9 +443,11 @@ function createExternalToolStatusState() {
     ffmpegAvailable: false,
     ffmpegCommand: 'ffmpeg',
     ffmpegPath: null,
+    ffmpegVersion: null,
     ffprobeAvailable: false,
     ffprobeCommand: 'ffprobe',
     ffprobePath: null,
+    ffprobeVersion: null,
     fileBacked: false,
     guidance: 'Install ffmpeg CLI to view metadata and decode unsupported audio files.',
   };
@@ -449,6 +471,9 @@ function normalizeExternalToolStatus(status) {
     ffmpegPath: typeof status.ffmpegPath === 'string' && status.ffmpegPath.trim().length > 0
       ? status.ffmpegPath
       : null,
+    ffmpegVersion: typeof status.ffmpegVersion === 'string' && status.ffmpegVersion.trim().length > 0
+      ? status.ffmpegVersion
+      : null,
     ffprobeAvailable: Boolean(status.ffprobeAvailable),
     ffprobeCommand: typeof status.ffprobeCommand === 'string' && status.ffprobeCommand.trim().length > 0
       ? status.ffprobeCommand
@@ -456,11 +481,26 @@ function normalizeExternalToolStatus(status) {
     ffprobePath: typeof status.ffprobePath === 'string' && status.ffprobePath.trim().length > 0
       ? status.ffprobePath
       : null,
+    ffprobeVersion: typeof status.ffprobeVersion === 'string' && status.ffprobeVersion.trim().length > 0
+      ? status.ffprobeVersion
+      : null,
     fileBacked: Boolean(status.fileBacked),
     guidance: typeof status.guidance === 'string' && status.guidance.trim().length > 0
       ? status.guidance
       : base.guidance,
   };
+}
+
+function formatExternalToolVersion(available, version, command) {
+  if (!available) {
+    return `Unavailable (${command || 'tool'})`;
+  }
+
+  if (typeof version === 'string' && version.trim().length > 0) {
+    return version;
+  }
+
+  return command || 'Available';
 }
 
 function createMediaMetadataState(status = 'idle') {
@@ -727,12 +767,6 @@ function renderMediaMetadata() {
   appendMetadataDetailRow(overviewSection, 'Duration', detailSummary?.durationText || null);
   appendMetadataDetailRow(overviewSection, 'Size', detailSummary?.sizeText || null);
 
-  const streamItems = Array.isArray(detail?.streams)
-    ? detail.streams
-      .map((stream) => formatMetadataStreamSummary(stream))
-      .filter(Boolean)
-    : [];
-  appendMetadataListSection(detailRoot, 'Streams', streamItems);
   appendMetadataListSection(detailRoot, 'Tags', formatMetadataTags(detail?.tags));
   appendMetadataListSection(detailRoot, 'Chapters', formatMetadataChapters(detail?.chapters));
 
@@ -751,16 +785,20 @@ function renderMediaMetadata() {
   appendMetadataDetailRow(
     toolSection,
     'ffmpeg',
-    state.externalTools.ffmpegAvailable
-      ? state.externalTools.ffmpegPath || state.externalTools.ffmpegCommand || 'ffmpeg'
-      : `Unavailable (${state.externalTools.ffmpegCommand || 'ffmpeg'})`,
+    formatExternalToolVersion(
+      state.externalTools.ffmpegAvailable,
+      state.externalTools.ffmpegVersion,
+      state.externalTools.ffmpegCommand,
+    ),
   );
   appendMetadataDetailRow(
     toolSection,
     'ffprobe',
-    state.externalTools.ffprobeAvailable
-      ? state.externalTools.ffprobePath || state.externalTools.ffprobeCommand || 'ffprobe'
-      : `Unavailable (${state.externalTools.ffprobeCommand || 'ffprobe'})`,
+    formatExternalToolVersion(
+      state.externalTools.ffprobeAvailable,
+      state.externalTools.ffprobeVersion,
+      state.externalTools.ffprobeCommand,
+    ),
   );
   appendMetadataDetailRow(
     toolSection,
@@ -768,11 +806,32 @@ function renderMediaMetadata() {
     state.decodeFallbackError?.message || detail?.guidance || metadata.message || state.externalTools.guidance || null,
   );
 
-  if (detailRoot.childElementCount === 0) {
-    detailRoot.setAttribute('aria-hidden', 'true');
-  } else {
-    detailRoot.setAttribute('aria-hidden', 'false');
+  syncMediaMetadataDetailVisibility();
+}
+
+function syncMediaMetadataDetailVisibility() {
+  if (!elements.mediaMetadataPanel || !elements.mediaMetadataDetail) {
+    return;
   }
+
+  const hasDetailContent = elements.mediaMetadataDetail.childElementCount > 0;
+  const shouldShowDetail = hasDetailContent && state.mediaMetadataDetailOpen;
+
+  elements.mediaMetadataPanel.dataset.detailOpen = shouldShowDetail ? 'true' : 'false';
+  elements.mediaMetadataDetail.hidden = !shouldShowDetail;
+  elements.mediaMetadataDetail.setAttribute('aria-hidden', shouldShowDetail ? 'false' : 'true');
+}
+
+function setMediaMetadataDetailOpen(nextOpen) {
+  const normalizedOpen = Boolean(nextOpen);
+
+  if (state.mediaMetadataDetailOpen === normalizedOpen) {
+    syncMediaMetadataDetailVisibility();
+    return;
+  }
+
+  state.mediaMetadataDetailOpen = normalizedOpen;
+  syncMediaMetadataDetailVisibility();
 }
 
 function renderLoudnessSummary() {
@@ -1126,6 +1185,7 @@ async function recoverPlaybackWithDecodeFallback(loadToken, payload, audio, reas
 
     applyPlaybackSourceBuffer(loadToken, audio, fallback.audioBuffer, fallback.mimeType, 'ffmpeg-fallback');
     setAnalysisStatus('Buffering playback…');
+    scheduleDeferredAnalysis(loadToken, payload);
     return true;
   } catch (error) {
     if (loadToken !== state.loadToken) {
@@ -1162,6 +1222,7 @@ async function loadPlaybackSource(loadToken, payload, audio) {
     const mimeType = response.headers.get('content-type') || guessAudioMimeType(payload.sourceUri);
     applyPlaybackSourceBuffer(loadToken, audio, audioData, mimeType, 'native');
     setAnalysisStatus('Buffering playback…');
+    scheduleDeferredAnalysis(loadToken, payload);
   } catch (error) {
     if (loadToken !== state.loadToken || controller.signal.aborted) {
       return;
@@ -1263,14 +1324,45 @@ function cancelDeferredAnalysis() {
 
   state.analysisIdleCallbackId = null;
   state.analysisTimeoutId = null;
+  state.analysisQueuedForLoadToken = 0;
+}
+
+function cancelPendingWaveformPyramidBuild() {
+  if (state.waveformPyramidFrame) {
+    window.cancelAnimationFrame(state.waveformPyramidFrame);
+    state.waveformPyramidFrame = 0;
+  }
+}
+
+function scheduleWaveformPyramidBuild(loadToken, worker, sessionVersion) {
+  cancelPendingWaveformPyramidBuild();
+  state.waveformPyramidFrame = window.requestAnimationFrame(() => {
+    state.waveformPyramidFrame = 0;
+
+    if (
+      loadToken !== state.loadToken
+      || !state.waveformWorker
+      || state.waveformWorker !== worker
+      || sessionVersion !== state.sessionVersion
+    ) {
+      return;
+    }
+
+    worker.postMessage({ type: 'buildWaveformPyramid' });
+  });
 }
 
 function scheduleDeferredAnalysis(loadToken, payload) {
-  if (loadToken !== state.loadToken || state.analysisStartedForLoadToken === loadToken) {
+  if (
+    loadToken !== state.loadToken
+    || state.analysisStartedForLoadToken === loadToken
+    || state.analysisQueuedForLoadToken === loadToken
+  ) {
     return;
   }
 
   cancelDeferredAnalysis();
+  state.analysisQueuedForLoadToken = loadToken;
   setAnalysisStatus('Queued');
 
   const startDeferredAnalysis = () => {
@@ -1280,6 +1372,7 @@ function scheduleDeferredAnalysis(loadToken, payload) {
 
     state.analysisIdleCallbackId = null;
     state.analysisTimeoutId = null;
+    state.analysisQueuedForLoadToken = 0;
     state.analysisStartedForLoadToken = loadToken;
     void startAnalysis(loadToken, payload);
   };
@@ -1332,7 +1425,7 @@ async function startAnalysis(loadToken, payload) {
       return;
     }
 
-    setAnalysisStatus('Initializing wasm pipelines…');
+    setAnalysisStatus('Initializing analysis workers…');
     await Promise.all([
       state.analysisRuntimeReadyPromise,
       state.waveformRuntimeReadyPromise,
@@ -1370,7 +1463,11 @@ async function startAnalysis(loadToken, payload) {
       return;
     }
 
-    state.waveformSamples = monoSamples.slice();
+    const waveformSamples = state.transportMode === 'shared'
+      ? monoSamples
+      : monoSamples.slice();
+
+    state.waveformSamples = waveformSamples;
 
     state.analysis = createSpectrogramAnalysisState({
       duration: decodedAudio.duration,
@@ -1396,6 +1493,7 @@ async function startAnalysis(loadToken, payload) {
     }
 
     state.sessionVersion += 1;
+    const sessionVersion = state.sessionVersion;
     setAnalysisStatus('Queued');
 
     if (state.transportMode === 'shared') {
@@ -1407,7 +1505,7 @@ async function startAnalysis(loadToken, payload) {
         quality: state.analysis.quality,
         sampleCount: monoSamples.length,
         sampleRate: decodedAudio.sampleRate,
-        sessionVersion: state.sessionVersion,
+        sessionVersion,
         transportMode: state.transportMode,
       };
 
@@ -1415,13 +1513,13 @@ async function startAnalysis(loadToken, payload) {
         type: 'attachAudioSession',
         body: sharedBody,
       });
+      void syncWaveformView({ force: true });
+      scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
       analysisWorker.postMessage({
         type: 'attachAudioSession',
         body: sharedBody,
       });
     } else {
-      const waveformSamples = monoSamples.slice();
-
       waveformWorker.postMessage({
         type: 'attachAudioSession',
         body: {
@@ -1430,10 +1528,12 @@ async function startAnalysis(loadToken, payload) {
           sampleCount: waveformSamples.length,
           sampleRate: decodedAudio.sampleRate,
           samplesBuffer: waveformSamples.buffer,
-          sessionVersion: state.sessionVersion,
+          sessionVersion,
           transportMode: state.transportMode,
         },
       }, [waveformSamples.buffer]);
+      void syncWaveformView({ force: true });
+      scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
 
       analysisWorker.postMessage({
         type: 'attachAudioSession',
@@ -1443,16 +1543,14 @@ async function startAnalysis(loadToken, payload) {
           sampleCount: monoSamples.length,
           sampleRate: decodedAudio.sampleRate,
           samplesBuffer: monoSamples.buffer,
-          sessionVersion: state.sessionVersion,
+          sessionVersion,
           transportMode: state.transportMode,
         },
       }, [monoSamples.buffer]);
     }
 
-    waveformWorker.postMessage({ type: 'buildWaveformPyramid' });
     requestOverviewSpectrogram({ force: true });
     scheduleSpectrogramRender({ force: true });
-    void syncWaveformView();
   } catch (error) {
     if (loadToken !== state.loadToken || controller.signal.aborted) {
       return;
@@ -1680,10 +1778,6 @@ function handleWaveformWorkerMessage(loadToken, message) {
   if (message?.type === 'runtimeReady') {
     state.resolveWaveformRuntimeReady?.();
     state.resolveWaveformRuntimeReady = null;
-    return;
-  }
-
-  if (!state.analysis) {
     return;
   }
 
@@ -2445,9 +2539,12 @@ function renderWaveformUi() {
   elements.waveFollow.checked = state.followPlayback;
   const hintText = duration > 0
     ? 'Seek, drag loop, or wheel to zoom and pan.'
-    : 'Preparing playback and waveform preview.';
+    : 'Preparing playback and analysis.';
   elements.waveHint.textContent =
     hintText;
+  if (elements.waveToolbar) {
+    elements.waveToolbar.title = hintText;
+  }
   if (elements.waveToolbarInfo) {
     elements.waveToolbarInfo.title = hintText;
   }
@@ -3175,6 +3272,225 @@ function bindLoopHandle(handleElement, edge, targetElement) {
   });
 }
 
+function normalizeViewportSplitRatio(value) {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_VIEWPORT_SPLIT_RATIO;
+  }
+
+  return clamp(value, VIEWPORT_RATIO_MIN, VIEWPORT_RATIO_MAX);
+}
+
+function getNumericStyleSize(element, propertyName, fallback = 0) {
+  if (!element) {
+    return fallback;
+  }
+
+  const computedValue = Number.parseFloat(window.getComputedStyle(element)[propertyName]);
+  return Number.isFinite(computedValue) ? computedValue : fallback;
+}
+
+function getViewportSplitterSize() {
+  return Math.max(
+    1,
+    elements.viewportSplitter?.offsetHeight
+      || getNumericStyleSize(elements.viewportSplitter, 'minHeight', VIEWPORT_SPLITTER_FALLBACK_SIZE_PX),
+  );
+}
+
+function getWavePanelMinimumHeight() {
+  const waveformViewportMinHeight = getNumericStyleSize(elements.waveformViewport, 'minHeight', 168);
+
+  return Math.max(
+    waveformViewportMinHeight,
+    (elements.waveToolbar?.offsetHeight || 0)
+      + (elements.waveformAxis?.offsetHeight || 0)
+      + waveformViewportMinHeight,
+  );
+}
+
+function getSpectrogramPanelMinimumHeight() {
+  return Math.max(
+    VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX,
+    getNumericStyleSize(elements.spectrogramStage, 'minHeight', VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX),
+  );
+}
+
+function resolveViewportPanelHeights(availableHeight, ratio = state.viewportSplitRatio) {
+  const safeAvailableHeight = Math.max(0, availableHeight);
+
+  if (safeAvailableHeight <= 0) {
+    return { waveHeight: 0, spectrogramHeight: 0 };
+  }
+
+  const desiredWaveHeight = safeAvailableHeight * normalizeViewportSplitRatio(ratio);
+  const minimumWaveHeight = Math.min(getWavePanelMinimumHeight(), safeAvailableHeight);
+  const minimumSpectrogramHeight = Math.min(getSpectrogramPanelMinimumHeight(), safeAvailableHeight);
+
+  if ((minimumWaveHeight + minimumSpectrogramHeight) >= safeAvailableHeight) {
+    const waveHeight = Math.round(clamp(desiredWaveHeight, 0, safeAvailableHeight));
+
+    return {
+      waveHeight,
+      spectrogramHeight: Math.max(0, safeAvailableHeight - waveHeight),
+    };
+  }
+
+  const waveHeight = Math.round(clamp(
+    desiredWaveHeight,
+    minimumWaveHeight,
+    safeAvailableHeight - minimumSpectrogramHeight,
+  ));
+
+  return {
+    waveHeight,
+    spectrogramHeight: Math.max(0, safeAvailableHeight - waveHeight),
+  };
+}
+
+function updateViewportSplitterAccessibility(waveHeight, availableHeight) {
+  if (!elements.viewportSplitter) {
+    return;
+  }
+
+  const wavePercentage = availableHeight > 0
+    ? Math.round((waveHeight / availableHeight) * 100)
+    : Math.round(state.viewportSplitRatio * 100);
+  const spectrogramPercentage = Math.max(0, 100 - wavePercentage);
+
+  elements.viewportSplitter.setAttribute('aria-valuenow', String(wavePercentage));
+  elements.viewportSplitter.setAttribute(
+    'aria-valuetext',
+    `Waveform ${wavePercentage}%, spectrogram ${spectrogramPercentage}%`,
+  );
+}
+
+function applyViewportSplit(force = false) {
+  if (!elements.viewport || !elements.viewportSplitter) {
+    return;
+  }
+
+  const splitterSize = getViewportSplitterSize();
+  const availableHeight = Math.max(0, elements.viewport.clientHeight - splitterSize);
+
+  if (availableHeight <= 0) {
+    updateViewportSplitterAccessibility(0, 0);
+    return;
+  }
+
+  const { waveHeight, spectrogramHeight } = resolveViewportPanelHeights(availableHeight);
+  const nextTemplate = `${waveHeight}px ${splitterSize}px ${spectrogramHeight}px`;
+
+  if (!force && elements.viewport.style.gridTemplateRows === nextTemplate) {
+    updateViewportSplitterAccessibility(waveHeight, availableHeight);
+    return;
+  }
+
+  elements.viewport.style.gridTemplateRows = nextTemplate;
+  updateViewportSplitterAccessibility(waveHeight, availableHeight);
+}
+
+function setViewportSplitRatio(ratio, force = false) {
+  const nextRatio = normalizeViewportSplitRatio(ratio);
+  const ratioChanged = Math.abs(state.viewportSplitRatio - nextRatio) > 0.001;
+
+  state.viewportSplitRatio = nextRatio;
+
+  if (ratioChanged || force) {
+    applyViewportSplit(force);
+  }
+}
+
+function updateViewportSplitRatioFromClientY(clientY) {
+  if (!elements.viewport) {
+    return;
+  }
+
+  const splitterSize = getViewportSplitterSize();
+  const viewportRect = elements.viewport.getBoundingClientRect();
+  const availableHeight = Math.max(0, viewportRect.height - splitterSize);
+
+  if (availableHeight <= 0) {
+    return;
+  }
+
+  const proposedWaveHeight = clamp(clientY - viewportRect.top - (splitterSize / 2), 0, availableHeight);
+  const { waveHeight } = resolveViewportPanelHeights(availableHeight, proposedWaveHeight / availableHeight);
+  setViewportSplitRatio(waveHeight / availableHeight, true);
+}
+
+function beginViewportSplitDrag(event) {
+  if (!elements.viewportSplitter) {
+    return;
+  }
+
+  if (event.pointerType === 'mouse' && event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  elements.viewportSplitter.dataset.dragging = 'true';
+  elements.viewportSplitter.setPointerCapture(event.pointerId);
+  state.viewportResizeDrag = { pointerId: event.pointerId };
+  updateViewportSplitRatioFromClientY(event.clientY);
+}
+
+function updateViewportSplitDrag(event) {
+  const dragState = state.viewportResizeDrag;
+
+  if (!dragState || dragState.pointerId !== event.pointerId) {
+    return;
+  }
+
+  event.preventDefault();
+  updateViewportSplitRatioFromClientY(event.clientY);
+}
+
+function endViewportSplitDrag(event, cancelled = false) {
+  const dragState = state.viewportResizeDrag;
+
+  if (!dragState || dragState.pointerId !== event.pointerId || !elements.viewportSplitter) {
+    return;
+  }
+
+  if (elements.viewportSplitter.hasPointerCapture?.(event.pointerId)) {
+    elements.viewportSplitter.releasePointerCapture(event.pointerId);
+  }
+
+  delete elements.viewportSplitter.dataset.dragging;
+  state.viewportResizeDrag = null;
+
+  if (!cancelled) {
+    updateViewportSplitRatioFromClientY(event.clientY);
+  }
+}
+
+function resetViewportSplit() {
+  setViewportSplitRatio(DEFAULT_VIEWPORT_SPLIT_RATIO, true);
+}
+
+function handleViewportSplitterKeydown(event) {
+  let nextRatio = null;
+
+  if (event.key === 'ArrowUp') {
+    nextRatio = state.viewportSplitRatio - VIEWPORT_SPLIT_STEP;
+  } else if (event.key === 'ArrowDown') {
+    nextRatio = state.viewportSplitRatio + VIEWPORT_SPLIT_STEP;
+  } else if (event.key === 'Home') {
+    nextRatio = VIEWPORT_RATIO_MIN;
+  } else if (event.key === 'End') {
+    nextRatio = VIEWPORT_RATIO_MAX;
+  } else if (event.key === 'Enter' || event.key === ' ') {
+    nextRatio = DEFAULT_VIEWPORT_SPLIT_RATIO;
+  }
+
+  if (nextRatio === null) {
+    return;
+  }
+
+  event.preventDefault();
+  setViewportSplitRatio(nextRatio, true);
+}
+
 function handleSharedViewportWheel(event, targetElement) {
   const duration = getEffectiveDuration();
   const range = getWaveformRange();
@@ -3246,6 +3562,42 @@ function handleSharedViewportWheel(event, targetElement) {
 }
 
 function attachUiEvents() {
+  elements.mediaMetadataPanel?.addEventListener('mouseenter', () => {
+    setMediaMetadataDetailOpen(true);
+  });
+  elements.mediaMetadataPanel?.addEventListener('mouseleave', () => {
+    setMediaMetadataDetailOpen(false);
+  });
+  elements.mediaMetadataPanel?.addEventListener('focusin', () => {
+    setMediaMetadataDetailOpen(true);
+  });
+  elements.mediaMetadataPanel?.addEventListener('focusout', (event) => {
+    if (event.relatedTarget instanceof Node && elements.mediaMetadataPanel?.contains(event.relatedTarget)) {
+      return;
+    }
+
+    setMediaMetadataDetailOpen(false);
+  });
+
+  elements.viewportSplitter?.addEventListener('pointerdown', (event) => {
+    beginViewportSplitDrag(event);
+  });
+  elements.viewportSplitter?.addEventListener('pointermove', (event) => {
+    updateViewportSplitDrag(event);
+  });
+  elements.viewportSplitter?.addEventListener('pointerup', (event) => {
+    endViewportSplitDrag(event);
+  });
+  elements.viewportSplitter?.addEventListener('pointercancel', (event) => {
+    endViewportSplitDrag(event, true);
+  });
+  elements.viewportSplitter?.addEventListener('dblclick', () => {
+    resetViewportSplit();
+  });
+  elements.viewportSplitter?.addEventListener('keydown', (event) => {
+    handleViewportSplitterKeydown(event);
+  });
+
   elements.spectrogramTypeSelect?.addEventListener('change', () => {
     state.spectrogramRenderConfig.analysisType = normalizeSpectrogramAnalysisType(elements.spectrogramTypeSelect.value);
     renderSpectrogramScale();
@@ -3401,12 +3753,15 @@ function attachUiEvents() {
 
 function attachResizeObservers() {
   const resizeObserver = new ResizeObserver(() => {
+    applyViewportSplit();
     const { height, width } = getWaveformViewportSize();
     const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
     const overviewWidth = Math.max(1, elements.waveformOverview.clientWidth);
+    const waveformViewportResized =
+      state.observedWaveformViewportWidth !== width
+      || state.observedWaveformViewportHeight !== height;
     const dimensionsUnchanged =
-      state.observedWaveformViewportWidth === width
-      && state.observedWaveformViewportHeight === height
+      !waveformViewportResized
       && state.observedSpectrogramPixelWidth === pixelWidth
       && state.observedSpectrogramPixelHeight === pixelHeight
       && state.observedOverviewWidth === overviewWidth;
@@ -3457,7 +3812,7 @@ function attachResizeObservers() {
     }
 
     renderWaveformUi();
-    void syncWaveformView();
+    void syncWaveformView({ force: waveformViewportResized });
     renderSpectrogramScale();
     applySpectrogramCanvasTransform();
     requestOverviewSpectrogram({ force: true });
@@ -3466,6 +3821,7 @@ function attachResizeObservers() {
   });
 
   resizeObserver.observe(document.body);
+  resizeObserver.observe(elements.viewport);
   resizeObserver.observe(elements.waveformViewport);
   resizeObserver.observe(elements.waveformOverview);
 }
@@ -3479,6 +3835,7 @@ function destroySession() {
   state.spectrogramRequestFrame = 0;
 
   cancelDeferredAnalysis();
+  cancelPendingWaveformPyramidBuild();
 
   if (state.sourceFetchController) {
     state.sourceFetchController.abort();
@@ -3523,6 +3880,7 @@ function destroySession() {
   state.waveformSamples = null;
   state.externalTools = createExternalToolStatusState();
   state.mediaMetadata = createMediaMetadataState('idle');
+  state.mediaMetadataDetailOpen = false;
   state.playbackSourceKind = 'native';
   state.analysisSourceKind = 'native';
   state.decodeFallbackLoadToken = 0;
@@ -3540,6 +3898,7 @@ function destroySession() {
   state.loopRange = null;
   state.pendingSeekTime = 0;
   state.analysisStartedForLoadToken = 0;
+  state.analysisQueuedForLoadToken = 0;
   state.sessionVersion = 0;
   state.analysis = null;
   state.loudness = createLoudnessSummaryState('idle');
