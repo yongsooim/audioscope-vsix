@@ -1,13 +1,26 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import {
+  decodeWithFfmpeg,
+  getExternalToolStatus,
+  getMediaMetadata,
+  probeAudioOpen,
+  type AudioPreviewPayload,
+} from './externalAudioTools';
 
-interface AudioPreviewPayload {
-  fileExtension: string;
-  fileName: string;
-  fileSize: number | null;
-  spectrogramQuality: 'balanced' | 'high' | 'max';
-  sourceUri: string;
-}
+const KNOWN_AUDIO_EXTENSIONS = new Set([
+  'wav',
+  'wave',
+  'mp3',
+  'ogg',
+  'oga',
+  'flac',
+  'm4a',
+  'aac',
+  'opus',
+  'aif',
+  'aiff',
+]);
 
 class AudioPreviewDocument implements vscode.CustomDocument {
   private readonly onDidDisposeEmitter = new vscode.EventEmitter<void>();
@@ -44,6 +57,10 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
 
         if (!target) {
           void vscode.window.showInformationMessage('Select or open an audio file first.');
+          return;
+        }
+
+        if (!(await canOpenInWavePreview(target))) {
           return;
         }
 
@@ -87,11 +104,67 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         type: 'loadAudio',
         body: payload,
       });
+      await webviewPanel.webview.postMessage({
+        type: 'externalToolStatus',
+        body: payload.externalTools,
+      });
     };
 
     webviewPanel.webview.onDidReceiveMessage(async (message) => {
       if (message?.type === 'ready' || message?.type === 'reload') {
         await postAudioPayload();
+        return;
+      }
+
+      if (message?.type === 'requestMediaMetadata') {
+        const loadToken = Number(message.body?.loadToken) || 0;
+
+        try {
+          const metadata = await getMediaMetadata(document.uri);
+          await webviewPanel.webview.postMessage({
+            type: 'mediaMetadataReady',
+            body: {
+              loadToken,
+              metadata,
+            },
+          });
+        } catch (error) {
+          const toolStatus = await getExternalToolStatus(document.uri);
+          await webviewPanel.webview.postMessage({
+            type: 'mediaMetadataError',
+            body: {
+              loadToken,
+              message: error instanceof Error ? error.message : String(error),
+              toolStatus,
+            },
+          });
+        }
+        return;
+      }
+
+      if (message?.type === 'requestDecodeFallback') {
+        const loadToken = Number(message.body?.loadToken) || 0;
+
+        try {
+          const fallback = await decodeWithFfmpeg(document.uri);
+          await webviewPanel.webview.postMessage({
+            type: 'decodeFallbackReady',
+            body: {
+              ...fallback,
+              loadToken,
+            },
+          });
+        } catch (error) {
+          const toolStatus = await getExternalToolStatus(document.uri);
+          await webviewPanel.webview.postMessage({
+            type: 'decodeFallbackError',
+            body: {
+              loadToken,
+              message: error instanceof Error ? error.message : String(error),
+              toolStatus,
+            },
+          });
+        }
       }
     });
   }
@@ -109,9 +182,13 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     const spectrogramQuality = vscode.workspace
       .getConfiguration('wavePreview', document.uri)
       .get<'balanced' | 'high' | 'max'>('spectrogramQuality', 'high');
+    const externalTools = await getExternalToolStatus(document.uri);
 
     return {
+      documentUri: document.uri.toString(),
+      externalTools,
       fileExtension: path.posix.extname(document.uri.path).replace(/^\./, '').toLowerCase(),
+      fileBacked: externalTools.fileBacked,
       fileName: path.posix.basename(document.uri.path),
       fileSize,
       spectrogramQuality,
@@ -145,6 +222,10 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
             <div class="wave-toolbar-copy">
               <div id="wave-hint" class="wave-hint">Click to seek. Drag to set a loop. Wheel to zoom or pan.</div>
               <div id="wave-loop-label" class="wave-loop-label">No loop selection</div>
+            </div>
+            <div id="media-metadata-panel" class="media-metadata-panel" data-state="idle" aria-label="Audio metadata">
+              <div id="media-metadata-summary" class="media-metadata-summary" tabindex="0">Checking metadata…</div>
+              <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true"></div>
             </div>
             <div class="wave-toolbar-actions">
               <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-wide" type="button" hidden>Clear</button>
@@ -231,7 +312,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.001" value="0" disabled />
         </div>
         <div id="time-readout" class="time-readout">0:00 / --:--</div>
-        <div id="loudness-summary" class="loudness-summary" data-state="idle" aria-label="Loudness summary" aria-live="polite">
+        <div id="loudness-summary" class="loudness-summary" data-state="idle" aria-label="Loudness summary" aria-live="polite" hidden>
           <div class="loudness-chip">
             <span class="loudness-chip-label">I</span>
             <span id="loudness-integrated" class="loudness-chip-value">--</span>
@@ -257,6 +338,34 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     <script type="module" src="${scriptUri}"></script>
   </body>
 </html>`;
+  }
+}
+
+async function canOpenInWavePreview(target: vscode.Uri): Promise<boolean> {
+  const fileExtension = path.posix.extname(target.path).replace(/^\./, '').toLowerCase();
+
+  if (KNOWN_AUDIO_EXTENSIONS.has(fileExtension)) {
+    return true;
+  }
+
+  try {
+    const result = await probeAudioOpen(target);
+
+    if (result.kind === 'audio') {
+      return true;
+    }
+
+    const severity = result.kind === 'not-audio' ? 'warning' : 'info';
+    const showMessage = severity === 'warning'
+      ? vscode.window.showWarningMessage
+      : vscode.window.showInformationMessage;
+
+    void showMessage(result.message);
+    return false;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`Wave Preview could not inspect this file: ${message}`);
+    return false;
   }
 }
 
