@@ -13,9 +13,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:wavePreview.openActiveAudioPreview",
-    "onCustomEditor:wavePreview.audioPreview"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
