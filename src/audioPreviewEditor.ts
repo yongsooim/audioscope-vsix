@@ -231,6 +231,24 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.001" value="0" disabled />
         </div>
         <div id="time-readout" class="time-readout">0:00 / --:--</div>
+        <div id="loudness-summary" class="loudness-summary" data-state="idle" aria-label="Loudness summary" aria-live="polite">
+          <div class="loudness-chip">
+            <span class="loudness-chip-label">I</span>
+            <span id="loudness-integrated" class="loudness-chip-value">--</span>
+          </div>
+          <div class="loudness-chip">
+            <span class="loudness-chip-label">LRA</span>
+            <span id="loudness-range" class="loudness-chip-value">--</span>
+          </div>
+          <div class="loudness-chip">
+            <span class="loudness-chip-label">Peak</span>
+            <span id="loudness-sample-peak" class="loudness-chip-value">--</span>
+          </div>
+          <div class="loudness-chip">
+            <span class="loudness-chip-label">True Peak</span>
+            <span id="loudness-true-peak" class="loudness-chip-value">--</span>
+          </div>
+        </div>
         <div id="analysis-status" class="analysis-status">Preparing preview…</div>
       </footer>
       <div id="status" class="status-overlay" hidden></div>
