@@ -153,8 +153,7 @@ body {
   transition: opacity 140ms ease, transform 140ms ease;
 }
 
-.media-metadata-panel:hover .media-metadata-detail,
-.media-metadata-panel:focus-within .media-metadata-detail {
+.media-metadata-panel[data-detail-open="true"] .media-metadata-detail {
   opacity: 1;
   pointer-events: auto;
   transform: translate3d(0, 0, 0);

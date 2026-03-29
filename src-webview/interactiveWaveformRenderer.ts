@@ -51,43 +51,6 @@ export function createInteractiveWaveformData(samples, levels = []) {
   };
 }
 
-export function createInteractiveWaveformPreviewData({
-  bucketCount,
-  minMaxBuffer,
-  samplesPerBucket,
-}) {
-  const safeBucketCount = Math.max(1, Math.round(Number(bucketCount) || 0));
-  const safeSamplesPerBucket = Math.max(1, Math.round(Number(samplesPerBucket) || 0));
-  const source = minMaxBuffer instanceof Float32Array
-    ? minMaxBuffer
-    : minMaxBuffer instanceof ArrayBuffer
-      ? new Float32Array(minMaxBuffer)
-      : null;
-
-  if (!source || source.length < safeBucketCount * 2) {
-    return {
-      sampleCount: safeBucketCount * safeSamplesPerBucket,
-      samples: null,
-      levels: [],
-    };
-  }
-
-  const baseLevel = buildPreviewBaseLevel(source, safeBucketCount, safeSamplesPerBucket);
-  const levels = [baseLevel];
-  let previousLevel = baseLevel;
-
-  while (previousLevel.maxPeaks.length > MIN_LEVEL_BUCKETS) {
-    previousLevel = buildPeakLevelFromPrevious(previousLevel);
-    levels.push(previousLevel);
-  }
-
-  return {
-    sampleCount: safeBucketCount * safeSamplesPerBucket,
-    samples: null,
-    levels,
-  };
-}
-
 export function getInteractiveWaveformBlockSizes(sampleCount) {
   const blockSizes = [];
   let blockSize = MIN_LEVEL_BLOCK_SIZE;
@@ -306,24 +269,6 @@ function buildPeakLevel(samples, blockSize) {
   return { blockSize, minPeaks, maxPeaks };
 }
 
-function buildPreviewBaseLevel(source, bucketCount, samplesPerBucket) {
-  const minPeaks = new Float32Array(bucketCount);
-  const maxPeaks = new Float32Array(bucketCount);
-
-  for (let bucketIndex = 0; bucketIndex < bucketCount; bucketIndex += 1) {
-    const sourceIndex = bucketIndex * 2;
-    const range = normalizeEnvelopeRange(source[sourceIndex], source[sourceIndex + 1]);
-    minPeaks[bucketIndex] = range.min;
-    maxPeaks[bucketIndex] = range.max;
-  }
-
-  return {
-    blockSize: samplesPerBucket,
-    minPeaks,
-    maxPeaks,
-  };
-}
-
 function buildPeakLevelFromPrevious(previousLevel) {
   const blockCount = Math.ceil(previousLevel.maxPeaks.length / LEVEL_SCALE_FACTOR);
   const minPeaks = new Float32Array(blockCount);
@@ -492,23 +437,6 @@ function getWaveformDataSampleCount(waveformData) {
 
 function getWaveformDataSamples(waveformData) {
   return waveformData?.samples instanceof Float32Array ? waveformData.samples : null;
-}
-
-function normalizeEnvelopeRange(minValue, maxValue) {
-  const safeMin = clamp(Number.isFinite(minValue) ? minValue : 0, -1, 1);
-  const safeMax = clamp(Number.isFinite(maxValue) ? maxValue : 0, -1, 1);
-
-  if (safeMin <= safeMax) {
-    return {
-      min: safeMin,
-      max: safeMax,
-    };
-  }
-
-  return {
-    min: Math.min(safeMin, safeMax),
-    max: Math.max(safeMin, safeMax),
-  };
 }
 
 function lerp(start, end, amount) {

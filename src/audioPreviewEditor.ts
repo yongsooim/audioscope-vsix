@@ -1,7 +1,6 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
-  buildWaveformPreviewEnvelope,
   decodeWithFfmpeg,
   getExternalToolStatus,
   getMediaMetadata,
@@ -98,16 +97,6 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
       localResourceRoots: [this.context.extensionUri, documentRoot],
     };
     webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
-    let waveformPreviewAbortController: AbortController | null = null;
-
-    const cancelWaveformPreview = (): void => {
-      waveformPreviewAbortController?.abort();
-      waveformPreviewAbortController = null;
-    };
-
-    webviewPanel.onDidDispose(() => {
-      cancelWaveformPreview();
-    });
 
     const postAudioPayload = async (): Promise<void> => {
       const payload = await this.buildPayload(document, webviewPanel.webview);
@@ -178,51 +167,6 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         }
         return;
       }
-
-      if (message?.type === 'requestWaveformPreview') {
-        const loadToken = Number(message.body?.loadToken) || 0;
-
-        cancelWaveformPreview();
-        waveformPreviewAbortController = new AbortController();
-        const signal = waveformPreviewAbortController.signal;
-
-        try {
-          await buildWaveformPreviewEnvelope(document.uri, {
-            onProgress: async (update) => {
-              if (signal.aborted) {
-                return;
-              }
-
-              await webviewPanel.webview.postMessage({
-                type: 'waveformPreviewUpdate',
-                body: {
-                  ...update,
-                  loadToken,
-                },
-              });
-            },
-            signal,
-          });
-        } catch (error) {
-          if (signal.aborted) {
-            return;
-          }
-
-          const toolStatus = await getExternalToolStatus(document.uri);
-          await webviewPanel.webview.postMessage({
-            type: 'waveformPreviewError',
-            body: {
-              loadToken,
-              message: error instanceof Error ? error.message : String(error),
-              toolStatus,
-            },
-          });
-        } finally {
-          if (waveformPreviewAbortController?.signal === signal) {
-            waveformPreviewAbortController = null;
-          }
-        }
-      }
     });
   }
 
@@ -279,7 +223,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
             <div id="wave-toolbar-info" class="wave-toolbar-info">
               <div id="media-metadata-panel" class="media-metadata-panel" data-state="idle" aria-label="Audio metadata">
                 <div id="media-metadata-summary" class="media-metadata-summary" tabindex="0">Checking metadata…</div>
-                <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true"></div>
+                <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true" hidden></div>
               </div>
               <div id="wave-hint" hidden>Click to seek. Drag to set a loop. Wheel to zoom or pan.</div>
             </div>
@@ -352,8 +296,8 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
                 <select id="spectrogram-fft-select" class="spectrogram-control-select" aria-label="Spectrogram FFT size">
                   <option value="1024">1024</option>
                   <option value="2048">2048</option>
-                  <option value="4096">4096</option>
-                  <option value="8192" selected>8192</option>
+                  <option value="4096" selected>4096</option>
+                  <option value="8192">8192</option>
                   <option value="16384">16384</option>
                 </select>
               </label>

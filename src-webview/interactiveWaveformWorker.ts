@@ -1,6 +1,5 @@
 import {
   buildInteractiveWaveformData,
-  createInteractiveWaveformPreviewData,
   extractInteractiveWaveformSlice,
   resizeInteractiveWaveformSurface,
 } from './interactiveWaveformRenderer';
@@ -53,12 +52,6 @@ self.onmessage = (event) => {
     case 'attachAudioSession':
       enqueueRequest(async () => {
         attachAudioSession(message.body);
-      });
-      return;
-    case 'attachPreviewEnvelope':
-      enqueueRequest(async () => {
-        attachPreviewEnvelope(message.body);
-        void pumpRenderLoop();
       });
       return;
     case 'buildWaveformPyramid':
@@ -250,48 +243,6 @@ function buildWaveformPyramid() {
     type: 'waveformPyramidReady',
   });
 }
-
-function attachPreviewEnvelope(options) {
-  const duration = Number(options?.duration);
-  const sampleRate = Number(options?.sampleRate);
-  const sampleCount = Number(options?.sampleCount);
-  const bucketCount = Number(options?.bucketCount);
-  const samplesPerBucket = Number(options?.samplesPerBucket);
-
-  if (!(options?.minMaxBuffer instanceof ArrayBuffer)) {
-    throw new Error('Waveform preview envelope buffer is missing.');
-  }
-
-  if (
-    !Number.isFinite(duration)
-    || duration <= 0
-    || !Number.isFinite(sampleRate)
-    || sampleRate <= 0
-    || !Number.isFinite(sampleCount)
-    || sampleCount <= 0
-    || !Number.isFinite(bucketCount)
-    || bucketCount <= 0
-    || !Number.isFinite(samplesPerBucket)
-    || samplesPerBucket <= 0
-  ) {
-    throw new Error('Waveform preview envelope metadata is invalid.');
-  }
-
-  analysisState.initialized = true;
-  analysisState.transportMode = 'preview';
-  analysisState.sampleRate = sampleRate;
-  analysisState.sampleCount = sampleCount;
-  analysisState.duration = duration;
-  analysisState.waveformData = createInteractiveWaveformPreviewData({
-    bucketCount,
-    minMaxBuffer: options.minMaxBuffer,
-    samplesPerBucket,
-  });
-  analysisState.waveformBuilt = true;
-  analysisState.waveformSlice = null;
-  analysisState.waveformSliceCapacity = 0;
-}
-
 async function pumpRenderLoop() {
   if (renderLoopActive) {
     return;

@@ -141,14 +141,11 @@ const state = {
   sourceArrayBuffer: null,
   sourceMimeType: null,
   waveformSamples: null,
-  waveformPreviewDuration: 0,
-  waveformPreviewSampleRate: 0,
-  waveformPreviewSampleCount: 0,
-  waveformPreviewComplete: false,
   sourceFetchController: null,
   fetchController: null,
   externalTools: createExternalToolStatusState(),
   mediaMetadata: createMediaMetadataState('idle'),
+  mediaMetadataDetailOpen: false,
   playbackSourceKind: 'native',
   analysisSourceKind: 'native',
   decodeFallbackLoadToken: 0,
@@ -186,7 +183,7 @@ const state = {
   transportMode: RUNTIME_TRANSPORT_MODE,
   spectrogramRenderConfig: {
     analysisType: 'spectrogram',
-    fftSize: 8192,
+    fftSize: 4096,
     frequencyScale: 'log',
     overlapRatio: 0.75,
   },
@@ -357,26 +354,6 @@ window.addEventListener('message', (event) => {
     return;
   }
 
-  if (message?.type === 'waveformPreviewUpdate') {
-    const loadToken = Number(message.body?.loadToken) || 0;
-
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
-    void applyWaveformPreviewUpdate(loadToken, message.body);
-    return;
-  }
-
-  if (message?.type === 'waveformPreviewError') {
-    const loadToken = Number(message.body?.loadToken) || 0;
-
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
-    state.externalTools = normalizeExternalToolStatus(message.body?.toolStatus ?? state.externalTools);
-  }
 });
 
 function initializeKeyboardFocus() {
@@ -427,7 +404,7 @@ function getRuntimeTransportMode() {
 
 function normalizeSpectrogramFftSize(value) {
   const numericValue = Number(value);
-  return SPECTROGRAM_FFT_OPTIONS.includes(numericValue) ? numericValue : 8192;
+  return SPECTROGRAM_FFT_OPTIONS.includes(numericValue) ? numericValue : 4096;
 }
 
 function normalizeSpectrogramAnalysisType(value) {
@@ -829,11 +806,32 @@ function renderMediaMetadata() {
     state.decodeFallbackError?.message || detail?.guidance || metadata.message || state.externalTools.guidance || null,
   );
 
-  if (detailRoot.childElementCount === 0) {
-    detailRoot.setAttribute('aria-hidden', 'true');
-  } else {
-    detailRoot.setAttribute('aria-hidden', 'false');
+  syncMediaMetadataDetailVisibility();
+}
+
+function syncMediaMetadataDetailVisibility() {
+  if (!elements.mediaMetadataPanel || !elements.mediaMetadataDetail) {
+    return;
   }
+
+  const hasDetailContent = elements.mediaMetadataDetail.childElementCount > 0;
+  const shouldShowDetail = hasDetailContent && state.mediaMetadataDetailOpen;
+
+  elements.mediaMetadataPanel.dataset.detailOpen = shouldShowDetail ? 'true' : 'false';
+  elements.mediaMetadataDetail.hidden = !shouldShowDetail;
+  elements.mediaMetadataDetail.setAttribute('aria-hidden', shouldShowDetail ? 'false' : 'true');
+}
+
+function setMediaMetadataDetailOpen(nextOpen) {
+  const normalizedOpen = Boolean(nextOpen);
+
+  if (state.mediaMetadataDetailOpen === normalizedOpen) {
+    syncMediaMetadataDetailVisibility();
+    return;
+  }
+
+  state.mediaMetadataDetailOpen = normalizedOpen;
+  syncMediaMetadataDetailVisibility();
 }
 
 function renderLoudnessSummary() {
@@ -930,7 +928,6 @@ async function loadAudioFile(payload) {
   renderWaveformUi();
   renderSpectrogramScale();
   requestMediaMetadata(loadToken, payload);
-  requestWaveformPreview(loadToken, payload);
   void loadPlaybackSource(loadToken, payload, audio);
 }
 
@@ -1081,80 +1078,6 @@ function requestMediaMetadata(loadToken, payload) {
     type: 'requestMediaMetadata',
     body: { loadToken },
   });
-}
-
-function requestWaveformPreview(loadToken, payload) {
-  if (loadToken !== state.loadToken) {
-    return;
-  }
-
-  if (!payload?.fileBacked || !state.externalTools.ffmpegAvailable) {
-    return;
-  }
-
-  vscode.postMessage({
-    type: 'requestWaveformPreview',
-    body: { loadToken },
-  });
-}
-
-async function applyWaveformPreviewUpdate(loadToken, preview) {
-  if (loadToken !== state.loadToken || state.sessionVersion > 0) {
-    return;
-  }
-
-  const minMaxBuffer = preview?.minMaxBuffer;
-  const duration = Number(preview?.duration);
-  const sampleRate = Number(preview?.sampleRate);
-  const sampleCount = Number(preview?.sampleCount);
-  const bucketCount = Number(preview?.bucketCount);
-  const samplesPerBucket = Number(preview?.samplesPerBucket);
-
-  if (
-    !(minMaxBuffer instanceof ArrayBuffer)
-    || !Number.isFinite(duration)
-    || duration <= 0
-    || !Number.isFinite(sampleRate)
-    || sampleRate <= 0
-    || !Number.isFinite(sampleCount)
-    || sampleCount <= 0
-    || !Number.isFinite(bucketCount)
-    || bucketCount <= 0
-    || !Number.isFinite(samplesPerBucket)
-    || samplesPerBucket <= 0
-  ) {
-    return;
-  }
-
-  state.waveformPreviewDuration = duration;
-  state.waveformPreviewSampleRate = sampleRate;
-  state.waveformPreviewSampleCount = sampleCount;
-  state.waveformPreviewComplete = Boolean(preview?.complete);
-
-  ensureWaveformViewRange();
-  renderWaveformUi();
-  syncTransport();
-
-  await state.waveformSurfaceReadyPromise;
-
-  const worker = await createWaveformWorker(loadToken);
-
-  if (!worker || loadToken !== state.loadToken || state.sessionVersion > 0) {
-    return;
-  }
-
-  worker.postMessage({
-    type: 'attachPreviewEnvelope',
-    body: {
-      bucketCount,
-      duration,
-      minMaxBuffer,
-      sampleCount,
-      sampleRate,
-      samplesPerBucket,
-    },
-  }, [minMaxBuffer]);
-  void syncWaveformView({ force: true });
 }
 
 function setAnalysisSourceBuffer(arrayBuffer, mimeType, sourceKind) {
@@ -2616,7 +2539,7 @@ function renderWaveformUi() {
   elements.waveFollow.checked = state.followPlayback;
   const hintText = duration > 0
     ? 'Seek, drag loop, or wheel to zoom and pan.'
-    : 'Preparing playback and waveform preview.';
+    : 'Preparing playback and analysis.';
   elements.waveHint.textContent =
     hintText;
   if (elements.waveToolbar) {
@@ -3639,6 +3562,23 @@ function handleSharedViewportWheel(event, targetElement) {
 }
 
 function attachUiEvents() {
+  elements.mediaMetadataPanel?.addEventListener('mouseenter', () => {
+    setMediaMetadataDetailOpen(true);
+  });
+  elements.mediaMetadataPanel?.addEventListener('mouseleave', () => {
+    setMediaMetadataDetailOpen(false);
+  });
+  elements.mediaMetadataPanel?.addEventListener('focusin', () => {
+    setMediaMetadataDetailOpen(true);
+  });
+  elements.mediaMetadataPanel?.addEventListener('focusout', (event) => {
+    if (event.relatedTarget instanceof Node && elements.mediaMetadataPanel?.contains(event.relatedTarget)) {
+      return;
+    }
+
+    setMediaMetadataDetailOpen(false);
+  });
+
   elements.viewportSplitter?.addEventListener('pointerdown', (event) => {
     beginViewportSplitDrag(event);
   });
@@ -3938,12 +3878,9 @@ function destroySession() {
   state.sourceArrayBuffer = null;
   state.sourceMimeType = null;
   state.waveformSamples = null;
-  state.waveformPreviewDuration = 0;
-  state.waveformPreviewSampleRate = 0;
-  state.waveformPreviewSampleCount = 0;
-  state.waveformPreviewComplete = false;
   state.externalTools = createExternalToolStatusState();
   state.mediaMetadata = createMediaMetadataState('idle');
+  state.mediaMetadataDetailOpen = false;
   state.playbackSourceKind = 'native';
   state.analysisSourceKind = 'native';
   state.decodeFallbackLoadToken = 0;
@@ -4637,7 +4574,7 @@ function getMinVisibleDuration(duration) {
     return 0.001;
   }
 
-  const sampleRate = Number(state.analysis?.sampleRate || state.waveformPreviewSampleRate);
+  const sampleRate = Number(state.analysis?.sampleRate);
   const viewportColumns = Math.max(1, Math.round(getWaveformViewportWidth() * WAVEFORM_RENDER_SCALE));
 
   if (Number.isFinite(sampleRate) && sampleRate > 0) {
@@ -4655,12 +4592,6 @@ function getEffectiveDuration() {
 
   if (Number.isFinite(analysisDuration) && analysisDuration > 0) {
     return analysisDuration;
-  }
-
-  const previewDuration = Number(state.waveformPreviewDuration);
-
-  if (Number.isFinite(previewDuration) && previewDuration > 0) {
-    return previewDuration;
   }
 
   const audioDuration = state.audio?.duration;

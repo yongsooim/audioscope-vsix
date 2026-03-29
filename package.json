@@ -101,10 +101,10 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "bun run compile",
     "build:wave-core": "tsx ./scripts/build-wave-core.mts",
     "build:webview": "tsx ./scripts/build-webview.mts",
-    "compile": "npm run build:wave-core && npm run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
+    "compile": "bun run build:wave-core && npm run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
     "watch": "tsc -w -p ./"
   },
   "devDependencies": {

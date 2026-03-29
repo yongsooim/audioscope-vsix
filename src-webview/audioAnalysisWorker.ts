@@ -956,7 +956,7 @@ function isEquivalentPlan(left, right) {
 
 function normalizeFftSize(value) {
   const numericValue = Number(value);
-  return FFT_SIZE_OPTIONS.includes(numericValue) ? numericValue : 8192;
+  return FFT_SIZE_OPTIONS.includes(numericValue) ? numericValue : 4096;
 }
 
 function normalizeOverlapRatio(value) {
