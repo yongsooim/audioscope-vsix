@@ -219,13 +219,14 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
       <section class="viewport" aria-label="Waveform and spectrogram preview">
         <div class="wave-panel">
           <div class="wave-toolbar">
-            <div class="wave-toolbar-copy">
-              <div id="wave-hint" class="wave-hint">Click to seek. Drag to set a loop. Wheel to zoom or pan.</div>
-              <div id="wave-loop-label" class="wave-loop-label">No loop selection</div>
-            </div>
-            <div id="media-metadata-panel" class="media-metadata-panel" data-state="idle" aria-label="Audio metadata">
-              <div id="media-metadata-summary" class="media-metadata-summary" tabindex="0">Checking metadata…</div>
-              <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true"></div>
+            <div id="wave-toolbar-info" class="wave-toolbar-info">
+              <div id="media-metadata-panel" class="media-metadata-panel" data-state="idle" aria-label="Audio metadata">
+                <div id="media-metadata-summary" class="media-metadata-summary" tabindex="0">Checking metadata…</div>
+                <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true"></div>
+              </div>
+              <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Loop not set</div>
+              <div id="wave-zoom-chip" class="wave-toolbar-pill" aria-live="polite">Zoom 1.0x</div>
+              <div id="wave-hint" hidden>Click to seek. Drag to set a loop. Wheel to zoom or pan.</div>
             </div>
             <div class="wave-toolbar-actions">
               <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-wide" type="button" hidden>Clear</button>
@@ -301,11 +302,9 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         </div>
       </section>
       <footer class="transport" aria-label="Playback controls">
-        <button id="jump-start" class="transport-button" type="button" disabled>Start</button>
         <button id="seek-backward" class="transport-button" type="button" disabled>-5s</button>
         <button id="play-toggle" class="play-toggle" type="button" disabled>Play</button>
         <button id="seek-forward" class="transport-button" type="button" disabled>+5s</button>
-        <button id="jump-end" class="transport-button" type="button" disabled>End</button>
         <div id="waveform-overview" class="timeline-shell">
           <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>
           <div id="timeline-hover-tooltip" class="timeline-hover-tooltip" aria-hidden="true"></div>
