@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
+  buildWaveformPreviewEnvelope,
   decodeWithFfmpeg,
   getExternalToolStatus,
   getMediaMetadata,
@@ -97,6 +98,16 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
       localResourceRoots: [this.context.extensionUri, documentRoot],
     };
     webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
+    let waveformPreviewAbortController: AbortController | null = null;
+
+    const cancelWaveformPreview = (): void => {
+      waveformPreviewAbortController?.abort();
+      waveformPreviewAbortController = null;
+    };
+
+    webviewPanel.onDidDispose(() => {
+      cancelWaveformPreview();
+    });
 
     const postAudioPayload = async (): Promise<void> => {
       const payload = await this.buildPayload(document, webviewPanel.webview);
@@ -165,6 +176,52 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
             },
           });
         }
+        return;
+      }
+
+      if (message?.type === 'requestWaveformPreview') {
+        const loadToken = Number(message.body?.loadToken) || 0;
+
+        cancelWaveformPreview();
+        waveformPreviewAbortController = new AbortController();
+        const signal = waveformPreviewAbortController.signal;
+
+        try {
+          await buildWaveformPreviewEnvelope(document.uri, {
+            onProgress: async (update) => {
+              if (signal.aborted) {
+                return;
+              }
+
+              await webviewPanel.webview.postMessage({
+                type: 'waveformPreviewUpdate',
+                body: {
+                  ...update,
+                  loadToken,
+                },
+              });
+            },
+            signal,
+          });
+        } catch (error) {
+          if (signal.aborted) {
+            return;
+          }
+
+          const toolStatus = await getExternalToolStatus(document.uri);
+          await webviewPanel.webview.postMessage({
+            type: 'waveformPreviewError',
+            body: {
+              loadToken,
+              message: error instanceof Error ? error.message : String(error),
+              toolStatus,
+            },
+          });
+        } finally {
+          if (waveformPreviewAbortController?.signal === signal) {
+            waveformPreviewAbortController = null;
+          }
+        }
       }
     });
   }
@@ -225,11 +282,11 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
                 <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true"></div>
               </div>
               <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Loop not set</div>
+              <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-wide" type="button" hidden>Clear</button>
               <div id="wave-zoom-chip" class="wave-toolbar-pill" aria-live="polite">Zoom 1.0x</div>
               <div id="wave-hint" hidden>Click to seek. Drag to set a loop. Wheel to zoom or pan.</div>
             </div>
             <div class="wave-toolbar-actions">
-              <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-wide" type="button" hidden>Clear</button>
               <button id="wave-zoom-out" class="wave-tool-button" type="button" aria-label="Zoom out waveform">-</button>
               <button id="wave-zoom-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform zoom">1.0x</button>
               <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform">+</button>

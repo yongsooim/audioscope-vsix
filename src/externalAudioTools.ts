@@ -88,6 +88,17 @@ export interface DecodeFallbackPayload {
   source: 'ffmpeg';
 }
 
+export interface WaveformPreviewPayload {
+  bucketCount: number;
+  complete: boolean;
+  duration: number;
+  minMaxBuffer: ArrayBuffer;
+  sampleCount: number;
+  sampleRate: number;
+  samplesPerBucket: number;
+  source: 'ffmpeg-preview';
+}
+
 export type ProbeOpenResult =
   | { kind: 'audio'; metadata: MediaMetadataPayload; toolStatus: ExternalToolStatusPayload }
   | { kind: 'not-audio'; message: string; toolStatus: ExternalToolStatusPayload }
@@ -148,10 +159,19 @@ interface ResolvedExternalTools {
   ffprobe: ExecutableStatus;
 }
 
+interface WaveformPreviewBuildOptions {
+  onProgress?: (preview: WaveformPreviewPayload) => void | Promise<void>;
+  signal?: AbortSignal;
+}
+
 const EXTERNAL_TOOL_TIMEOUT_MS = 15_000;
 const EXECUTABLE_VERSION_TIMEOUT_MS = 4_000;
 const EXEC_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const FFMPEG_DECODE_TIMEOUT_MS = 120_000;
+const FFMPEG_PREVIEW_TIMEOUT_MS = 120_000;
+const WAVEFORM_PREVIEW_SAMPLE_RATE = 4_000;
+const WAVEFORM_PREVIEW_BUCKET_COUNT = 8_192;
+const WAVEFORM_PREVIEW_PROGRESS_INTERVAL_MS = 120;
 
 const toolResolutionCache = new Map<string, Promise<ResolvedExternalTools>>();
 
@@ -186,7 +206,12 @@ function getExecErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function execFileAsync(command: string, args: string[], timeout: number): Promise<{ stdout: string; stderr: string }> {
+function execFileAsync(
+  command: string,
+  args: string[],
+  timeout: number,
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(
       command,
@@ -194,6 +219,7 @@ function execFileAsync(command: string, args: string[], timeout: number): Promis
       {
         encoding: 'utf8',
         maxBuffer: EXEC_MAX_BUFFER_BYTES,
+        signal,
         timeout,
         windowsHide: true,
       },
@@ -343,6 +369,18 @@ function parseNumberValue(value: unknown): number | null {
   }
 
   return null;
+}
+
+function getPrimaryAudioStream(rawPayload: FfprobeJsonPayload): FfprobeStreamSection | null {
+  const streams = Array.isArray(rawPayload.streams) ? rawPayload.streams : [];
+  return streams.find((stream) => stream.codec_type === 'audio') ?? null;
+}
+
+function getAudioDurationSeconds(rawPayload: FfprobeJsonPayload): number | null {
+  const primaryAudioStream = getPrimaryAudioStream(rawPayload);
+  const formatSection = rawPayload.format;
+
+  return parseNumberValue(primaryAudioStream?.duration) ?? parseNumberValue(formatSection?.duration);
 }
 
 function formatFrequencyText(value: number | null): string | null {
@@ -532,7 +570,10 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
   };
 }
 
-async function runFfprobe(resource: vscode.Uri): Promise<{ metadata: MediaMetadataPayload; toolStatus: ExternalToolStatusPayload }> {
+async function runFfprobe(
+  resource: vscode.Uri,
+  signal?: AbortSignal,
+): Promise<{ metadata: MediaMetadataPayload; rawPayload: FfprobeJsonPayload; toolStatus: ExternalToolStatusPayload }> {
   const toolStatus = await getExternalToolStatus(resource);
   const filePath = getCliFilePath(resource);
 
@@ -557,6 +598,7 @@ async function runFfprobe(resource: vscode.Uri): Promise<{ metadata: MediaMetada
       filePath,
     ],
     EXTERNAL_TOOL_TIMEOUT_MS,
+    signal,
   );
 
   let parsed: FfprobeJsonPayload;
@@ -569,6 +611,7 @@ async function runFfprobe(resource: vscode.Uri): Promise<{ metadata: MediaMetada
 
   return {
     metadata: summarizeMetadata(parsed, toolStatus),
+    rawPayload: parsed,
     toolStatus,
   };
 }
@@ -693,6 +736,244 @@ export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFall
         mimeType: 'audio/wav',
         source: 'ffmpeg',
       });
+    });
+  });
+}
+
+function serializeWaveformEnvelope(minPeaks: Float32Array, maxPeaks: Float32Array): ArrayBuffer {
+  const length = Math.min(minPeaks.length, maxPeaks.length);
+  const interleaved = new Float32Array(length * 2);
+
+  for (let index = 0; index < length; index += 1) {
+    const minValue = Number.isFinite(minPeaks[index]) ? Math.max(-1, Math.min(1, minPeaks[index] ?? 0)) : 0;
+    const maxValue = Number.isFinite(maxPeaks[index]) ? Math.max(-1, Math.min(1, maxPeaks[index] ?? 0)) : 0;
+    interleaved[index * 2] = minValue <= maxValue ? minValue : Math.min(minValue, maxValue);
+    interleaved[index * 2 + 1] = minValue <= maxValue ? maxValue : Math.max(minValue, maxValue);
+  }
+
+  return interleaved.buffer;
+}
+
+export async function buildWaveformPreviewEnvelope(
+  resource: vscode.Uri,
+  options: WaveformPreviewBuildOptions = {},
+): Promise<WaveformPreviewPayload> {
+  const { signal } = options;
+
+  if (signal?.aborted) {
+    throw new Error('Waveform preview request was cancelled.');
+  }
+
+  const { rawPayload, toolStatus } = await runFfprobe(resource, signal);
+  const filePath = getCliFilePath(resource);
+
+  if (!toolStatus.fileBacked || !filePath) {
+    throw new Error('Waveform preview is only available for local filesystem files.');
+  }
+
+  if (!toolStatus.ffmpegAvailable) {
+    throw new Error('Install ffmpeg CLI to build a waveform preview.');
+  }
+
+  const duration = getAudioDurationSeconds(rawPayload);
+
+  if (!Number.isFinite(duration) || !duration || duration <= 0) {
+    throw new Error('ffprobe did not return a valid audio duration for waveform preview.');
+  }
+
+  const bucketCount = WAVEFORM_PREVIEW_BUCKET_COUNT;
+  const sampleRate = WAVEFORM_PREVIEW_SAMPLE_RATE;
+  const expectedSampleCount = Math.max(1, Math.ceil(duration * sampleRate));
+  const samplesPerBucket = Math.max(1, Math.ceil(expectedSampleCount / bucketCount));
+  const previewSampleCount = samplesPerBucket * bucketCount;
+  const minPeaks = new Float32Array(bucketCount);
+  const maxPeaks = new Float32Array(bucketCount);
+  minPeaks.fill(1);
+  maxPeaks.fill(-1);
+
+  let sampleIndex = 0;
+  let remainder = Buffer.alloc(0);
+  let lastProgressAt = 0;
+  let lastProgressBucket = -1;
+  let progressQueue = Promise.resolve();
+
+  const buildPayload = (complete: boolean): WaveformPreviewPayload => ({
+    bucketCount,
+    complete,
+    duration,
+    minMaxBuffer: serializeWaveformEnvelope(minPeaks, maxPeaks),
+    sampleCount: previewSampleCount,
+    sampleRate,
+    samplesPerBucket,
+    source: 'ffmpeg-preview',
+  });
+
+  const queueProgress = (complete: boolean): void => {
+    if (!options.onProgress) {
+      return;
+    }
+
+    const payload = buildPayload(complete);
+    progressQueue = progressQueue
+      .then(async () => {
+        await options.onProgress?.(payload);
+      })
+      .catch(() => {});
+  };
+
+  const maybeQueueProgress = (force = false): void => {
+    if (!options.onProgress) {
+      return;
+    }
+
+    const filledBucketCount = Math.min(bucketCount, Math.floor(sampleIndex / samplesPerBucket));
+    const now = Date.now();
+
+    if (!force && filledBucketCount <= lastProgressBucket) {
+      return;
+    }
+
+    if (!force && (now - lastProgressAt) < WAVEFORM_PREVIEW_PROGRESS_INTERVAL_MS) {
+      return;
+    }
+
+    lastProgressAt = now;
+    lastProgressBucket = filledBucketCount;
+    queueProgress(false);
+  };
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const ffmpegProcess = spawn(
+      toolStatus.ffmpegCommand,
+      [
+        '-v',
+        'error',
+        '-i',
+        filePath,
+        '-vn',
+        '-sn',
+        '-dn',
+        '-map',
+        '0:a:0',
+        '-ac',
+        '1',
+        '-ar',
+        String(sampleRate),
+        '-f',
+        's16le',
+        '-',
+      ],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      },
+    );
+
+    const stderrChunks: Buffer[] = [];
+
+    const cleanupAbortHandler = (): void => {
+      signal?.removeEventListener('abort', handleAbort);
+    };
+
+    const finalizeSuccess = async (): Promise<void> => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanupAbortHandler();
+
+      for (let bucketIndex = 0; bucketIndex < bucketCount; bucketIndex += 1) {
+        if (minPeaks[bucketIndex] > maxPeaks[bucketIndex]) {
+          minPeaks[bucketIndex] = 0;
+          maxPeaks[bucketIndex] = 0;
+        }
+      }
+
+      queueProgress(true);
+      await progressQueue;
+      resolve(buildPayload(true));
+    };
+
+    const finalizeError = (error: Error): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanupAbortHandler();
+      reject(error);
+    };
+
+    const handleAbort = (): void => {
+      ffmpegProcess.kill();
+      finalizeError(new Error('Waveform preview request was cancelled.'));
+    };
+
+    if (signal?.aborted) {
+      handleAbort();
+      return;
+    }
+
+    signal?.addEventListener('abort', handleAbort, { once: true });
+
+    const timeoutId = setTimeout(() => {
+      ffmpegProcess.kill();
+      finalizeError(new Error('Waveform preview generation timed out.'));
+    }, FFMPEG_PREVIEW_TIMEOUT_MS);
+
+    ffmpegProcess.stdout.on('data', (chunk: Buffer) => {
+      if (settled) {
+        return;
+      }
+
+      const merged = remainder.length > 0 ? Buffer.concat([remainder, chunk]) : chunk;
+      const usableLength = merged.length - (merged.length % 2);
+      remainder = usableLength < merged.length ? Buffer.from(merged.subarray(usableLength)) : Buffer.alloc(0);
+
+      for (let offset = 0; offset < usableLength; offset += 2) {
+        const bucketIndex = Math.min(bucketCount - 1, Math.floor(sampleIndex / samplesPerBucket));
+        const value = Math.max(-1, Math.min(1, merged.readInt16LE(offset) / 32768));
+
+        if (value < minPeaks[bucketIndex]) {
+          minPeaks[bucketIndex] = value;
+        }
+
+        if (value > maxPeaks[bucketIndex]) {
+          maxPeaks[bucketIndex] = value;
+        }
+
+        sampleIndex += 1;
+      }
+
+      maybeQueueProgress();
+    });
+
+    ffmpegProcess.stderr.on('data', (chunk: Buffer) => {
+      stderrChunks.push(chunk);
+    });
+
+    ffmpegProcess.once('error', (error) => {
+      clearTimeout(timeoutId);
+      finalizeError(new Error(`Failed to launch ffmpeg: ${getExecErrorMessage(error)}`));
+    });
+
+    ffmpegProcess.once('close', (exitCode) => {
+      clearTimeout(timeoutId);
+
+      if (settled) {
+        return;
+      }
+
+      if (exitCode !== 0) {
+        const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+        finalizeError(new Error(stderr || `ffmpeg exited with code ${exitCode}.`));
+        return;
+      }
+
+      maybeQueueProgress(true);
+      void finalizeSuccess();
     });
   });
 }

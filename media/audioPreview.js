@@ -141,6 +141,10 @@ const state = {
   sourceArrayBuffer: null,
   sourceMimeType: null,
   waveformSamples: null,
+  waveformPreviewDuration: 0,
+  waveformPreviewSampleRate: 0,
+  waveformPreviewSampleCount: 0,
+  waveformPreviewComplete: false,
   sourceFetchController: null,
   fetchController: null,
   externalTools: createExternalToolStatusState(),
@@ -160,6 +164,7 @@ const state = {
   analysisIdleCallbackId: null,
   analysisTimeoutId: null,
   analysisStartedForLoadToken: 0,
+  analysisQueuedForLoadToken: 0,
   waveformWorker: null,
   waveformWorkerBootstrapUrl: null,
   waveformRuntimeReadyPromise: null,
@@ -201,6 +206,7 @@ const state = {
   playbackFrame: 0,
   spectrogramFrame: 0,
   spectrogramRequestFrame: 0,
+  waveformPyramidFrame: 0,
   observedWaveformViewportWidth: 0,
   observedWaveformViewportHeight: 0,
   observedSpectrogramPixelWidth: 0,
@@ -348,6 +354,28 @@ window.addEventListener('message', (event) => {
     state.resolveDecodeFallback = null;
     state.rejectDecodeFallback = null;
     renderMediaMetadata();
+    return;
+  }
+
+  if (message?.type === 'waveformPreviewUpdate') {
+    const loadToken = Number(message.body?.loadToken) || 0;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    void applyWaveformPreviewUpdate(loadToken, message.body);
+    return;
+  }
+
+  if (message?.type === 'waveformPreviewError') {
+    const loadToken = Number(message.body?.loadToken) || 0;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    state.externalTools = normalizeExternalToolStatus(message.body?.toolStatus ?? state.externalTools);
   }
 });
 
@@ -908,6 +936,7 @@ async function loadAudioFile(payload) {
   renderWaveformUi();
   renderSpectrogramScale();
   requestMediaMetadata(loadToken, payload);
+  requestWaveformPreview(loadToken, payload);
   void loadPlaybackSource(loadToken, payload, audio);
 }
 
@@ -1060,6 +1089,80 @@ function requestMediaMetadata(loadToken, payload) {
   });
 }
 
+function requestWaveformPreview(loadToken, payload) {
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  if (!payload?.fileBacked || !state.externalTools.ffmpegAvailable) {
+    return;
+  }
+
+  vscode.postMessage({
+    type: 'requestWaveformPreview',
+    body: { loadToken },
+  });
+}
+
+async function applyWaveformPreviewUpdate(loadToken, preview) {
+  if (loadToken !== state.loadToken || state.sessionVersion > 0) {
+    return;
+  }
+
+  const minMaxBuffer = preview?.minMaxBuffer;
+  const duration = Number(preview?.duration);
+  const sampleRate = Number(preview?.sampleRate);
+  const sampleCount = Number(preview?.sampleCount);
+  const bucketCount = Number(preview?.bucketCount);
+  const samplesPerBucket = Number(preview?.samplesPerBucket);
+
+  if (
+    !(minMaxBuffer instanceof ArrayBuffer)
+    || !Number.isFinite(duration)
+    || duration <= 0
+    || !Number.isFinite(sampleRate)
+    || sampleRate <= 0
+    || !Number.isFinite(sampleCount)
+    || sampleCount <= 0
+    || !Number.isFinite(bucketCount)
+    || bucketCount <= 0
+    || !Number.isFinite(samplesPerBucket)
+    || samplesPerBucket <= 0
+  ) {
+    return;
+  }
+
+  state.waveformPreviewDuration = duration;
+  state.waveformPreviewSampleRate = sampleRate;
+  state.waveformPreviewSampleCount = sampleCount;
+  state.waveformPreviewComplete = Boolean(preview?.complete);
+
+  ensureWaveformViewRange();
+  renderWaveformUi();
+  syncTransport();
+
+  await state.waveformSurfaceReadyPromise;
+
+  const worker = await createWaveformWorker(loadToken);
+
+  if (!worker || loadToken !== state.loadToken || state.sessionVersion > 0) {
+    return;
+  }
+
+  worker.postMessage({
+    type: 'attachPreviewEnvelope',
+    body: {
+      bucketCount,
+      duration,
+      minMaxBuffer,
+      sampleCount,
+      sampleRate,
+      samplesPerBucket,
+    },
+  }, [minMaxBuffer]);
+  void syncWaveformView({ force: true });
+}
+
 function setAnalysisSourceBuffer(arrayBuffer, mimeType, sourceKind) {
   state.sourceArrayBuffer = arrayBuffer;
   state.sourceMimeType = mimeType || state.sourceMimeType || 'application/octet-stream';
@@ -1165,6 +1268,7 @@ async function recoverPlaybackWithDecodeFallback(loadToken, payload, audio, reas
 
     applyPlaybackSourceBuffer(loadToken, audio, fallback.audioBuffer, fallback.mimeType, 'ffmpeg-fallback');
     setAnalysisStatus('Buffering playback…');
+    scheduleDeferredAnalysis(loadToken, payload);
     return true;
   } catch (error) {
     if (loadToken !== state.loadToken) {
@@ -1201,6 +1305,7 @@ async function loadPlaybackSource(loadToken, payload, audio) {
     const mimeType = response.headers.get('content-type') || guessAudioMimeType(payload.sourceUri);
     applyPlaybackSourceBuffer(loadToken, audio, audioData, mimeType, 'native');
     setAnalysisStatus('Buffering playback…');
+    scheduleDeferredAnalysis(loadToken, payload);
   } catch (error) {
     if (loadToken !== state.loadToken || controller.signal.aborted) {
       return;
@@ -1302,14 +1407,45 @@ function cancelDeferredAnalysis() {
 
   state.analysisIdleCallbackId = null;
   state.analysisTimeoutId = null;
+  state.analysisQueuedForLoadToken = 0;
+}
+
+function cancelPendingWaveformPyramidBuild() {
+  if (state.waveformPyramidFrame) {
+    window.cancelAnimationFrame(state.waveformPyramidFrame);
+    state.waveformPyramidFrame = 0;
+  }
+}
+
+function scheduleWaveformPyramidBuild(loadToken, worker, sessionVersion) {
+  cancelPendingWaveformPyramidBuild();
+  state.waveformPyramidFrame = window.requestAnimationFrame(() => {
+    state.waveformPyramidFrame = 0;
+
+    if (
+      loadToken !== state.loadToken
+      || !state.waveformWorker
+      || state.waveformWorker !== worker
+      || sessionVersion !== state.sessionVersion
+    ) {
+      return;
+    }
+
+    worker.postMessage({ type: 'buildWaveformPyramid' });
+  });
 }
 
 function scheduleDeferredAnalysis(loadToken, payload) {
-  if (loadToken !== state.loadToken || state.analysisStartedForLoadToken === loadToken) {
+  if (
+    loadToken !== state.loadToken
+    || state.analysisStartedForLoadToken === loadToken
+    || state.analysisQueuedForLoadToken === loadToken
+  ) {
     return;
   }
 
   cancelDeferredAnalysis();
+  state.analysisQueuedForLoadToken = loadToken;
   setAnalysisStatus('Queued');
 
   const startDeferredAnalysis = () => {
@@ -1319,6 +1455,7 @@ function scheduleDeferredAnalysis(loadToken, payload) {
 
     state.analysisIdleCallbackId = null;
     state.analysisTimeoutId = null;
+    state.analysisQueuedForLoadToken = 0;
     state.analysisStartedForLoadToken = loadToken;
     void startAnalysis(loadToken, payload);
   };
@@ -1439,6 +1576,7 @@ async function startAnalysis(loadToken, payload) {
     }
 
     state.sessionVersion += 1;
+    const sessionVersion = state.sessionVersion;
     setAnalysisStatus('Queued');
 
     if (state.transportMode === 'shared') {
@@ -1450,7 +1588,7 @@ async function startAnalysis(loadToken, payload) {
         quality: state.analysis.quality,
         sampleCount: monoSamples.length,
         sampleRate: decodedAudio.sampleRate,
-        sessionVersion: state.sessionVersion,
+        sessionVersion,
         transportMode: state.transportMode,
       };
 
@@ -1458,6 +1596,8 @@ async function startAnalysis(loadToken, payload) {
         type: 'attachAudioSession',
         body: sharedBody,
       });
+      void syncWaveformView({ force: true });
+      scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
       analysisWorker.postMessage({
         type: 'attachAudioSession',
         body: sharedBody,
@@ -1471,10 +1611,12 @@ async function startAnalysis(loadToken, payload) {
           sampleCount: waveformSamples.length,
           sampleRate: decodedAudio.sampleRate,
           samplesBuffer: waveformSamples.buffer,
-          sessionVersion: state.sessionVersion,
+          sessionVersion,
           transportMode: state.transportMode,
         },
       }, [waveformSamples.buffer]);
+      void syncWaveformView({ force: true });
+      scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
 
       analysisWorker.postMessage({
         type: 'attachAudioSession',
@@ -1484,16 +1626,14 @@ async function startAnalysis(loadToken, payload) {
           sampleCount: monoSamples.length,
           sampleRate: decodedAudio.sampleRate,
           samplesBuffer: monoSamples.buffer,
-          sessionVersion: state.sessionVersion,
+          sessionVersion,
           transportMode: state.transportMode,
         },
       }, [monoSamples.buffer]);
     }
 
-    waveformWorker.postMessage({ type: 'buildWaveformPyramid' });
     requestOverviewSpectrogram({ force: true });
     scheduleSpectrogramRender({ force: true });
-    void syncWaveformView();
   } catch (error) {
     if (loadToken !== state.loadToken || controller.signal.aborted) {
       return;
@@ -1721,10 +1861,6 @@ function handleWaveformWorkerMessage(loadToken, message) {
   if (message?.type === 'runtimeReady') {
     state.resolveWaveformRuntimeReady?.();
     state.resolveWaveformRuntimeReady = null;
-    return;
-  }
-
-  if (!state.analysis) {
     return;
   }
 
@@ -3684,9 +3820,11 @@ function attachResizeObservers() {
     const { height, width } = getWaveformViewportSize();
     const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
     const overviewWidth = Math.max(1, elements.waveformOverview.clientWidth);
+    const waveformViewportResized =
+      state.observedWaveformViewportWidth !== width
+      || state.observedWaveformViewportHeight !== height;
     const dimensionsUnchanged =
-      state.observedWaveformViewportWidth === width
-      && state.observedWaveformViewportHeight === height
+      !waveformViewportResized
       && state.observedSpectrogramPixelWidth === pixelWidth
       && state.observedSpectrogramPixelHeight === pixelHeight
       && state.observedOverviewWidth === overviewWidth;
@@ -3737,7 +3875,7 @@ function attachResizeObservers() {
     }
 
     renderWaveformUi();
-    void syncWaveformView();
+    void syncWaveformView({ force: waveformViewportResized });
     renderSpectrogramScale();
     applySpectrogramCanvasTransform();
     requestOverviewSpectrogram({ force: true });
@@ -3760,6 +3898,7 @@ function destroySession() {
   state.spectrogramRequestFrame = 0;
 
   cancelDeferredAnalysis();
+  cancelPendingWaveformPyramidBuild();
 
   if (state.sourceFetchController) {
     state.sourceFetchController.abort();
@@ -3802,6 +3941,10 @@ function destroySession() {
   state.sourceArrayBuffer = null;
   state.sourceMimeType = null;
   state.waveformSamples = null;
+  state.waveformPreviewDuration = 0;
+  state.waveformPreviewSampleRate = 0;
+  state.waveformPreviewSampleCount = 0;
+  state.waveformPreviewComplete = false;
   state.externalTools = createExternalToolStatusState();
   state.mediaMetadata = createMediaMetadataState('idle');
   state.playbackSourceKind = 'native';
@@ -3821,6 +3964,7 @@ function destroySession() {
   state.loopRange = null;
   state.pendingSeekTime = 0;
   state.analysisStartedForLoadToken = 0;
+  state.analysisQueuedForLoadToken = 0;
   state.sessionVersion = 0;
   state.analysis = null;
   state.loudness = createLoudnessSummaryState('idle');
@@ -4496,7 +4640,7 @@ function getMinVisibleDuration(duration) {
     return 0.001;
   }
 
-  const sampleRate = Number(state.analysis?.sampleRate);
+  const sampleRate = Number(state.analysis?.sampleRate || state.waveformPreviewSampleRate);
   const viewportColumns = Math.max(1, Math.round(getWaveformViewportWidth() * WAVEFORM_RENDER_SCALE));
 
   if (Number.isFinite(sampleRate) && sampleRate > 0) {
@@ -4514,6 +4658,12 @@ function getEffectiveDuration() {
 
   if (Number.isFinite(analysisDuration) && analysisDuration > 0) {
     return analysisDuration;
+  }
+
+  const previewDuration = Number(state.waveformPreviewDuration);
+
+  if (Number.isFinite(previewDuration) && previewDuration > 0) {
+    return previewDuration;
   }
 
   const audioDuration = state.audio?.duration;

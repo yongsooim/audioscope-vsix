@@ -1,5 +1,6 @@
 import {
   buildInteractiveWaveformData,
+  createInteractiveWaveformPreviewData,
   extractInteractiveWaveformSlice,
   resizeInteractiveWaveformSurface,
 } from './interactiveWaveformRenderer.js';
@@ -52,6 +53,12 @@ self.onmessage = (event) => {
     case 'attachAudioSession':
       enqueueRequest(async () => {
         attachAudioSession(message.body);
+      });
+      return;
+    case 'attachPreviewEnvelope':
+      enqueueRequest(async () => {
+        attachPreviewEnvelope(message.body);
+        void pumpRenderLoop();
       });
       return;
     case 'buildWaveformPyramid':
@@ -244,6 +251,47 @@ function buildWaveformPyramid() {
   });
 }
 
+function attachPreviewEnvelope(options) {
+  const duration = Number(options?.duration);
+  const sampleRate = Number(options?.sampleRate);
+  const sampleCount = Number(options?.sampleCount);
+  const bucketCount = Number(options?.bucketCount);
+  const samplesPerBucket = Number(options?.samplesPerBucket);
+
+  if (!(options?.minMaxBuffer instanceof ArrayBuffer)) {
+    throw new Error('Waveform preview envelope buffer is missing.');
+  }
+
+  if (
+    !Number.isFinite(duration)
+    || duration <= 0
+    || !Number.isFinite(sampleRate)
+    || sampleRate <= 0
+    || !Number.isFinite(sampleCount)
+    || sampleCount <= 0
+    || !Number.isFinite(bucketCount)
+    || bucketCount <= 0
+    || !Number.isFinite(samplesPerBucket)
+    || samplesPerBucket <= 0
+  ) {
+    throw new Error('Waveform preview envelope metadata is invalid.');
+  }
+
+  analysisState.initialized = true;
+  analysisState.transportMode = 'preview';
+  analysisState.sampleRate = sampleRate;
+  analysisState.sampleCount = sampleCount;
+  analysisState.duration = duration;
+  analysisState.waveformData = createInteractiveWaveformPreviewData({
+    bucketCount,
+    minMaxBuffer: options.minMaxBuffer,
+    samplesPerBucket,
+  });
+  analysisState.waveformBuilt = true;
+  analysisState.waveformSlice = null;
+  analysisState.waveformSliceCapacity = 0;
+}
+
 async function pumpRenderLoop() {
   if (renderLoopActive) {
     return;
@@ -263,7 +311,7 @@ async function pumpRenderLoop() {
         continue;
       }
 
-      if (!analysisState.initialized || !analysisState.waveformBuilt) {
+      if (!analysisState.initialized || !hasRenderableWaveformData(analysisState.waveformData)) {
         continue;
       }
 
@@ -295,7 +343,7 @@ async function renderWaveform(request) {
   const renderSpan = Math.max(1 / analysisState.sampleRate, viewEnd - viewStart);
   const samplesPerPixel = (renderSpan * analysisState.sampleRate) / columnCount;
   const pixelsPerSample = columnCount / Math.max(1, renderSpan * analysisState.sampleRate);
-  const samplePlotMode = samplesPerPixel <= SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
+  const samplePlotMode = hasSampleWaveformData(analysisState.waveformData) && samplesPerPixel <= SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
 
   surfaceState.width = width;
   surfaceState.height = height;
@@ -465,6 +513,15 @@ function ensureWaveformSliceCapacity(floatCount) {
   analysisState.waveformSlice = new Float32Array(floatCount);
   analysisState.waveformSliceCapacity = floatCount;
   return analysisState.waveformSlice;
+}
+
+function hasRenderableWaveformData(waveformData) {
+  return hasSampleWaveformData(waveformData)
+    || (Array.isArray(waveformData?.levels) && waveformData.levels.length > 0);
+}
+
+function hasSampleWaveformData(waveformData) {
+  return waveformData?.samples instanceof Float32Array && waveformData.samples.length > 0;
 }
 
 function disposeSession() {

@@ -11,7 +11,7 @@ function buildInteractiveWaveformData(channelData, options = {}) {
     levels.push(level);
     previousLevel = level;
   }
-  return { samples, levels };
+  return { sampleCount: samples.length, samples, levels };
 }
 function normalizeInteractiveWaveformSamples(channelData, options = {}) {
   const shouldCopy = options?.copy !== false || !(channelData instanceof Float32Array);
@@ -24,6 +24,34 @@ function normalizeInteractiveWaveformSamples(channelData, options = {}) {
     samples[index] = clamp(channelData[index] ?? 0, -1, 1);
   }
   return samples;
+}
+function createInteractiveWaveformPreviewData({
+  bucketCount,
+  minMaxBuffer,
+  samplesPerBucket
+}) {
+  const safeBucketCount = Math.max(1, Math.round(Number(bucketCount) || 0));
+  const safeSamplesPerBucket = Math.max(1, Math.round(Number(samplesPerBucket) || 0));
+  const source = minMaxBuffer instanceof Float32Array ? minMaxBuffer : minMaxBuffer instanceof ArrayBuffer ? new Float32Array(minMaxBuffer) : null;
+  if (!source || source.length < safeBucketCount * 2) {
+    return {
+      sampleCount: safeBucketCount * safeSamplesPerBucket,
+      samples: null,
+      levels: []
+    };
+  }
+  const baseLevel = buildPreviewBaseLevel(source, safeBucketCount, safeSamplesPerBucket);
+  const levels = [baseLevel];
+  let previousLevel = baseLevel;
+  while (previousLevel.maxPeaks.length > MIN_LEVEL_BUCKETS) {
+    previousLevel = buildPeakLevelFromPrevious(previousLevel);
+    levels.push(previousLevel);
+  }
+  return {
+    sampleCount: safeBucketCount * safeSamplesPerBucket,
+    samples: null,
+    levels
+  };
 }
 function getInteractiveWaveformBlockSizes(sampleCount) {
   const blockSizes = [];
@@ -50,7 +78,9 @@ function extractInteractiveWaveformSlice(waveformData, duration, viewStart, view
   }
   const clampedStart = clamp(viewStart, 0, duration);
   const clampedEnd = clamp(viewEnd, clampedStart + 1e-4, duration);
-  const sampleCount = waveformData.samples.length;
+  const sampleCount = getWaveformDataSampleCount(waveformData);
+  const samples = getWaveformDataSamples(waveformData);
+  const levels = Array.isArray(waveformData.levels) ? waveformData.levels : [];
   if (sampleCount <= 0) {
     target.fill(0, 0, safeColumnCount * 2);
     return target;
@@ -59,14 +89,14 @@ function extractInteractiveWaveformSlice(waveformData, duration, viewStart, view
   const endSample = Math.ceil(clampedEnd / duration * sampleCount);
   const visibleSamples = Math.max(1, endSample - startSample);
   const samplesPerColumn = Math.max(1, visibleSamples / safeColumnCount);
-  const selectedLevel = pickLevel(waveformData.levels, samplesPerColumn);
+  const selectedLevel = pickLevel(levels, samplesPerColumn) ?? levels[0] ?? null;
   for (let columnIndex = 0; columnIndex < safeColumnCount; columnIndex += 1) {
     const columnStartSample = Math.floor(startSample + columnIndex / safeColumnCount * visibleSamples);
     const columnEndSample = Math.ceil(startSample + (columnIndex + 1) / safeColumnCount * visibleSamples);
-    const range = selectedLevel ? getLevelRange(selectedLevel, columnStartSample, columnEndSample) : getSampleRange(waveformData.samples, columnStartSample, columnEndSample);
+    const range = selectedLevel ? getLevelRange(selectedLevel, columnStartSample, columnEndSample) : samples ? getSampleRange(samples, columnStartSample, columnEndSample) : { min: 0, max: 0 };
     const targetIndex = columnIndex * 2;
-    target[targetIndex] = range.min;
-    target[targetIndex + 1] = range.max;
+    target[targetIndex] = Number.isFinite(range.min) && Number.isFinite(range.max) && range.min <= range.max ? range.min : 0;
+    target[targetIndex + 1] = Number.isFinite(range.min) && Number.isFinite(range.max) && range.min <= range.max ? range.max : 0;
   }
   return target;
 }
@@ -96,6 +126,21 @@ function buildPeakLevel(samples, blockSize) {
     maxPeaks[blockIndex] = maxPeak;
   }
   return { blockSize, minPeaks, maxPeaks };
+}
+function buildPreviewBaseLevel(source, bucketCount, samplesPerBucket) {
+  const minPeaks = new Float32Array(bucketCount);
+  const maxPeaks = new Float32Array(bucketCount);
+  for (let bucketIndex = 0; bucketIndex < bucketCount; bucketIndex += 1) {
+    const sourceIndex = bucketIndex * 2;
+    const range = normalizeEnvelopeRange(source[sourceIndex], source[sourceIndex + 1]);
+    minPeaks[bucketIndex] = range.min;
+    maxPeaks[bucketIndex] = range.max;
+  }
+  return {
+    blockSize: samplesPerBucket,
+    minPeaks,
+    maxPeaks
+  };
 }
 function buildPeakLevelFromPrevious(previousLevel) {
   const blockCount = Math.ceil(previousLevel.maxPeaks.length / LEVEL_SCALE_FACTOR);
@@ -128,6 +173,9 @@ function buildPeakLevelFromPrevious(previousLevel) {
 function getLevelRange(level, startSample, endSample) {
   const startBlock = Math.max(0, Math.floor(startSample / level.blockSize));
   const endBlock = Math.min(level.maxPeaks.length, Math.ceil(endSample / level.blockSize));
+  if (endBlock <= startBlock) {
+    return { min: 0, max: 0 };
+  }
   let min = 1;
   let max = -1;
   for (let blockIndex = startBlock; blockIndex < endBlock; blockIndex += 1) {
@@ -143,9 +191,14 @@ function getLevelRange(level, startSample, endSample) {
   return { min, max };
 }
 function getSampleRange(samples, startSample, endSample) {
+  const safeStart = Math.max(0, startSample);
+  const safeEnd = Math.min(samples.length, endSample);
+  if (safeEnd <= safeStart) {
+    return { min: 0, max: 0 };
+  }
   let min = 1;
   let max = -1;
-  for (let sampleIndex = Math.max(0, startSample); sampleIndex < Math.min(samples.length, endSample); sampleIndex += 1) {
+  for (let sampleIndex = safeStart; sampleIndex < safeEnd; sampleIndex += 1) {
     const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
     if (value < min) {
       min = value;
@@ -166,6 +219,33 @@ function pickLevel(levels, samplesPerPixel) {
     break;
   }
   return selected;
+}
+function getWaveformDataSampleCount(waveformData) {
+  if (!waveformData || typeof waveformData !== "object") {
+    return 0;
+  }
+  const explicitSampleCount = Number(waveformData.sampleCount);
+  if (Number.isFinite(explicitSampleCount) && explicitSampleCount > 0) {
+    return explicitSampleCount;
+  }
+  return waveformData.samples instanceof Float32Array ? waveformData.samples.length : 0;
+}
+function getWaveformDataSamples(waveformData) {
+  return waveformData?.samples instanceof Float32Array ? waveformData.samples : null;
+}
+function normalizeEnvelopeRange(minValue, maxValue) {
+  const safeMin = clamp(Number.isFinite(minValue) ? minValue : 0, -1, 1);
+  const safeMax = clamp(Number.isFinite(maxValue) ? maxValue : 0, -1, 1);
+  if (safeMin <= safeMax) {
+    return {
+      min: safeMin,
+      max: safeMax
+    };
+  }
+  return {
+    min: Math.min(safeMin, safeMax),
+    max: Math.max(safeMin, safeMax)
+  };
 }
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -215,6 +295,12 @@ self.onmessage = (event) => {
     case "attachAudioSession":
       enqueueRequest(async () => {
         attachAudioSession(message.body);
+      });
+      return;
+    case "attachPreviewEnvelope":
+      enqueueRequest(async () => {
+        attachPreviewEnvelope(message.body);
+        void pumpRenderLoop();
       });
       return;
     case "buildWaveformPyramid":
@@ -371,6 +457,32 @@ function buildWaveformPyramid() {
     type: "waveformPyramidReady"
   });
 }
+function attachPreviewEnvelope(options) {
+  const duration = Number(options?.duration);
+  const sampleRate = Number(options?.sampleRate);
+  const sampleCount = Number(options?.sampleCount);
+  const bucketCount = Number(options?.bucketCount);
+  const samplesPerBucket = Number(options?.samplesPerBucket);
+  if (!(options?.minMaxBuffer instanceof ArrayBuffer)) {
+    throw new Error("Waveform preview envelope buffer is missing.");
+  }
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isFinite(sampleCount) || sampleCount <= 0 || !Number.isFinite(bucketCount) || bucketCount <= 0 || !Number.isFinite(samplesPerBucket) || samplesPerBucket <= 0) {
+    throw new Error("Waveform preview envelope metadata is invalid.");
+  }
+  analysisState.initialized = true;
+  analysisState.transportMode = "preview";
+  analysisState.sampleRate = sampleRate;
+  analysisState.sampleCount = sampleCount;
+  analysisState.duration = duration;
+  analysisState.waveformData = createInteractiveWaveformPreviewData({
+    bucketCount,
+    minMaxBuffer: options.minMaxBuffer,
+    samplesPerBucket
+  });
+  analysisState.waveformBuilt = true;
+  analysisState.waveformSlice = null;
+  analysisState.waveformSliceCapacity = 0;
+}
 async function pumpRenderLoop() {
   if (renderLoopActive) {
     return;
@@ -385,7 +497,7 @@ async function pumpRenderLoop() {
         clearCanvas();
         continue;
       }
-      if (!analysisState.initialized || !analysisState.waveformBuilt) {
+      if (!analysisState.initialized || !hasRenderableWaveformData(analysisState.waveformData)) {
         continue;
       }
       await renderWaveform(request);
@@ -413,7 +525,7 @@ async function renderWaveform(request) {
   const renderSpan = Math.max(1 / analysisState.sampleRate, viewEnd - viewStart);
   const samplesPerPixel = renderSpan * analysisState.sampleRate / columnCount;
   const pixelsPerSample = columnCount / Math.max(1, renderSpan * analysisState.sampleRate);
-  const samplePlotMode = samplesPerPixel <= SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
+  const samplePlotMode = hasSampleWaveformData(analysisState.waveformData) && samplesPerPixel <= SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
   surfaceState.width = width;
   surfaceState.height = height;
   surfaceState.renderScale = renderScale;
@@ -551,6 +663,12 @@ function ensureWaveformSliceCapacity(floatCount) {
   analysisState.waveformSlice = new Float32Array(floatCount);
   analysisState.waveformSliceCapacity = floatCount;
   return analysisState.waveformSlice;
+}
+function hasRenderableWaveformData(waveformData) {
+  return hasSampleWaveformData(waveformData) || Array.isArray(waveformData?.levels) && waveformData.levels.length > 0;
+}
+function hasSampleWaveformData(waveformData) {
+  return waveformData?.samples instanceof Float32Array && waveformData.samples.length > 0;
 }
 function disposeSession() {
   analysisState = createEmptyAnalysisState();
