@@ -11,7 +11,7 @@ const HAS_SHARED_RUNTIME_SUPPORT =
   typeof SharedArrayBuffer === 'function'
   && window.crossOriginIsolated
   && typeof Worker !== 'undefined';
-const TRANSPORT_MODE_OVERRIDE_KEY = 'wavePreview.transportModeOverride';
+const TRANSPORT_MODE_OVERRIDE_KEY = 'waveScope.transportModeOverride';
 const RUNTIME_TRANSPORT_MODE = getRuntimeTransportMode();
 
 const SPECTROGRAM_MIN_FREQUENCY = 20;
@@ -51,7 +51,7 @@ const SEEK_COMMIT_TIMEOUT_MS = 250;
 const WAVEFORM_TOP_PADDING_PX = 10;
 const WAVEFORM_BOTTOM_PADDING_PX = 10;
 const WAVEFORM_AMPLITUDE_HEIGHT_RATIO = 0.38;
-const WAVEFORM_SAMPLE_DETAIL_MIN_RENDER_PIXELS = 1;
+const WAVEFORM_SAMPLE_DETAIL_MAX_SAMPLES_PER_RENDER_PIXEL = 1;
 
 const QUALITY_PRESETS = {
   balanced: {
@@ -197,6 +197,8 @@ const state = {
   waveformRenderWidth: 0,
   waveformRenderHeight: 0,
   waveformRenderVisibleSpan: 0,
+  waveformSamplePlotMode: false,
+  waveformRawSamplePlotMode: false,
   spectrogramRenderRange: { start: 0, end: 0 },
   waveformAxisRenderRange: { start: 0, end: 0 },
   waveformAxisRenderWidth: 0,
@@ -1059,6 +1061,24 @@ function guessAudioMimeType(resourcePath) {
   }
 }
 
+function resolvePlayableAudioMimeType(payload, responseContentType) {
+  const normalizedContentType = responseContentType?.split(';', 1)[0]?.trim().toLowerCase() || '';
+
+  if (
+    normalizedContentType
+    && normalizedContentType !== 'application/octet-stream'
+    && normalizedContentType !== 'binary/octet-stream'
+  ) {
+    return normalizedContentType;
+  }
+
+  if (typeof payload?.fileExtension === 'string' && payload.fileExtension.length > 0) {
+    return guessAudioMimeType(`file.${payload.fileExtension}`);
+  }
+
+  return guessAudioMimeType(payload?.sourceUri || payload?.documentUri || '');
+}
+
 function requestMediaMetadata(loadToken, payload) {
   if (loadToken !== state.loadToken) {
     return;
@@ -1219,7 +1239,7 @@ async function loadPlaybackSource(loadToken, payload, audio) {
       return;
     }
 
-    const mimeType = response.headers.get('content-type') || guessAudioMimeType(payload.sourceUri);
+    const mimeType = resolvePlayableAudioMimeType(payload, response.headers.get('content-type'));
     applyPlaybackSourceBuffer(loadToken, audio, audioData, mimeType, 'native');
     setAnalysisStatus('Buffering playback…');
     scheduleDeferredAnalysis(loadToken, payload);
@@ -1520,22 +1540,9 @@ async function startAnalysis(loadToken, payload) {
         body: sharedBody,
       });
     } else {
-      waveformWorker.postMessage({
-        type: 'attachAudioSession',
-        body: {
-          duration: decodedAudio.duration,
-          quality: state.analysis.quality,
-          sampleCount: waveformSamples.length,
-          sampleRate: decodedAudio.sampleRate,
-          samplesBuffer: waveformSamples.buffer,
-          sessionVersion,
-          transportMode: state.transportMode,
-        },
-      }, [waveformSamples.buffer]);
-      void syncWaveformView({ force: true });
-      scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
+      const analysisWorkerSamples = waveformSamples.slice();
 
-      analysisWorker.postMessage({
+      waveformWorker.postMessage({
         type: 'attachAudioSession',
         body: {
           duration: decodedAudio.duration,
@@ -1547,6 +1554,21 @@ async function startAnalysis(loadToken, payload) {
           transportMode: state.transportMode,
         },
       }, [monoSamples.buffer]);
+      void syncWaveformView({ force: true });
+      scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
+
+      analysisWorker.postMessage({
+        type: 'attachAudioSession',
+        body: {
+          duration: decodedAudio.duration,
+          quality: state.analysis.quality,
+          sampleCount: analysisWorkerSamples.length,
+          sampleRate: decodedAudio.sampleRate,
+          samplesBuffer: analysisWorkerSamples.buffer,
+          sessionVersion,
+          transportMode: state.transportMode,
+        },
+      }, [analysisWorkerSamples.buffer]);
     }
 
     requestOverviewSpectrogram({ force: true });
@@ -2084,6 +2106,8 @@ function handleWaveformReady(body) {
   state.waveformRenderWidth = width;
   state.waveformRenderHeight = height;
   state.waveformRenderVisibleSpan = pendingRequest?.visibleSpan ?? Math.max(0, body.viewEnd - body.viewStart);
+  state.waveformSamplePlotMode = Boolean(body.samplePlotMode);
+  state.waveformRawSamplePlotMode = Boolean(body.rawSamplePlotMode);
   state.waveformPendingRequest = null;
   applyWaveformCanvasTransform();
 
@@ -2959,6 +2983,63 @@ function showWaveformSampleMarker(sampleInfo) {
   elements.waveformSampleMarker.style.top = `${sampleInfo.markerY}px`;
 }
 
+function getWaveformMarkerY(sampleValue, rectHeight) {
+  const chartTop = WAVEFORM_TOP_PADDING_PX;
+  const chartBottom = Math.max(chartTop + 1, rectHeight - WAVEFORM_BOTTOM_PADDING_PX);
+  const chartHeight = Math.max(1, chartBottom - chartTop);
+
+  return clamp(
+    chartTop + (chartHeight * 0.5) - (sampleValue * chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO),
+    chartTop,
+    chartBottom,
+  );
+}
+
+function pickRepresentativeWaveformSample(samples, startPosition, endPosition) {
+  const maxSampleIndex = Math.max(0, samples.length - 1);
+
+  if (maxSampleIndex < 0) {
+    return null;
+  }
+
+  const safeStart = clamp(Math.floor(startPosition), 0, maxSampleIndex);
+  const safeEndExclusive = clamp(Math.max(safeStart + 1, Math.ceil(endPosition)), safeStart + 1, samples.length);
+  const targetCenter = clamp((startPosition + Math.max(startPosition, endPosition - 1)) * 0.5, 0, maxSampleIndex);
+  let minValue = 1;
+  let maxValue = -1;
+
+  for (let sampleIndex = safeStart; sampleIndex < safeEndExclusive; sampleIndex += 1) {
+    const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
+    minValue = Math.min(minValue, value);
+    maxValue = Math.max(maxValue, value);
+  }
+
+  const targetValue = Math.abs(maxValue - minValue) <= 1e-6
+    ? clamp(samples[Math.round(targetCenter)] ?? 0, -1, 1)
+    : clamp((minValue + maxValue) * 0.5, -1, 1);
+
+  let bestIndex = safeStart;
+  let bestValue = clamp(samples[safeStart] ?? 0, -1, 1);
+  let bestScore = Number.POSITIVE_INFINITY;
+  const rangeSpan = Math.max(1, safeEndExclusive - safeStart);
+
+  for (let sampleIndex = safeStart; sampleIndex < safeEndExclusive; sampleIndex += 1) {
+    const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
+    const score = Math.abs(value - targetValue) + (Math.abs(sampleIndex - targetCenter) / rangeSpan);
+
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = sampleIndex;
+      bestValue = value;
+    }
+  }
+
+  return {
+    index: bestIndex,
+    value: bestValue,
+  };
+}
+
 function getWaveformSampleInfoAtClientX(clientX) {
   const samples = state.waveformSamples;
   const sampleRate = Number(state.analysis?.sampleRate);
@@ -2966,7 +3047,15 @@ function getWaveformSampleInfoAtClientX(clientX) {
   const range = getWaveformRange();
   const span = Math.max(0, range.end - range.start);
 
-  if (!samples || samples.length === 0 || !Number.isFinite(sampleRate) || sampleRate <= 0 || !targetElement || span <= 0) {
+  if (
+    !state.waveformSamplePlotMode
+    || !samples
+    || samples.length === 0
+    || !Number.isFinite(sampleRate)
+    || sampleRate <= 0
+    || !targetElement
+    || span <= 0
+  ) {
     return null;
   }
 
@@ -2978,30 +3067,58 @@ function getWaveformSampleInfoAtClientX(clientX) {
   }
 
   const visibleSampleCount = Math.max(1, span * sampleRate);
-  const renderPixelsPerSample = (width * Math.max(1, WAVEFORM_RENDER_SCALE)) / visibleSampleCount;
+  const sampleStartPosition = range.start * sampleRate;
   const maxSampleIndex = Math.max(0, samples.length - 1);
-  const samplePosition = (range.start * sampleRate) + ((offsetX / width) * visibleSampleCount);
-  const sampleIndex = clamp(Math.round(samplePosition), 0, maxSampleIndex);
-  const sampleTime = sampleIndex / sampleRate;
-  const sampleValue = samples[sampleIndex] ?? 0;
-  const markerX = clamp(((sampleTime - range.start) / span) * width, 0, width);
-  const chartTop = WAVEFORM_TOP_PADDING_PX;
-  const chartBottom = Math.max(chartTop + 1, rect.height - WAVEFORM_BOTTOM_PADDING_PX);
-  const chartHeight = Math.max(1, chartBottom - chartTop);
-  const markerY = clamp(
-    chartTop + (chartHeight * 0.5) - (sampleValue * chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO),
-    chartTop,
-    chartBottom,
+  const visibleSampleSpan = Math.max(0, visibleSampleCount - 1);
+
+  if (state.waveformRawSamplePlotMode) {
+    const samplePosition = sampleStartPosition + ((offsetX / width) * visibleSampleSpan);
+    const sampleIndex = clamp(Math.round(samplePosition), 0, maxSampleIndex);
+    const sampleValue = samples[sampleIndex] ?? 0;
+
+    return {
+      markerX: clamp(
+        visibleSampleSpan <= 0
+          ? 0
+          : ((sampleIndex - sampleStartPosition) / visibleSampleSpan) * width,
+        0,
+        width,
+      ),
+      markerY: getWaveformMarkerY(sampleValue, rect.height),
+      sampleIndex,
+      sampleNumber: sampleIndex + 1,
+      sampleValue,
+      showMarker: true,
+    };
+  }
+
+  const columnCount = Math.max(1, Math.round(width * Math.max(1, WAVEFORM_RENDER_SCALE)));
+  const columnIndex = clamp(
+    Math.round((offsetX / width) * Math.max(0, columnCount - 1)),
+    0,
+    Math.max(0, columnCount - 1),
   );
+  const columnStartPosition = sampleStartPosition + (columnIndex / columnCount) * visibleSampleCount;
+  const columnEndPosition = sampleStartPosition + ((columnIndex + 1) / columnCount) * visibleSampleCount;
+  const representativeSample = pickRepresentativeWaveformSample(samples, columnStartPosition, columnEndPosition);
+
+  if (!representativeSample) {
+    return null;
+  }
 
   return {
-    markerX,
-    markerY,
-    sampleIndex,
-    sampleNumber: sampleIndex + 1,
-    sampleTime,
-    sampleValue,
-    showMarker: renderPixelsPerSample >= WAVEFORM_SAMPLE_DETAIL_MIN_RENDER_PIXELS,
+    markerX: clamp(
+      columnCount <= 1
+        ? 0
+        : (columnIndex / Math.max(1, columnCount - 1)) * width,
+      0,
+      width,
+    ),
+    markerY: getWaveformMarkerY(representativeSample.value, rect.height),
+    sampleIndex: representativeSample.index,
+    sampleNumber: representativeSample.index + 1,
+    sampleValue: representativeSample.value,
+    showMarker: true,
   };
 }
 
@@ -3013,7 +3130,7 @@ function formatWaveformSampleOrdinal(sampleNumber) {
 
 function formatWaveformSampleValue(sampleValue) {
   const normalized = Math.abs(sampleValue) < 0.00005 ? 0 : sampleValue;
-  return normalized.toFixed(4);
+  return normalized.toFixed(6).replace(/(?:\.0+|(\.\d*?[1-9]))0+$/, '$1');
 }
 
 function refreshWaveformHoverPresentation() {
@@ -3027,9 +3144,10 @@ function refreshWaveformHoverPresentation() {
   }
 
   const sampleInfo = getWaveformSampleInfoAtClientX(point.clientX);
-  const timeLabel = formatAxisLabel(sampleInfo?.sampleTime ?? getTimeAtWaveformClientX(point.clientX));
-  const label = sampleInfo
-    ? `${timeLabel} - Sample ${formatWaveformSampleOrdinal(sampleInfo.sampleNumber)}, Value ${formatWaveformSampleValue(sampleInfo.sampleValue)}`
+  const sampleDetail = sampleInfo?.showMarker ? sampleInfo : null;
+  const timeLabel = formatAxisLabel(getTimeAtWaveformClientX(point.clientX));
+  const label = sampleDetail
+    ? `${timeLabel} - Sample ${formatWaveformSampleOrdinal(sampleDetail.sampleNumber)}, Value ${formatWaveformSampleValue(sampleDetail.sampleValue)}`
     : timeLabel;
 
   updateSurfaceHoverTooltip(
@@ -3038,7 +3156,7 @@ function refreshWaveformHoverPresentation() {
     point,
     label,
   );
-  showWaveformSampleMarker(sampleInfo);
+  showWaveformSampleMarker(sampleDetail);
 }
 
 function updateWaveformHoverTooltip(event) {
@@ -3872,6 +3990,8 @@ function destroySession() {
   state.waveformRenderWidth = 0;
   state.waveformRenderHeight = 0;
   state.waveformRenderVisibleSpan = 0;
+  state.waveformSamplePlotMode = false;
+  state.waveformRawSamplePlotMode = false;
   state.spectrogramRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
@@ -3958,6 +4078,8 @@ function disposeWaveformRenderer() {
   state.waveformRenderWidth = 0;
   state.waveformRenderHeight = 0;
   state.waveformRenderVisibleSpan = 0;
+  state.waveformSamplePlotMode = false;
+  state.waveformRawSamplePlotMode = false;
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
   elements.waveformCanvasHost.replaceChildren();
@@ -4575,7 +4697,7 @@ function getMinVisibleDuration(duration) {
   }
 
   const sampleRate = Number(state.analysis?.sampleRate);
-  const viewportColumns = Math.max(1, Math.round(getWaveformViewportWidth() * WAVEFORM_RENDER_SCALE));
+  const viewportColumns = Math.max(1, Math.round(getWaveformViewportWidth()));
 
   if (Number.isFinite(sampleRate) && sampleRate > 0) {
     return Math.min(

@@ -1,6 +1,6 @@
-[submodule "native/third_party/pffft"]
-	path = native/third_party/pffft
+[submodule "wasm/third_party/pffft"]
+	path = wasm/third_party/pffft
 	url = https://bitbucket.org/jpommier/pffft.git
-[submodule "native/third_party/libebur128"]
-	path = native/third_party/libebur128
+[submodule "wasm/third_party/libebur128"]
+	path = wasm/third_party/libebur128
 	url = https://github.com/jiixyj/libebur128.git

@@ -8,7 +8,8 @@ const TOP_PADDING = 10;
 const BOTTOM_PADDING = 10;
 const CENTER_LINE_ALPHA = 0.14;
 const SYMMETRIC_ENVELOPE_GAIN = 0.76;
-const SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 8;
+const SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 16;
+const RAW_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 1;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
 const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
 const WAVEFORM_RUNTIME_VARIANT = 'waveform-js-worker';
@@ -292,9 +293,16 @@ async function renderWaveform(request) {
   const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
   const columnCount = Math.max(1, Math.round(width * renderScale));
   const renderSpan = Math.max(1 / analysisState.sampleRate, viewEnd - viewStart);
-  const samplesPerPixel = (renderSpan * analysisState.sampleRate) / columnCount;
-  const pixelsPerSample = columnCount / Math.max(1, renderSpan * analysisState.sampleRate);
-  const samplePlotMode = hasSampleWaveformData(analysisState.waveformData) && samplesPerPixel <= SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
+  const visibleSampleCount = Math.max(1, renderSpan * analysisState.sampleRate);
+  const samplesPerPixel = visibleSampleCount / columnCount;
+  const pixelsPerSample = columnCount / visibleSampleCount;
+  const sampleData = hasSampleWaveformData(analysisState.waveformData)
+    ? analysisState.waveformData.samples
+    : null;
+  const samplePlotMode = sampleData instanceof Float32Array && samplesPerPixel <= SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
+  const rawSamplePlotMode = sampleData instanceof Float32Array && samplesPerPixel <= RAW_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
+  const sampleStartPosition = viewStart * analysisState.sampleRate;
+  const visibleSampleSpan = Math.max(0, visibleSampleCount - 1);
 
   surfaceState.width = width;
   surfaceState.height = height;
@@ -318,6 +326,8 @@ async function renderWaveform(request) {
       columnCount,
       generation,
       height,
+      samplePlotMode,
+      rawSamplePlotMode,
       viewEnd,
       viewStart,
       visibleSpan,
@@ -331,7 +341,37 @@ async function renderWaveform(request) {
     return;
   }
 
-  drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample);
+  if (rawSamplePlotMode && sampleData instanceof Float32Array) {
+    drawRawSamplePlot(
+      sampleData,
+      drawColumnsCount(columnCount),
+      color,
+      pixelsPerSample,
+      sampleStartPosition,
+      visibleSampleSpan,
+    );
+    return;
+  }
+
+  if (samplePlotMode && sampleData instanceof Float32Array) {
+    drawRepresentativeSamplePlot(
+      sampleData,
+      drawColumnsCount(columnCount),
+      color,
+      pixelsPerSample,
+      sampleStartPosition,
+      visibleSampleCount,
+    );
+    return;
+  }
+
+  drawFrame(slice, columnCount, color, false, pixelsPerSample);
+}
+
+function drawColumnsCount(columnCount) {
+  const canvas = surfaceState.canvas;
+  const deviceWidth = canvas ? Math.max(1, canvas.width) : columnCount;
+  return Math.min(columnCount, deviceWidth);
 }
 
 function drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample) {
@@ -419,6 +459,139 @@ function drawSamplePlot(slice, drawColumns, color, midY, amplitudeHeight, chartT
   }
 }
 
+function drawRepresentativeSamplePlot(samples, drawColumns, color, pixelsPerSample, sampleStartPosition, visibleSampleCount) {
+  const context = surfaceState.context;
+  const canvas = surfaceState.canvas;
+
+  if (!context || !canvas || drawColumns <= 0 || samples.length === 0) {
+    return;
+  }
+
+  const deviceWidth = Math.max(1, canvas.width);
+  const deviceHeight = Math.max(1, canvas.height);
+  const chartTop = Math.round(TOP_PADDING * surfaceState.renderScale);
+  const chartBottom = Math.max(chartTop + 1, Math.round((surfaceState.height - BOTTOM_PADDING) * surfaceState.renderScale));
+  const chartHeight = Math.max(1, chartBottom - chartTop);
+  const midY = chartTop + chartHeight * 0.5;
+  const amplitudeHeight = chartHeight * 0.38;
+
+  context.imageSmoothingEnabled = true;
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, deviceWidth, deviceHeight);
+  context.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;
+  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, surfaceState.renderScale));
+  context.strokeStyle = color;
+  context.fillStyle = color;
+  context.lineWidth = Math.max(1, surfaceState.renderScale * SAMPLE_PLOT_LINE_WIDTH_SCALE);
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.beginPath();
+
+  for (let x = 0; x < drawColumns; x += 1) {
+    const columnStartPosition = sampleStartPosition + (x / drawColumns) * visibleSampleCount;
+    const columnEndPosition = sampleStartPosition + ((x + 1) / drawColumns) * visibleSampleCount;
+    const sample = pickRepresentativeSample(samples, columnStartPosition, columnEndPosition);
+    const sampleValue = sample?.value ?? 0;
+    const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
+
+    if (x === 0) {
+      context.moveTo(x + 0.5, y);
+      continue;
+    }
+
+    context.lineTo(x + 0.5, y);
+  }
+
+  context.stroke();
+
+  if (pixelsPerSample >= SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE) {
+    const pointSize = Math.max(1.5, surfaceState.renderScale * 1.1);
+
+    for (let x = 0; x < drawColumns; x += 1) {
+      const columnStartPosition = sampleStartPosition + (x / drawColumns) * visibleSampleCount;
+      const columnEndPosition = sampleStartPosition + ((x + 1) / drawColumns) * visibleSampleCount;
+      const sample = pickRepresentativeSample(samples, columnStartPosition, columnEndPosition);
+      const sampleValue = sample?.value ?? 0;
+      const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
+
+      context.fillRect(
+        Math.round(x - pointSize * 0.5),
+        Math.round(y - pointSize * 0.5),
+        Math.max(1, Math.round(pointSize)),
+        Math.max(1, Math.round(pointSize)),
+      );
+    }
+  }
+}
+
+function drawRawSamplePlot(samples, drawColumns, color, pixelsPerSample, sampleStartPosition, visibleSampleSpan) {
+  const context = surfaceState.context;
+  const canvas = surfaceState.canvas;
+
+  if (!context || !canvas || drawColumns <= 0 || samples.length === 0) {
+    return;
+  }
+
+  const deviceWidth = Math.max(1, canvas.width);
+  const deviceHeight = Math.max(1, canvas.height);
+  const chartTop = Math.round(TOP_PADDING * surfaceState.renderScale);
+  const chartBottom = Math.max(chartTop + 1, Math.round((surfaceState.height - BOTTOM_PADDING) * surfaceState.renderScale));
+  const chartHeight = Math.max(1, chartBottom - chartTop);
+  const midY = chartTop + chartHeight * 0.5;
+  const amplitudeHeight = chartHeight * 0.38;
+  const maxSampleIndex = Math.max(0, samples.length - 1);
+
+  context.imageSmoothingEnabled = true;
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, deviceWidth, deviceHeight);
+  context.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;
+  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, surfaceState.renderScale));
+  context.strokeStyle = color;
+  context.fillStyle = color;
+  context.lineWidth = Math.max(1, surfaceState.renderScale * SAMPLE_PLOT_LINE_WIDTH_SCALE);
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.beginPath();
+
+  for (let x = 0; x < drawColumns; x += 1) {
+    const ratio = drawColumns <= 1 ? 0 : x / (drawColumns - 1);
+    const samplePosition = clamp(sampleStartPosition + ratio * visibleSampleSpan, 0, maxSampleIndex);
+    const sampleValue = getInterpolatedSample(samples, samplePosition);
+    const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
+
+    if (x === 0) {
+      context.moveTo(x + 0.5, y);
+      continue;
+    }
+
+    context.lineTo(x + 0.5, y);
+  }
+
+  context.stroke();
+
+  if (pixelsPerSample >= SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE) {
+    const pointSize = Math.max(1.5, surfaceState.renderScale * 1.1);
+    const firstSampleIndex = Math.max(0, Math.ceil(sampleStartPosition));
+    const lastSampleIndex = Math.min(maxSampleIndex, Math.floor(sampleStartPosition + visibleSampleSpan));
+
+    for (let sampleIndex = firstSampleIndex; sampleIndex <= lastSampleIndex; sampleIndex += 1) {
+      const ratio = visibleSampleSpan <= 0
+        ? 0
+        : (sampleIndex - sampleStartPosition) / visibleSampleSpan;
+      const x = clamp(ratio * Math.max(0, drawColumns - 1), 0, Math.max(0, drawColumns - 1));
+      const sampleValue = clamp(samples[sampleIndex] ?? 0, -1, 1);
+      const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
+
+      context.fillRect(
+        Math.round(x - pointSize * 0.5),
+        Math.round(y - pointSize * 0.5),
+        Math.max(1, Math.round(pointSize)),
+        Math.max(1, Math.round(pointSize)),
+      );
+    }
+  }
+}
+
 function getRepresentativeSampleValue(slice, columnIndex) {
   const sourceIndex = columnIndex * 2;
   const minValue = slice[sourceIndex] ?? 0;
@@ -429,6 +602,61 @@ function getRepresentativeSampleValue(slice, columnIndex) {
   }
 
   return clamp((minValue + maxValue) * 0.5, -1, 1);
+}
+
+function getInterpolatedSample(samples, position) {
+  const index = Math.floor(position);
+  const nextIndex = Math.min(samples.length - 1, index + 1);
+  const fraction = position - index;
+  const a = clamp(samples[index] ?? 0, -1, 1);
+  const b = clamp(samples[nextIndex] ?? 0, -1, 1);
+
+  return a + (b - a) * fraction;
+}
+
+function pickRepresentativeSample(samples, startPosition, endPosition) {
+  const maxSampleIndex = Math.max(0, samples.length - 1);
+
+  if (maxSampleIndex < 0) {
+    return null;
+  }
+
+  const safeStart = clamp(Math.floor(startPosition), 0, maxSampleIndex);
+  const safeEndExclusive = clamp(Math.max(safeStart + 1, Math.ceil(endPosition)), safeStart + 1, samples.length);
+  const targetCenter = clamp((startPosition + Math.max(startPosition, endPosition - 1)) * 0.5, 0, maxSampleIndex);
+  let minValue = 1;
+  let maxValue = -1;
+
+  for (let sampleIndex = safeStart; sampleIndex < safeEndExclusive; sampleIndex += 1) {
+    const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
+    minValue = Math.min(minValue, value);
+    maxValue = Math.max(maxValue, value);
+  }
+
+  const targetValue = Math.abs(maxValue - minValue) <= 1e-6
+    ? clamp(samples[Math.round(targetCenter)] ?? 0, -1, 1)
+    : clamp((minValue + maxValue) * 0.5, -1, 1);
+
+  let bestIndex = safeStart;
+  let bestValue = clamp(samples[safeStart] ?? 0, -1, 1);
+  let bestScore = Number.POSITIVE_INFINITY;
+  const rangeSpan = Math.max(1, safeEndExclusive - safeStart);
+
+  for (let sampleIndex = safeStart; sampleIndex < safeEndExclusive; sampleIndex += 1) {
+    const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
+    const score = Math.abs(value - targetValue) + (Math.abs(sampleIndex - targetCenter) / rangeSpan);
+
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = sampleIndex;
+      bestValue = value;
+    }
+  }
+
+  return {
+    index: bestIndex,
+    value: bestValue,
+  };
 }
 
 function waitForPresentationDecision(generation) {
