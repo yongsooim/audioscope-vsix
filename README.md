@@ -67,6 +67,11 @@ npm run compile
 - `media/wave_core_simd.wasm`, `media/wave_core_fallback.wasm`: Zig freestanding wasm 산출물
 - `exampleFiles/sample-tone.wav`: 디버그용 샘플 오디오
 
+## Acknowledgements
+
+- `scalogram` 최적화는 [`fCWT`](https://github.com/fastlib/fCWT)의 공개 구현과 문서를 참고해 `scale/frequency` 사전계산, wavelet kernel 재사용, 벡터화 친화적인 연산 구조 아이디어를 반영했습니다.
+- 이 프로젝트는 `fCWT` 코드를 직접 포함하거나 런타임 의존성으로 사용하지 않고, 현재 Zig/WASM 렌더러에 맞게 아이디어만 재구성해 적용합니다.
+
 ## Next Ideas
 
 - marker, cue, transcript overlay
