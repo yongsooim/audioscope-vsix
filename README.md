@@ -50,7 +50,7 @@ npm run compile
 - `crossOriginIsolated + SharedArrayBuffer` 가능 시: SAB fast path
 - 그 외 VS Code desktop 환경: transferable fallback path
 
-기본 등록 우선순위는 `option`이라서, 오디오 파일을 연 뒤 아래 중 하나로 미리보기를 사용할 수 있습니다.
+기본 등록 우선순위는 `default`라서 지원 오디오 파일을 열면 `Wave Scope`가 바로 사용됩니다. 필요하면 아래 경로로도 다시 열 수 있습니다.
 
 - Command Palette에서 `Wave Scope: Open Active Audio File in Wave Scope`
 - 에디터 탭에서 `Reopen Editor With...` 후 `Wave Scope`
@@ -59,16 +59,16 @@ npm run compile
 
 - `src/extension.ts`: extension activation entry
 - `src/audioPreviewEditor.ts`: custom editor provider와 webview bootstrap
-- `media/audioPreview.js`: 재생, waveform interaction, spectrogram drawing
+- `src-webview/audioPreview.ts`: 재생, waveform interaction, spectrogram drawing source
 - `media/audioPreview.css`: 전체화면 웹뷰 스타일
 - `wasm/wave_core.zig`: freestanding wasm export entry
 - `wasm/wave_core/`: session, waveform, loudness, spectrogram responsibility별 Zig 모듈
 - `wasm/freestanding/include`: freestanding PFFFT 빌드를 위한 최소 C/NEON 호환 헤더
 - `wasm/third_party/libebur128`: EBU R128 loudness summary 측정을 위한 `libebur128` submodule
 - `wasm/third_party/pffft`: Bitbucket 원본 `pffft` submodule
-- `src-webview/sharedBuffers.js`: SAB/control slot layout helper
-- `src-webview/interactiveWaveformWorker.js`: PCM을 직접 읽어 pyramid를 만들고 waveform만 그리는 JS worker
-- `src-webview/audioAnalysisWorker.js`: 단일 Zig/WASM spectrogram/loudness compute worker orchestration
+- `src-webview/sharedBuffers.ts`: SAB/control slot layout helper
+- `src-webview/interactiveWaveformWorker.ts`: PCM을 직접 읽어 pyramid를 만들고 waveform만 그리는 worker source
+- `src-webview/audioAnalysisWorker.ts`: 단일 Zig/WASM spectrogram/loudness compute worker orchestration
 - `media/wave_core_simd.wasm`, `media/wave_core_fallback.wasm`: Zig freestanding wasm 산출물
 - `exampleFiles/sample-tone.wav`: 디버그용 샘플 오디오
 
