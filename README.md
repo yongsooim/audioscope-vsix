@@ -61,7 +61,8 @@ npm run compile
 - `src/audioPreviewEditor.ts`: custom editor provider와 webview bootstrap
 - `media/audioPreview.js`: 재생, waveform interaction, spectrogram drawing
 - `media/audioPreview.css`: 전체화면 웹뷰 스타일
-- `native/wave_core.zig`: waveform/spectrogram numeric kernels가 들어간 freestanding wasm 코어
+- `native/wave_core.zig`: freestanding wasm export entry
+- `native/wave_core/`: session, waveform, loudness, spectrogram responsibility별 Zig 모듈
 - `native/freestanding/include`: freestanding PFFFT 빌드를 위한 최소 C/NEON 호환 헤더
 - `native/third_party/libebur128`: EBU R128 loudness summary 측정을 위한 `libebur128` submodule
 - `native/third_party/pffft`: Bitbucket 원본 `pffft` submodule
