@@ -37,6 +37,18 @@
           "default": "high",
           "scope": "resource",
           "description": "Controls spectrogram analysis quality for Wave Preview. Higher presets request denser time/frequency detail."
+        },
+        "wavePreview.ffmpegPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Optional path or command name for the ffmpeg executable. Leave empty to resolve ffmpeg from PATH."
+        },
+        "wavePreview.ffprobePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Optional path or command name for the ffprobe executable. Leave empty to resolve ffprobe from PATH."
         }
       }
     },

@@ -66,6 +66,9 @@ const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875];
 
 const elements = {
+  mediaMetadataPanel: document.getElementById('media-metadata-panel'),
+  mediaMetadataSummary: document.getElementById('media-metadata-summary'),
+  mediaMetadataDetail: document.getElementById('media-metadata-detail'),
   waveformViewport: document.getElementById('waveform-viewport'),
   waveformCanvasHost: document.getElementById('waveform-canvas-host'),
   waveformHitTarget: document.getElementById('waveform-hit-target'),
@@ -124,9 +127,20 @@ const state = {
   audio: null,
   audioBlobUrl: null,
   sourceArrayBuffer: null,
+  sourceMimeType: null,
   waveformSamples: null,
   sourceFetchController: null,
   fetchController: null,
+  externalTools: createExternalToolStatusState(),
+  mediaMetadata: createMediaMetadataState('idle'),
+  playbackSourceKind: 'native',
+  analysisSourceKind: 'native',
+  decodeFallbackLoadToken: 0,
+  decodeFallbackPromise: null,
+  decodeFallbackResult: null,
+  decodeFallbackError: null,
+  resolveDecodeFallback: null,
+  rejectDecodeFallback: null,
   analysisWorker: null,
   analysisWorkerBootstrapUrl: null,
   analysisRuntimeReadyPromise: null,
@@ -217,7 +231,108 @@ window.addEventListener('message', (event) => {
 
   if (message?.type === 'loadAudio') {
     state.activeFile = message.body;
+    state.externalTools = normalizeExternalToolStatus(message.body?.externalTools);
     void loadAudioFile(message.body);
+    return;
+  }
+
+  if (message?.type === 'externalToolStatus') {
+    state.externalTools = normalizeExternalToolStatus(message.body);
+    renderMediaMetadata();
+    return;
+  }
+
+  if (message?.type === 'mediaMetadataReady') {
+    const loadToken = Number(message.body?.loadToken) || 0;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    state.mediaMetadata = {
+      detail: message.body?.metadata ?? null,
+      loadToken,
+      message: '',
+      status: 'ready',
+      summary: message.body?.metadata?.summary ?? null,
+    };
+    state.externalTools = normalizeExternalToolStatus(message.body?.metadata?.toolStatus ?? state.externalTools);
+    renderMediaMetadata();
+    return;
+  }
+
+  if (message?.type === 'mediaMetadataError') {
+    const loadToken = Number(message.body?.loadToken) || 0;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    state.externalTools = normalizeExternalToolStatus(message.body?.toolStatus ?? state.externalTools);
+    state.mediaMetadata = {
+      detail: null,
+      loadToken,
+      message: message.body?.message || state.externalTools.guidance || 'Metadata unavailable.',
+      status: 'error',
+      summary: null,
+    };
+    renderMediaMetadata();
+    return;
+  }
+
+  if (message?.type === 'decodeFallbackReady') {
+    const loadToken = Number(message.body?.loadToken) || 0;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    const audioBuffer = message.body?.audioBuffer;
+
+    if (!(audioBuffer instanceof ArrayBuffer)) {
+      state.rejectDecodeFallback?.(new Error('ffmpeg fallback did not return audio bytes.'));
+      state.decodeFallbackPromise = null;
+      state.decodeFallbackResult = null;
+      state.resolveDecodeFallback = null;
+      state.rejectDecodeFallback = null;
+      return;
+    }
+
+    state.decodeFallbackError = null;
+    state.decodeFallbackResult = {
+      audioBuffer,
+      byteLength: Number(message.body?.byteLength) || audioBuffer.byteLength,
+      mimeType: typeof message.body?.mimeType === 'string' && message.body.mimeType.length > 0
+        ? message.body.mimeType
+        : 'audio/wav',
+      source: message.body?.source === 'ffmpeg' ? 'ffmpeg' : 'ffmpeg',
+    };
+    state.resolveDecodeFallback?.(state.decodeFallbackResult);
+    state.decodeFallbackPromise = null;
+    state.resolveDecodeFallback = null;
+    state.rejectDecodeFallback = null;
+    renderMediaMetadata();
+    return;
+  }
+
+  if (message?.type === 'decodeFallbackError') {
+    const loadToken = Number(message.body?.loadToken) || 0;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    state.externalTools = normalizeExternalToolStatus(message.body?.toolStatus ?? state.externalTools);
+    state.decodeFallbackResult = null;
+    state.decodeFallbackError = {
+      loadToken,
+      message: message.body?.message || state.externalTools.guidance || 'ffmpeg decode fallback failed.',
+    };
+    state.rejectDecodeFallback?.(new Error(state.decodeFallbackError.message));
+    state.decodeFallbackPromise = null;
+    state.resolveDecodeFallback = null;
+    state.rejectDecodeFallback = null;
+    renderMediaMetadata();
   }
 });
 
@@ -301,6 +416,63 @@ function getEffectiveSpectrogramRenderConfig(config = state.spectrogramRenderCon
   };
 }
 
+function createExternalToolStatusState() {
+  return {
+    canDecodeFallback: false,
+    canReadMetadata: false,
+    ffmpegAvailable: false,
+    ffmpegCommand: 'ffmpeg',
+    ffmpegPath: null,
+    ffprobeAvailable: false,
+    ffprobeCommand: 'ffprobe',
+    ffprobePath: null,
+    fileBacked: false,
+    guidance: 'Install ffmpeg CLI to view metadata and decode unsupported audio files.',
+  };
+}
+
+function normalizeExternalToolStatus(status) {
+  const base = createExternalToolStatusState();
+
+  if (!status || typeof status !== 'object') {
+    return base;
+  }
+
+  return {
+    ...base,
+    canDecodeFallback: Boolean(status.canDecodeFallback),
+    canReadMetadata: Boolean(status.canReadMetadata),
+    ffmpegAvailable: Boolean(status.ffmpegAvailable),
+    ffmpegCommand: typeof status.ffmpegCommand === 'string' && status.ffmpegCommand.trim().length > 0
+      ? status.ffmpegCommand
+      : base.ffmpegCommand,
+    ffmpegPath: typeof status.ffmpegPath === 'string' && status.ffmpegPath.trim().length > 0
+      ? status.ffmpegPath
+      : null,
+    ffprobeAvailable: Boolean(status.ffprobeAvailable),
+    ffprobeCommand: typeof status.ffprobeCommand === 'string' && status.ffprobeCommand.trim().length > 0
+      ? status.ffprobeCommand
+      : base.ffprobeCommand,
+    ffprobePath: typeof status.ffprobePath === 'string' && status.ffprobePath.trim().length > 0
+      ? status.ffprobePath
+      : null,
+    fileBacked: Boolean(status.fileBacked),
+    guidance: typeof status.guidance === 'string' && status.guidance.trim().length > 0
+      ? status.guidance
+      : base.guidance,
+  };
+}
+
+function createMediaMetadataState(status = 'idle') {
+  return {
+    status,
+    summary: null,
+    detail: null,
+    message: '',
+    loadToken: 0,
+  };
+}
+
 function createLoudnessSummaryState(status = 'idle') {
   return {
     status,
@@ -369,6 +541,240 @@ function formatLoudnessValue(status, value, unit) {
   return `${normalizeLoudnessDisplayValue(value).toFixed(1)} ${unit}`;
 }
 
+function getActiveDecodeSourceKind() {
+  return state.playbackSourceKind === 'ffmpeg-fallback' || state.analysisSourceKind === 'ffmpeg-fallback'
+    ? 'ffmpeg-fallback'
+    : 'native';
+}
+
+function formatMetadataDecodeSourceLabel() {
+  return getActiveDecodeSourceKind() === 'ffmpeg-fallback'
+    ? 'ffmpeg fallback'
+    : 'native browser decode';
+}
+
+function formatMetadataSummarySegments(summary) {
+  if (!summary || !Array.isArray(summary.segments)) {
+    return [];
+  }
+
+  return summary.segments.filter((segment) => typeof segment === 'string' && segment.trim().length > 0);
+}
+
+function formatMetadataSummaryText() {
+  const metadata = state.mediaMetadata;
+  const summarySegments = formatMetadataSummarySegments(metadata?.summary);
+
+  if (!state.activeFile) {
+    return 'Open an audio file to inspect metadata.';
+  }
+
+  if (summarySegments.length > 0) {
+    return summarySegments.join(' • ');
+  }
+
+  if (metadata?.status === 'pending') {
+    return 'Loading metadata with ffprobe…';
+  }
+
+  if (metadata?.message) {
+    return metadata.message;
+  }
+
+  if (!state.externalTools.canReadMetadata) {
+    return state.externalTools.guidance || 'Install ffmpeg CLI to view metadata.';
+  }
+
+  return 'Metadata unavailable.';
+}
+
+function appendMetadataDetailSection(container, title) {
+  const section = document.createElement('section');
+  section.className = 'media-metadata-section';
+
+  if (title) {
+    const heading = document.createElement('h3');
+    heading.className = 'media-metadata-section-title';
+    heading.textContent = title;
+    section.append(heading);
+  }
+
+  container.append(section);
+  return section;
+}
+
+function appendMetadataDetailRow(container, label, value) {
+  if (!value) {
+    return;
+  }
+
+  const row = document.createElement('div');
+  row.className = 'media-metadata-row-detail';
+
+  const labelElement = document.createElement('span');
+  labelElement.className = 'media-metadata-row-label';
+  labelElement.textContent = label;
+
+  const valueElement = document.createElement('span');
+  valueElement.className = 'media-metadata-row-value';
+  valueElement.textContent = value;
+
+  row.append(labelElement, valueElement);
+  container.append(row);
+}
+
+function formatMetadataStreamSummary(stream) {
+  if (!stream || typeof stream !== 'object') {
+    return null;
+  }
+
+  const parts = [
+    stream.codecLongName || stream.codecName || null,
+    stream.sampleRateText || null,
+    Number.isFinite(stream.channels) && stream.channels > 0
+      ? stream.channelLayout
+        ? `${stream.channelLayout} (${stream.channels} ch)`
+        : stream.channels === 1
+          ? 'Mono'
+          : stream.channels === 2
+            ? 'Stereo'
+            : `${stream.channels} ch`
+      : null,
+    stream.sampleFormat || null,
+    stream.bitRateText || null,
+    stream.durationText || null,
+  ].filter(Boolean);
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  const prefix = stream.codecType
+    ? `${stream.codecType}${Number.isFinite(stream.index) ? ` #${stream.index}` : ''}`
+    : Number.isFinite(stream.index)
+      ? `stream #${stream.index}`
+      : 'stream';
+
+  return `${prefix}: ${parts.join(' • ')}`;
+}
+
+function formatMetadataTags(tags) {
+  if (!Array.isArray(tags) || tags.length === 0) {
+    return [];
+  }
+
+  return tags
+    .filter((tag) => typeof tag?.key === 'string' && typeof tag?.value === 'string')
+    .map((tag) => `${tag.key}: ${tag.value}`);
+}
+
+function formatMetadataChapters(chapters) {
+  if (!Array.isArray(chapters) || chapters.length === 0) {
+    return [];
+  }
+
+  return chapters.map((chapter, index) => {
+    const range = [chapter?.startText, chapter?.endText].filter(Boolean).join(' - ');
+    const title = chapter?.title || `Chapter ${index + 1}`;
+    return range ? `${title} (${range})` : title;
+  });
+}
+
+function appendMetadataListSection(container, title, items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return;
+  }
+
+  const section = appendMetadataDetailSection(container, title);
+  const list = document.createElement('div');
+  list.className = 'media-metadata-list';
+
+  items.forEach((item) => {
+    const line = document.createElement('div');
+    line.className = 'media-metadata-list-item';
+    line.textContent = item;
+    list.append(line);
+  });
+
+  section.append(list);
+}
+
+function renderMediaMetadata() {
+  if (!elements.mediaMetadataPanel || !elements.mediaMetadataSummary || !elements.mediaMetadataDetail) {
+    return;
+  }
+
+  const metadata = state.mediaMetadata ?? createMediaMetadataState('idle');
+  const summaryText = formatMetadataSummaryText();
+  const detailRoot = elements.mediaMetadataDetail;
+
+  elements.mediaMetadataPanel.dataset.state = metadata.status;
+  elements.mediaMetadataPanel.dataset.sourceKind = getActiveDecodeSourceKind();
+  elements.mediaMetadataSummary.textContent = summaryText;
+  elements.mediaMetadataSummary.title = summaryText;
+
+  detailRoot.replaceChildren();
+
+  const overviewSection = appendMetadataDetailSection(detailRoot, 'Overview');
+  const detail = metadata.detail;
+  const detailSummary = detail?.summary ?? null;
+
+  appendMetadataDetailRow(overviewSection, 'Decode', formatMetadataDecodeSourceLabel());
+  appendMetadataDetailRow(overviewSection, 'Probe', detail?.probeSource === 'ffprobe' ? 'ffprobe' : 'Unavailable');
+  appendMetadataDetailRow(overviewSection, 'Format', detail?.formatLongName || detail?.formatName || detailSummary?.containerText || null);
+  appendMetadataDetailRow(overviewSection, 'Codec', detailSummary?.codecText || null);
+  appendMetadataDetailRow(overviewSection, 'Sample Rate', detailSummary?.sampleRateText || null);
+  appendMetadataDetailRow(overviewSection, 'Channels', detailSummary?.channelText || null);
+  appendMetadataDetailRow(overviewSection, 'Bitrate', detailSummary?.bitrateText || null);
+  appendMetadataDetailRow(overviewSection, 'Duration', detailSummary?.durationText || null);
+  appendMetadataDetailRow(overviewSection, 'Size', detailSummary?.sizeText || null);
+
+  const toolSection = appendMetadataDetailSection(detailRoot, 'Tools');
+  appendMetadataDetailRow(
+    toolSection,
+    'ffmpeg',
+    state.externalTools.ffmpegAvailable
+      ? state.externalTools.ffmpegPath || state.externalTools.ffmpegCommand || 'ffmpeg'
+      : `Unavailable (${state.externalTools.ffmpegCommand || 'ffmpeg'})`,
+  );
+  appendMetadataDetailRow(
+    toolSection,
+    'ffprobe',
+    state.externalTools.ffprobeAvailable
+      ? state.externalTools.ffprobePath || state.externalTools.ffprobeCommand || 'ffprobe'
+      : `Unavailable (${state.externalTools.ffprobeCommand || 'ffprobe'})`,
+  );
+  appendMetadataDetailRow(
+    toolSection,
+    'Status',
+    state.decodeFallbackError?.message || detail?.guidance || metadata.message || state.externalTools.guidance || null,
+  );
+
+  const streamItems = Array.isArray(detail?.streams)
+    ? detail.streams
+      .map((stream) => formatMetadataStreamSummary(stream))
+      .filter(Boolean)
+    : [];
+  appendMetadataListSection(detailRoot, 'Streams', streamItems);
+  appendMetadataListSection(detailRoot, 'Tags', formatMetadataTags(detail?.tags));
+  appendMetadataListSection(detailRoot, 'Chapters', formatMetadataChapters(detail?.chapters));
+
+  const loudnessSection = appendMetadataDetailSection(detailRoot, 'Loudness');
+  const loudness = state.loudness ?? createLoudnessSummaryState('idle');
+  appendMetadataDetailRow(loudnessSection, 'Source', loudness.status === 'ready' ? `${loudness.source} • ${loudness.channelMode}` : null);
+  appendMetadataDetailRow(loudnessSection, 'Integrated', formatLoudnessValue(loudness.status, loudness.integratedLufs, 'LUFS'));
+  appendMetadataDetailRow(loudnessSection, 'Range', formatLoudnessValue(loudness.status, loudness.loudnessRangeLu, 'LU'));
+  appendMetadataDetailRow(loudnessSection, 'Sample Peak', formatLoudnessValue(loudness.status, loudness.samplePeakDbfs, 'dBFS'));
+  appendMetadataDetailRow(loudnessSection, 'True Peak', formatLoudnessValue(loudness.status, loudness.truePeakDbtp, 'dBTP'));
+  appendMetadataDetailRow(loudnessSection, 'Note', loudness.status === 'error' ? loudness.message : null);
+
+  if (detailRoot.childElementCount === 0) {
+    detailRoot.setAttribute('aria-hidden', 'true');
+  } else {
+    detailRoot.setAttribute('aria-hidden', 'false');
+  }
+}
+
 function renderLoudnessSummary() {
   if (
     !elements.loudnessSummary
@@ -392,6 +798,7 @@ function renderLoudnessSummary() {
   elements.loudnessRange.textContent = formatLoudnessValue(loudness.status, loudness.loudnessRangeLu, 'LU');
   elements.loudnessSamplePeak.textContent = formatLoudnessValue(loudness.status, loudness.samplePeakDbfs, 'dBFS');
   elements.loudnessTruePeak.textContent = formatLoudnessValue(loudness.status, loudness.truePeakDbtp, 'dBTP');
+  renderMediaMetadata();
 }
 
 window.addEventListener('keydown', (event) => {
@@ -434,6 +841,17 @@ async function loadAudioFile(payload) {
   state.loadToken = loadToken;
 
   destroySession();
+  state.externalTools = normalizeExternalToolStatus(payload?.externalTools);
+  state.mediaMetadata = {
+    ...createMediaMetadataState('pending'),
+    loadToken,
+    message: state.externalTools.canReadMetadata
+      ? 'Loading metadata with ffprobe…'
+      : state.externalTools.guidance || 'Install ffmpeg CLI to view metadata.',
+  };
+  state.playbackSourceKind = 'native';
+  state.analysisSourceKind = 'native';
+  renderMediaMetadata();
   setPendingLoudnessSummary();
   clearFatalStatus();
   setAnalysisStatus('Preparing playback…');
@@ -450,6 +868,7 @@ async function loadAudioFile(payload) {
   syncTransport();
   renderWaveformUi();
   renderSpectrogramScale();
+  requestMediaMetadata(loadToken, payload);
   void loadPlaybackSource(loadToken, payload, audio);
 }
 
@@ -540,8 +959,16 @@ function bindAudioEvents(audio, loadToken, payload) {
     }
 
     cancelDeferredAnalysis();
-    setLoudnessSummaryUnavailable('Unable to load audio playback.');
-    setFatalStatus('Unable to play this audio file.');
+
+    const nativeErrorMessage = getAudioElementErrorMessage(audio);
+
+    void recoverPlaybackWithDecodeFallback(
+      loadToken,
+      payload,
+      audio,
+      'playback-error',
+      nativeErrorMessage,
+    );
   });
 }
 
@@ -573,6 +1000,146 @@ function guessAudioMimeType(resourcePath) {
   }
 }
 
+function requestMediaMetadata(loadToken, payload) {
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  if (!payload?.fileBacked) {
+    state.mediaMetadata = {
+      ...createMediaMetadataState('error'),
+      loadToken,
+      message: 'Metadata is only available for local filesystem files.',
+    };
+    renderMediaMetadata();
+    return;
+  }
+
+  vscode.postMessage({
+    type: 'requestMediaMetadata',
+    body: { loadToken },
+  });
+}
+
+function setAnalysisSourceBuffer(arrayBuffer, mimeType, sourceKind) {
+  state.sourceArrayBuffer = arrayBuffer;
+  state.sourceMimeType = mimeType || state.sourceMimeType || 'application/octet-stream';
+  state.analysisSourceKind = sourceKind;
+  renderMediaMetadata();
+}
+
+function applyPlaybackSourceBuffer(loadToken, audio, audioData, mimeType, sourceKind) {
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  setAnalysisSourceBuffer(audioData, mimeType, sourceKind);
+
+  const audioBlob = new Blob([audioData], { type: mimeType || 'application/octet-stream' });
+  const audioBlobUrl = URL.createObjectURL(audioBlob);
+
+  if (state.audioBlobUrl) {
+    URL.revokeObjectURL(state.audioBlobUrl);
+  }
+
+  state.audioBlobUrl = audioBlobUrl;
+  state.playbackSourceKind = sourceKind;
+  audio.src = audioBlobUrl;
+  audio.load();
+  renderMediaMetadata();
+}
+
+function getAudioElementErrorMessage(audio) {
+  switch (audio?.error?.code) {
+    case MediaError.MEDIA_ERR_ABORTED:
+      return 'Audio loading was aborted.';
+    case MediaError.MEDIA_ERR_NETWORK:
+      return 'A network error interrupted audio playback.';
+    case MediaError.MEDIA_ERR_DECODE:
+      return 'The browser could not decode this audio file.';
+    case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+      return 'The browser does not support this audio format.';
+    default:
+      return 'Unable to play this audio file.';
+  }
+}
+
+function requestDecodeFallback(loadToken, payload, reason) {
+  if (loadToken !== state.loadToken) {
+    return Promise.reject(new Error('Decode fallback request is stale.'));
+  }
+
+  if (state.decodeFallbackResult && state.decodeFallbackLoadToken === loadToken) {
+    return Promise.resolve(state.decodeFallbackResult);
+  }
+
+  if (state.decodeFallbackPromise && state.decodeFallbackLoadToken === loadToken) {
+    return state.decodeFallbackPromise;
+  }
+
+  if (state.decodeFallbackError?.loadToken === loadToken) {
+    return Promise.reject(new Error(state.decodeFallbackError.message));
+  }
+
+  if (!state.externalTools.canDecodeFallback) {
+    return Promise.reject(new Error(state.externalTools.guidance || 'Install ffmpeg CLI to decode this audio file.'));
+  }
+
+  state.decodeFallbackLoadToken = loadToken;
+  state.decodeFallbackError = null;
+  state.decodeFallbackPromise = new Promise((resolve, reject) => {
+    state.resolveDecodeFallback = resolve;
+    state.rejectDecodeFallback = reject;
+  });
+  renderMediaMetadata();
+
+  vscode.postMessage({
+    type: 'requestDecodeFallback',
+    body: {
+      loadToken,
+      reason,
+      sourceUri: payload?.documentUri ?? payload?.sourceUri ?? '',
+    },
+  });
+
+  return state.decodeFallbackPromise;
+}
+
+async function recoverPlaybackWithDecodeFallback(loadToken, payload, audio, reason, nativeErrorMessage) {
+  if (loadToken !== state.loadToken || !audio) {
+    return false;
+  }
+
+  if (state.playbackSourceKind === 'ffmpeg-fallback') {
+    setLoudnessSummaryUnavailable(nativeErrorMessage || 'Unable to play this audio file.');
+    setFatalStatus(nativeErrorMessage || 'Unable to play this audio file.');
+    return false;
+  }
+
+  try {
+    setAnalysisStatus('Requesting ffmpeg decode fallback…');
+    const fallback = await requestDecodeFallback(loadToken, payload, reason);
+
+    if (loadToken !== state.loadToken || !audio) {
+      return true;
+    }
+
+    applyPlaybackSourceBuffer(loadToken, audio, fallback.audioBuffer, fallback.mimeType, 'ffmpeg-fallback');
+    setAnalysisStatus('Buffering playback…');
+    return true;
+  } catch (error) {
+    if (loadToken !== state.loadToken) {
+      return true;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    const fatalMessage = `${nativeErrorMessage || 'Unable to play this audio file.'} ${message}`.trim();
+    setLoudnessSummaryUnavailable(message);
+    setFatalStatus(fatalMessage);
+    return false;
+  }
+}
+
 async function loadPlaybackSource(loadToken, payload, audio) {
   const controller = new AbortController();
   state.sourceFetchController = controller;
@@ -592,19 +1159,8 @@ async function loadPlaybackSource(loadToken, payload, audio) {
       return;
     }
 
-    state.sourceArrayBuffer = audioData;
-
     const mimeType = response.headers.get('content-type') || guessAudioMimeType(payload.sourceUri);
-    const audioBlob = new Blob([audioData], { type: mimeType });
-    const audioBlobUrl = URL.createObjectURL(audioBlob);
-
-    if (state.audioBlobUrl) {
-      URL.revokeObjectURL(state.audioBlobUrl);
-    }
-
-    state.audioBlobUrl = audioBlobUrl;
-    audio.src = audioBlobUrl;
-    audio.load();
+    applyPlaybackSourceBuffer(loadToken, audio, audioData, mimeType, 'native');
     setAnalysisStatus('Buffering playback…');
   } catch (error) {
     if (loadToken !== state.loadToken || controller.signal.aborted) {
@@ -612,7 +1168,7 @@ async function loadPlaybackSource(loadToken, payload, audio) {
     }
 
     const message = error instanceof Error ? error.message : String(error);
-    setFatalStatus(`Unable to load this audio file: ${message}`);
+    await recoverPlaybackWithDecodeFallback(loadToken, payload, audio, 'fetch-error', `Unable to load this audio file: ${message}`);
   } finally {
     if (state.sourceFetchController === controller) {
       state.sourceFetchController = null;
@@ -788,7 +1344,26 @@ async function startAnalysis(loadToken, payload) {
 
     setAnalysisStatus('Decoding audio…');
 
-    const decodedAudio = await decodeAudioData(audioData);
+    let decodedAudio;
+
+    try {
+      decodedAudio = await decodeAudioData(audioData);
+    } catch (error) {
+      if (state.analysisSourceKind === 'ffmpeg-fallback') {
+        throw error;
+      }
+
+      setAnalysisStatus('Requesting ffmpeg decode fallback…');
+      const fallback = await requestDecodeFallback(loadToken, payload, 'analysis-decode-error');
+
+      if (loadToken !== state.loadToken) {
+        return;
+      }
+
+      setAnalysisSourceBuffer(fallback.audioBuffer, fallback.mimeType, 'ffmpeg-fallback');
+      decodedAudio = await decodeAudioData(fallback.audioBuffer);
+    }
+
     const monoSamples = downmixToMono(decodedAudio);
 
     if (loadToken !== state.loadToken) {
@@ -2916,6 +3491,8 @@ function destroySession() {
     state.fetchController = null;
   }
 
+  state.rejectDecodeFallback?.(new Error('Decode fallback request was cancelled.'));
+
   disposeAnalysisWorker();
   disposeWaveformRenderer();
   disposeSpectrogramSurface();
@@ -2943,7 +3520,18 @@ function destroySession() {
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
   state.sourceArrayBuffer = null;
+  state.sourceMimeType = null;
   state.waveformSamples = null;
+  state.externalTools = createExternalToolStatusState();
+  state.mediaMetadata = createMediaMetadataState('idle');
+  state.playbackSourceKind = 'native';
+  state.analysisSourceKind = 'native';
+  state.decodeFallbackLoadToken = 0;
+  state.decodeFallbackPromise = null;
+  state.decodeFallbackResult = null;
+  state.decodeFallbackError = null;
+  state.resolveDecodeFallback = null;
+  state.rejectDecodeFallback = null;
   state.waveformViewRange = { start: 0, end: 0 };
   state.waveformHoverClientPoint = null;
   state.waveformSeekPointerId = null;
@@ -2963,6 +3551,7 @@ function destroySession() {
   renderWaveformUi();
   renderSpectrogramMeta();
   renderLoudnessSummary();
+  renderMediaMetadata();
 }
 
 function disposeAnalysisWorker() {
