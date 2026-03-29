@@ -12,6 +12,7 @@ let runtimePromise = null;
 let requestQueue = Promise.resolve();
 let renderLoopActive = false;
 let pendingRenderRequest = null;
+let pendingPresentation = null;
 
 const surfaceState = {
   canvas: null,
@@ -64,7 +65,14 @@ self.onmessage = (event) => {
       pendingRenderRequest = message.body ?? null;
       void pumpRenderLoop();
       return;
+    case 'commitWaveformRender':
+      resolvePendingPresentation(message.body, true);
+      return;
+    case 'discardWaveformRender':
+      resolvePendingPresentation(message.body, false);
+      return;
     case 'disposeSession':
+      resolvePendingPresentation(null, false);
       enqueueRequest(async () => {
         const runtime = await getRuntime();
         disposeSession(runtime);
@@ -73,6 +81,7 @@ self.onmessage = (event) => {
       return;
     case 'dispose':
       pendingRenderRequest = null;
+      resolvePendingPresentation(null, false);
       surfaceState.context = null;
       surfaceState.canvas = null;
       analysisState = createEmptyAnalysisState();
@@ -262,7 +271,7 @@ async function pumpRenderLoop() {
       }
 
       const runtime = await getRuntime();
-      renderWaveform(runtime, request);
+      await renderWaveform(runtime, request);
     }
   } catch (error) {
     postError(error);
@@ -271,7 +280,7 @@ async function pumpRenderLoop() {
   }
 }
 
-function renderWaveform(runtime, request) {
+async function renderWaveform(runtime, request) {
   const module = runtime.module;
   const viewStart = clamp(Number(request?.viewStart) || 0, 0, analysisState.duration);
   const viewEnd = clamp(
@@ -286,6 +295,7 @@ function renderWaveform(runtime, request) {
     ? request.color
     : surfaceState.color;
   const visibleSpan = Number.isFinite(request?.visibleSpan) ? Number(request.visibleSpan) : Math.max(0, viewEnd - viewStart);
+  const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
   const columnCount = Math.max(1, Math.round(width * renderScale));
   const renderSpan = Math.max(1 / analysisState.sampleRate, viewEnd - viewStart);
   const samplesPerPixel = (renderSpan * analysisState.sampleRate) / columnCount;
@@ -312,13 +322,12 @@ function renderWaveform(runtime, request) {
   }
 
   const slice = getHeapF32View(module, analysisState.waveformOutputPointer, columnCount * 2);
-  drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample);
 
   self.postMessage({
     type: 'waveformReady',
     body: {
       columnCount,
-      generation: Number.isFinite(request?.generation) ? Number(request.generation) : 0,
+      generation,
       height,
       viewEnd,
       viewStart,
@@ -326,6 +335,14 @@ function renderWaveform(runtime, request) {
       width,
     },
   });
+
+  const shouldPresent = await waitForPresentationDecision(generation);
+
+  if (!shouldPresent) {
+    return;
+  }
+
+  drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample);
 }
 
 function drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample) {
@@ -423,6 +440,31 @@ function getRepresentativeSampleValue(slice, columnIndex) {
   }
 
   return clamp((minValue + maxValue) * 0.5, -1, 1);
+}
+
+function waitForPresentationDecision(generation) {
+  return new Promise((resolve) => {
+    pendingPresentation = {
+      generation,
+      resolve,
+    };
+  });
+}
+
+function resolvePendingPresentation(body, shouldPresent) {
+  if (!pendingPresentation) {
+    return;
+  }
+
+  const generation = Number(body?.generation);
+
+  if (Number.isFinite(generation) && pendingPresentation.generation !== generation) {
+    return;
+  }
+
+  const { resolve } = pendingPresentation;
+  pendingPresentation = null;
+  resolve(shouldPresent);
 }
 
 function ensureWaveformOutputCapacity(module, floatCount) {
