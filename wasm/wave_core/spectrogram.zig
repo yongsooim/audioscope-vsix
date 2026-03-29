@@ -36,6 +36,7 @@ pub fn freeScalogramResources() void {
 
 fn getFftResource(fft_size_i32: i32) ?*core.FftResource {
     const fft_size = @as(usize, @intCast(fft_size_i32));
+    const maximum_bin = @as(usize, @intCast(core.maxI32(2, @divTrunc(fft_size_i32, 2))));
     var current = core.g_session.fft_resources;
     while (current) |resource| : (current = resource.next) {
         if (resource.fft_size == fft_size) return resource;
@@ -44,7 +45,10 @@ fn getFftResource(fft_size_i32: i32) ?*core.FftResource {
     if (fft_size == 0) return null;
 
     const resource = core.allocator.create(core.FftResource) catch return null;
-    resource.* = .{ .fft_size = fft_size };
+    resource.* = .{
+        .fft_size = fft_size,
+        .maximum_bin = maximum_bin,
+    };
     errdefer {
         resource.deinit();
         core.allocator.destroy(resource);
@@ -55,9 +59,11 @@ fn getFftResource(fft_size_i32: i32) ?*core.FftResource {
     resource.output = core.makeAlignedF32Buffer(fft_size * @sizeOf(f32)) orelse return null;
     resource.work = core.makeAlignedF32Buffer(fft_size * @sizeOf(f32)) orelse return null;
     resource.window = core.allocator.alloc(f32, fft_size) catch return null;
-    const power_spectrum_length = @as(usize, @intCast(core.maxI32(2, @divTrunc(fft_size_i32, 2) + 1)));
+    const power_spectrum_length = maximum_bin + 1;
     resource.power_spectrum = core.allocator.alloc(f32, power_spectrum_length) catch return null;
     resource.low_power_spectrum = core.allocator.alloc(f32, power_spectrum_length) catch return null;
+    const half_fft_size = @as(f32, @floatFromInt(fft_size / 2));
+    resource.power_scale = 1.0 / (half_fft_size * half_fft_size);
 
     const denominator = @as(f32, @floatFromInt(fft_size - 1));
     for (resource.window, 0..) |*value, index| {
@@ -343,18 +349,28 @@ fn getScalogramResource(row_count: i32, min_frequency: f32, max_frequency: f32) 
 
 fn writeWindowedInput(resource: *core.FftResource, center_sample: i32) void {
     const input = resource.input.?;
-    @memset(input, 0);
-
     const fft_size_i32 = @as(i32, @intCast(resource.fft_size));
     const window_start = center_sample - @divTrunc(fft_size_i32, 2);
     const valid_start = core.clampi32(-window_start, 0, fft_size_i32);
     const valid_end = core.clampi32(core.g_session.sample_count - window_start, 0, fft_size_i32);
 
-    if (valid_end <= valid_start) return;
+    if (valid_end <= valid_start) {
+        @memset(input, 0);
+        return;
+    }
+
+    const valid_start_usize = @as(usize, @intCast(valid_start));
+    const valid_end_usize = @as(usize, @intCast(valid_end));
+    if (valid_start_usize > 0) {
+        @memset(input[0..valid_start_usize], 0);
+    }
+    if (valid_end_usize < input.len) {
+        @memset(input[valid_end_usize..], 0);
+    }
 
     const src = core.g_session.samples[@as(usize, @intCast(window_start + valid_start))..@as(usize, @intCast(window_start + valid_end))];
-    const dst = input[@as(usize, @intCast(valid_start))..@as(usize, @intCast(valid_end))];
-    const window = resource.window[@as(usize, @intCast(valid_start))..@as(usize, @intCast(valid_end))];
+    const dst = input[valid_start_usize..valid_end_usize];
+    const window = resource.window[valid_start_usize..valid_end_usize];
 
     var index: usize = 0;
     if (comptime core.simd_enabled) {
@@ -372,10 +388,9 @@ fn writeWindowedInput(resource: *core.FftResource, center_sample: i32) void {
 
 fn writeDecimatedInput(resource: *core.FftResource, center_sample: i32, decimation_factor: i32) void {
     const input = resource.input.?;
-    @memset(input, 0);
-
     const fft_size_i32 = @as(i32, @intCast(resource.fft_size));
     const decimated_window_start = center_sample - @divTrunc(fft_size_i32 * decimation_factor, 2);
+    const decimation_scale = 1.0 / @as(f32, @floatFromInt(decimation_factor));
 
     for (input, resource.window, 0..) |*slot, window_value, offset_usize| {
         const offset = @as(i32, @intCast(offset_usize));
@@ -389,26 +404,22 @@ fn writeDecimatedInput(resource: *core.FftResource, center_sample: i32, decimati
             }
         }
 
-        slot.* = (sum / @as(f32, @floatFromInt(decimation_factor))) * window_value;
+        slot.* = (sum * decimation_scale) * window_value;
     }
 }
 
 fn writePowerSpectrum(resource: *const core.FftResource, power_spectrum: []f32) void {
-    @memset(power_spectrum, 0);
-
     const output = resource.output.?;
-    const maximum_bin = @as(usize, @intCast(core.maxI32(2, @divTrunc(@as(i32, @intCast(resource.fft_size)), 2))));
-    const normalization_factor = @as(f32, @floatFromInt((resource.fft_size / 2) * (resource.fft_size / 2)));
 
     var bin: usize = 1;
-    while (bin < maximum_bin) : (bin += 1) {
+    while (bin < resource.maximum_bin) : (bin += 1) {
         const real = output[bin * 2];
         const imaginary = output[(bin * 2) + 1];
-        power_spectrum[bin] = ((real * real) + (imaginary * imaginary)) / normalization_factor;
+        power_spectrum[bin] = ((real * real) + (imaginary * imaginary)) * resource.power_scale;
     }
 }
 
-fn computeBandRms(power_spectrum: []const f32, range: core.BandRange) f32 {
+fn computeBandMeanPower(power_spectrum: []const f32, range: core.BandRange) f32 {
     const band_size = core.maxI32(1, range.end_bin - range.start_bin);
     var weighted_energy: f32 = 0.0;
     var total_weight: f32 = 0.0;
@@ -425,10 +436,10 @@ fn computeBandRms(power_spectrum: []const f32, range: core.BandRange) f32 {
         total_weight += weight;
     }
 
-    return @sqrt(weighted_energy / core.maxF32(total_weight, 1e-8));
+    return weighted_energy / core.maxF32(total_weight, 1e-8);
 }
 
-fn computeMelBandRms(power_spectrum: []const f32, band: core.MelBand, fft_size: i32, sample_rate: f32) f32 {
+fn computeMelBandMeanPower(power_spectrum: []const f32, band: core.MelBand, fft_size: i32, sample_rate: f32) f32 {
     const maximum_bin = core.maxI32(2, @divTrunc(fft_size, 2));
     const nyquist = sample_rate / 2.0;
     var weighted_energy: f32 = 0.0;
@@ -452,15 +463,15 @@ fn computeMelBandRms(power_spectrum: []const f32, band: core.MelBand, fft_size: 
         total_weight += weight;
     }
 
-    return @sqrt(weighted_energy / core.maxF32(total_weight, 1e-8));
+    return weighted_energy / core.maxF32(total_weight, 1e-8);
 }
 
-fn normalizeMagnitudeToDecibels(magnitude: f32) f32 {
-    const decibels = 20.0 * @log10(magnitude + 1e-7);
+fn normalizePowerToDecibels(power: f32) f32 {
+    const decibels = 10.0 * @log10(power + 1e-14);
     return (decibels - core.min_db) / (core.max_db - core.min_db);
 }
 
-fn computeScalogramKernelMagnitude(center_sample: i32, kernel: *const core.ScalogramRowKernel) f32 {
+fn computeScalogramKernelPower(center_sample: i32, kernel: *const core.ScalogramRowKernel) f32 {
     if (kernel.offsets.len == 0) return 0.0;
 
     const first_sample = center_sample + kernel.offsets[0];
@@ -520,7 +531,7 @@ fn computeScalogramKernelMagnitude(center_sample: i32, kernel: *const core.Scalo
         }
 
         if (norm <= 1e-8) return 0.0;
-        return @sqrt((real * real) + (imaginary * imaginary)) / @sqrt(norm);
+        return ((real * real) + (imaginary * imaginary)) / norm;
     }
 
     var real: f32 = 0.0;
@@ -540,7 +551,7 @@ fn computeScalogramKernelMagnitude(center_sample: i32, kernel: *const core.Scalo
     }
 
     if (norm <= 1e-8) return 0.0;
-    return @sqrt((real * real) + (imaginary * imaginary)) / @sqrt(norm);
+    return ((real * real) + (imaginary * imaginary)) / norm;
 }
 
 fn lerpColorChannel(start: f32, end: f32, t: f32) u8 {
@@ -663,7 +674,7 @@ fn renderStftDerivedTile(
         var row: i32 = 0;
         while (row < row_count) : (row += 1) {
             const normalized = switch (analysis_type) {
-                .mel => normalizeMagnitudeToDecibels(computeMelBandRms(
+                .mel => normalizePowerToDecibels(computeMelBandMeanPower(
                     power_spectrum,
                     layout.mel_bands[@as(usize, @intCast(row))],
                     fft_size,
@@ -677,7 +688,7 @@ fn renderStftDerivedTile(
                     else
                         base_range;
                     const active_power = if (use_low_band) low_power_spectrum else power_spectrum;
-                    break :blk normalizeMagnitudeToDecibels(computeBandRms(active_power, active_range));
+                    break :blk normalizePowerToDecibels(computeBandMeanPower(active_power, active_range));
                 },
                 .scalogram => 0.0,
             };
@@ -707,9 +718,7 @@ fn renderScalogramTile(
     const output = @as([*]u8, @ptrFromInt(@as(usize, @intCast(output_ptr))));
     const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(tile_end - tile_start)));
     const output_width = @as(usize, @intCast(column_count));
-
-    const center_samples = core.allocator.alloc(i32, @as(usize, @intCast(column_count))) catch return 0;
-    defer core.allocator.free(center_samples);
+    const center_samples = resource.ensureCenterSampleCapacity(column_count) catch return 0;
 
     var column_index: i32 = 0;
     while (column_index < column_count) : (column_index += 1) {
@@ -733,8 +742,8 @@ fn renderScalogramTile(
             var active_column: i32 = 0;
 
             while (active_column < column_count) : (active_column += 1) {
-                const normalized = normalizeMagnitudeToDecibels(
-                    computeScalogramKernelMagnitude(
+                const normalized = normalizePowerToDecibels(
+                    computeScalogramKernelPower(
                         center_samples[@as(usize, @intCast(active_column))],
                         kernel,
                     ),
