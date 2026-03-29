@@ -5,6 +5,7 @@ var exportedFunctionNames = [
   "wave_dispose_session",
   "wave_prepare_session",
   "wave_get_pcm_ptr",
+  "wave_measure_loudness_summary",
   "wave_build_waveform_pyramid",
   "wave_extract_waveform_slice",
   "wave_render_spectrogram_tile_rgba"
