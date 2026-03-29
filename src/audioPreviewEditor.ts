@@ -40,7 +40,7 @@ class AudioPreviewDocument implements vscode.CustomDocument {
 }
 
 export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorProvider<AudioPreviewDocument> {
-  public static readonly viewType = 'wavePreview.audioPreview';
+  public static readonly viewType = 'waveScope.audioPreview';
 
   public static register(context: vscode.ExtensionContext): vscode.Disposable {
     const provider = new AudioPreviewEditorProvider(context);
@@ -52,7 +52,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         },
         supportsMultipleEditorsPerDocument: true,
       }),
-      vscode.commands.registerCommand('wavePreview.openActiveAudioPreview', async (resource?: vscode.Uri) => {
+      vscode.commands.registerCommand('waveScope.openActiveAudioPreview', async (resource?: vscode.Uri) => {
         const target = resource ?? getActiveResource();
 
         if (!target) {
@@ -60,7 +60,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           return;
         }
 
-        if (!(await canOpenInWavePreview(target))) {
+        if (!(await canOpenInWaveScope(target))) {
           return;
         }
 
@@ -181,7 +181,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     }
 
     const spectrogramQuality = vscode.workspace
-      .getConfiguration('wavePreview', document.uri)
+      .getConfiguration('waveScope', document.uri)
       .get<'balanced' | 'high' | 'max'>('spectrogramQuality', 'high');
     const externalTools = await getExternalToolStatus(document.uri);
 
@@ -213,7 +213,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="${styleUri}" />
-    <title>Wave Preview</title>
+    <title>Wave Scope</title>
   </head>
   <body data-worker-src="${workerUri}" data-waveform-worker-src="${waveformWorkerUri}">
     <main class="app-shell">
@@ -367,7 +367,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
   }
 }
 
-async function canOpenInWavePreview(target: vscode.Uri): Promise<boolean> {
+async function canOpenInWaveScope(target: vscode.Uri): Promise<boolean> {
   const fileExtension = path.posix.extname(target.path).replace(/^\./, '').toLowerCase();
 
   if (KNOWN_AUDIO_EXTENSIONS.has(fileExtension)) {
@@ -390,7 +390,7 @@ async function canOpenInWavePreview(target: vscode.Uri): Promise<boolean> {
     return false;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    void vscode.window.showErrorMessage(`Wave Preview could not inspect this file: ${message}`);
+    void vscode.window.showErrorMessage(`Wave Scope could not inspect this file: ${message}`);
     return false;
   }
 }

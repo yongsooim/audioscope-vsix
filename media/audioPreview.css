@@ -917,7 +917,7 @@ body {
 }
 
 .play-toggle {
-  min-width: 62px;
+  min-width: 60px;
   padding: 7px 12px;
   border: 1px solid rgba(29, 78, 216, 0.22);
   border-radius: 999px;
@@ -1085,12 +1085,15 @@ body {
 }
 
 .time-readout {
-  min-width: 88px;
+  min-width: 60px;
   color: var(--fg);
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   text-align: right;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .loudness-summary {

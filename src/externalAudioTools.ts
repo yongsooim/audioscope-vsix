@@ -165,7 +165,7 @@ function getCliFilePath(resource: vscode.Uri): string | null {
 }
 
 function toToolCacheKey(resource: vscode.Uri): string {
-  const config = vscode.workspace.getConfiguration('wavePreview', resource);
+  const config = vscode.workspace.getConfiguration('waveScope', resource);
   const ffmpegCommand = normalizeConfiguredExecutable(config.get<string>('ffmpegPath', ''));
   const ffprobeCommand = normalizeConfiguredExecutable(config.get<string>('ffprobePath', ''));
 
@@ -173,7 +173,7 @@ function toToolCacheKey(resource: vscode.Uri): string {
 }
 
 function getConfiguredCommand(resource: vscode.Uri, settingKey: 'ffmpegPath' | 'ffprobePath', fallbackCommand: string): string {
-  const config = vscode.workspace.getConfiguration('wavePreview', resource);
+  const config = vscode.workspace.getConfiguration('waveScope', resource);
   const configured = normalizeConfiguredExecutable(config.get<string>(settingKey, ''));
   return configured || fallbackCommand;
 }
@@ -608,7 +608,7 @@ export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenRes
   if (!filePath) {
     return {
       kind: 'unsupported-resource',
-      message: 'Wave Preview can probe arbitrary files only from the local filesystem.',
+      message: 'Wave Scope can probe arbitrary files only from the local filesystem.',
       toolStatus,
     };
   }
@@ -616,7 +616,7 @@ export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenRes
   if (!toolStatus.ffprobeAvailable) {
     return {
       kind: 'missing-tools',
-      message: 'Install ffmpeg CLI to inspect arbitrary audio files before opening them in Wave Preview.',
+      message: 'Install ffmpeg CLI to inspect arbitrary audio files before opening them in Wave Scope.',
       toolStatus,
     };
   }

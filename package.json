@@ -1,6 +1,6 @@
 {
-  "name": "wave-preview",
-  "displayName": "Wave Preview",
+  "name": "wave-scope",
+  "displayName": "Wave Scope",
   "description": "VS Code custom audio editor with waveform, spectrogram, and playback controls.",
   "version": "0.0.1",
   "publisher": "local-dev",
@@ -18,14 +18,14 @@
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
-      "title": "Wave Preview",
+      "title": "Wave Scope",
       "properties": {
-        "wavePreview.openSampleOnStartupInDevelopment": {
+        "waveScope.openSampleOnStartupInDevelopment": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically open the bundled sample audio file in Wave Preview when the extension runs in development mode."
+          "description": "Automatically open the bundled sample audio file in Wave Scope when the extension runs in development mode."
         },
-        "wavePreview.spectrogramQuality": {
+        "waveScope.spectrogramQuality": {
           "type": "string",
           "enum": [
             "balanced",
@@ -34,15 +34,15 @@
           ],
           "default": "high",
           "scope": "resource",
-          "description": "Controls spectrogram analysis quality for Wave Preview. Higher presets request denser time/frequency detail."
+          "description": "Controls spectrogram analysis quality for Wave Scope. Higher presets request denser time/frequency detail."
         },
-        "wavePreview.ffmpegPath": {
+        "waveScope.ffmpegPath": {
           "type": "string",
           "default": "",
           "scope": "machine",
           "description": "Optional path or command name for the ffmpeg executable. Leave empty to resolve ffmpeg from PATH."
         },
-        "wavePreview.ffprobePath": {
+        "waveScope.ffprobePath": {
           "type": "string",
           "default": "",
           "scope": "machine",
@@ -52,15 +52,15 @@
     },
     "commands": [
       {
-        "command": "wavePreview.openActiveAudioPreview",
-        "title": "Open Active Audio File in Wave Preview",
-        "category": "Wave Preview"
+        "command": "waveScope.openActiveAudioPreview",
+        "title": "Open Active Audio File in Wave Scope",
+        "category": "Wave Scope"
       }
     ],
     "customEditors": [
       {
-        "viewType": "wavePreview.audioPreview",
-        "displayName": "Wave Preview",
+        "viewType": "waveScope.audioPreview",
+        "displayName": "Wave Scope",
         "selector": [
           {
             "filenamePattern": "*.wav"
@@ -102,15 +102,15 @@
   },
   "scripts": {
     "vscode:prepublish": "bun run compile",
-    "build:wave-core": "tsx ./scripts/build-wave-core.mts",
+    "build:wave-core": "zig build wave-core-artifacts",
     "build:webview": "tsx ./scripts/build-webview.mts",
-    "compile": "bun run build:wave-core && npm run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
+    "compile": "bun run build:wave-core && bun run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
     "watch": "tsc -w -p ./"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "@types/vscode": "^1.100.0",
-    "esbuild": "^0.27.4",
+    "rolldown": "^1.0.0-rc.12",
     "tsx": "^4.21.0",
     "typescript": "^5.9.2"
   }

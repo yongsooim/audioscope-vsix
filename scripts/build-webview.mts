@@ -1,22 +1,23 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build } from 'esbuild';
+import { build } from 'rolldown';
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..');
 
 await build({
-  entryPoints: [
-    path.join(projectRoot, 'src-webview', 'audioPreview.ts'),
-    path.join(projectRoot, 'src-webview', 'audioAnalysisWorker.ts'),
-    path.join(projectRoot, 'src-webview', 'interactiveWaveformWorker.ts'),
-  ],
-  outdir: path.join(projectRoot, 'media'),
-  bundle: true,
-  format: 'esm',
+  input: {
+    audioPreview: path.join(projectRoot, 'src-webview', 'audioPreview.ts'),
+    audioAnalysisWorker: path.join(projectRoot, 'src-webview', 'audioAnalysisWorker.ts'),
+    interactiveWaveformWorker: path.join(projectRoot, 'src-webview', 'interactiveWaveformWorker.ts'),
+  },
+  output: {
+    dir: path.join(projectRoot, 'media'),
+    entryFileNames: '[name].js',
+    format: 'esm',
+    sourcemap: false,
+  },
   platform: 'browser',
-  target: ['es2022'],
-  entryNames: '[name]',
-  sourcemap: false,
   logLevel: 'silent',
+  write: true,
 });

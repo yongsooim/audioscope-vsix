@@ -18,7 +18,7 @@ async function maybeOpenBundledSample(context: vscode.ExtensionContext): Promise
   didAttemptStartupPreview = true;
 
   const enabled = vscode.workspace
-    .getConfiguration('wavePreview')
+    .getConfiguration('waveScope')
     .get<boolean>('openSampleOnStartupInDevelopment', true);
 
   if (!enabled) {
@@ -32,6 +32,6 @@ async function maybeOpenBundledSample(context: vscode.ExtensionContext): Promise
     await vscode.commands.executeCommand('vscode.openWith', sampleUri, AudioPreviewEditorProvider.viewType);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`Wave Preview could not open the bundled sample file: ${message}`);
+    console.warn(`Wave Scope could not open the bundled sample file: ${message}`);
   }
 }
