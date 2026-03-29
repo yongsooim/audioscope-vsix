@@ -90,6 +90,8 @@ pub const WaveLevel = struct {
 
 pub const FftResource = struct {
     fft_size: usize = 0,
+    maximum_bin: usize = 0,
+    power_scale: f32 = 0.0,
     setup: ?*PffftSetup = null,
     input: ?[]align(16) f32 = null,
     output: ?[]align(16) f32 = null,
@@ -266,10 +268,21 @@ pub const ScalogramResource = struct {
     min_frequency: f32 = 0.0,
     max_frequency: f32 = 0.0,
     bank: ScalogramKernelBank = .{},
+    center_samples: []i32 = &.{},
     next: ?*ScalogramResource = null,
+
+    pub fn ensureCenterSampleCapacity(self: *ScalogramResource, column_count: i32) ![]i32 {
+        const required = @as(usize, @intCast(column_count));
+        if (self.center_samples.len < required) {
+            if (self.center_samples.len > 0) allocator.free(self.center_samples);
+            self.center_samples = try allocator.alloc(i32, required);
+        }
+        return self.center_samples[0..required];
+    }
 
     pub fn deinit(self: *ScalogramResource) void {
         self.bank.deinit();
+        if (self.center_samples.len > 0) allocator.free(self.center_samples);
         self.* = .{};
     }
 };
