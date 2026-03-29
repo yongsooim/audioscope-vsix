@@ -8,13 +8,24 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..');
 const freestandingIncludeDirectory = path.join(projectRoot, 'native', 'freestanding', 'include');
 const pffftDirectory = path.join(projectRoot, 'native', 'third_party', 'pffft');
+const libebur128Directory = path.join(projectRoot, 'native', 'third_party', 'libebur128');
+const libebur128IncludeDirectory = path.join(libebur128Directory, 'ebur128');
 const pffftSourcePath = path.join(pffftDirectory, 'pffft.c');
+const ebur128SourcePath = path.join(libebur128IncludeDirectory, 'ebur128.c');
 
 try {
   await fs.access(pffftSourcePath);
 } catch {
   throw new Error(
     'Missing native/third_party/pffft/pffft.c. Run `git submodule update --init --recursive` before building.',
+  );
+}
+
+try {
+  await fs.access(ebur128SourcePath);
+} catch {
+  throw new Error(
+    'Missing native/third_party/libebur128/ebur128/ebur128.c. Run `git submodule update --init --recursive` before building.',
   );
 }
 
@@ -55,6 +66,8 @@ const cCommonArgs = [
   freestandingIncludeDirectory,
   '-I',
   pffftDirectory,
+  '-I',
+  libebur128IncludeDirectory,
 ];
 
 const buildDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'wave-core-build-'));
@@ -81,6 +94,7 @@ try {
 
 async function buildWaveCore({ buildDirectory, name, mcpu, pffftArgs, objectName }) {
   const objectPath = path.join(buildDirectory, objectName);
+  const ebur128ObjectPath = path.join(buildDirectory, `${path.parse(name).name}_ebur128.o`);
 
   await runCommand('zig', [
     'cc',
@@ -92,9 +106,19 @@ async function buildWaveCore({ buildDirectory, name, mcpu, pffftArgs, objectName
     objectPath,
   ]);
 
+  await runCommand('zig', [
+    'cc',
+    ...cCommonArgs,
+    '-c',
+    ebur128SourcePath,
+    '-o',
+    ebur128ObjectPath,
+  ]);
+
   const args = [
     ...zigCommonArgs,
     objectPath,
+    ebur128ObjectPath,
     '-mcpu',
     mcpu,
     '-femit-bin=' + path.join(projectRoot, 'media', name),

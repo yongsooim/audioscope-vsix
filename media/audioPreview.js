@@ -109,6 +109,11 @@ const elements = {
   timeline: document.getElementById('timeline'),
   timelineHoverTooltip: document.getElementById('timeline-hover-tooltip'),
   timeReadout: document.getElementById('time-readout'),
+  loudnessSummary: document.getElementById('loudness-summary'),
+  loudnessIntegrated: document.getElementById('loudness-integrated'),
+  loudnessRange: document.getElementById('loudness-range'),
+  loudnessSamplePeak: document.getElementById('loudness-sample-peak'),
+  loudnessTruePeak: document.getElementById('loudness-true-peak'),
   analysisStatus: document.getElementById('analysis-status'),
   status: document.getElementById('status'),
 };
@@ -153,6 +158,7 @@ const state = {
     overlapRatio: 0.75,
   },
   analysis: null,
+  loudness: createLoudnessSummaryState('idle'),
   sessionVersion: 0,
   pcmSab: null,
   waveformRequestGeneration: 0,
@@ -202,6 +208,7 @@ if (
   renderWaveformUi();
   renderSpectrogramScale();
   renderSpectrogramMeta();
+  renderLoudnessSummary();
   vscode.postMessage({ type: 'ready' });
 }
 
@@ -294,6 +301,99 @@ function getEffectiveSpectrogramRenderConfig(config = state.spectrogramRenderCon
   };
 }
 
+function createLoudnessSummaryState(status = 'idle') {
+  return {
+    status,
+    integratedLufs: null,
+    loudnessRangeLu: null,
+    samplePeakDbfs: null,
+    truePeakDbtp: null,
+    source: null,
+    channelMode: null,
+    message: '',
+  };
+}
+
+function setPendingLoudnessSummary() {
+  state.loudness = createLoudnessSummaryState('pending');
+  renderLoudnessSummary();
+}
+
+function setReadyLoudnessSummary(summary) {
+  state.loudness = {
+    status: 'ready',
+    integratedLufs: Number(summary?.integratedLufs),
+    loudnessRangeLu: Number(summary?.loudnessRangeLu),
+    samplePeakDbfs: Number(summary?.samplePeakDbfs),
+    truePeakDbtp: Number(summary?.truePeakDbtp),
+    source: summary?.source ?? 'libebur128',
+    channelMode: summary?.channelMode ?? 'mono-downmix',
+    message: '',
+  };
+  renderLoudnessSummary();
+}
+
+function setLoudnessSummaryUnavailable(message = 'Loudness summary unavailable.') {
+  state.loudness = {
+    ...createLoudnessSummaryState('error'),
+    message,
+  };
+  renderLoudnessSummary();
+}
+
+function normalizeLoudnessDisplayValue(value) {
+  if (!Number.isFinite(value)) {
+    return value;
+  }
+
+  return Math.abs(value) < 0.05 ? 0 : value;
+}
+
+function formatLoudnessValue(status, value, unit) {
+  if (status === 'error') {
+    return 'Unavailable';
+  }
+
+  if (status !== 'ready') {
+    return '--';
+  }
+
+  if (value === Number.NEGATIVE_INFINITY) {
+    return '-∞';
+  }
+
+  if (!Number.isFinite(value)) {
+    return '--';
+  }
+
+  return `${normalizeLoudnessDisplayValue(value).toFixed(1)} ${unit}`;
+}
+
+function renderLoudnessSummary() {
+  if (
+    !elements.loudnessSummary
+    || !elements.loudnessIntegrated
+    || !elements.loudnessRange
+    || !elements.loudnessSamplePeak
+    || !elements.loudnessTruePeak
+  ) {
+    return;
+  }
+
+  const loudness = state.loudness ?? createLoudnessSummaryState('idle');
+  elements.loudnessSummary.dataset.state = loudness.status;
+  elements.loudnessSummary.title = loudness.message
+    || (
+      loudness.status === 'ready'
+        ? `${loudness.source} • ${loudness.channelMode}`
+        : ''
+    );
+  elements.loudnessIntegrated.textContent = formatLoudnessValue(loudness.status, loudness.integratedLufs, 'LUFS');
+  elements.loudnessRange.textContent = formatLoudnessValue(loudness.status, loudness.loudnessRangeLu, 'LU');
+  elements.loudnessSamplePeak.textContent = formatLoudnessValue(loudness.status, loudness.samplePeakDbfs, 'dBFS');
+  elements.loudnessTruePeak.textContent = formatLoudnessValue(loudness.status, loudness.truePeakDbtp, 'dBTP');
+}
+
 window.addEventListener('keydown', (event) => {
   if (!state.audio || event.defaultPrevented) {
     return;
@@ -334,6 +434,7 @@ async function loadAudioFile(payload) {
   state.loadToken = loadToken;
 
   destroySession();
+  setPendingLoudnessSummary();
   clearFatalStatus();
   setAnalysisStatus('Preparing playback…');
 
@@ -439,6 +540,7 @@ function bindAudioEvents(audio, loadToken, payload) {
     }
 
     cancelDeferredAnalysis();
+    setLoudnessSummaryUnavailable('Unable to load audio playback.');
     setFatalStatus('Unable to play this audio file.');
   });
 }
@@ -638,6 +740,7 @@ function scheduleDeferredAnalysis(loadToken, payload) {
 
 async function startAnalysis(loadToken, payload) {
   if (!analysisWorkerScriptUri || !waveformWorkerScriptUri) {
+    setLoudnessSummaryUnavailable('Analysis worker is unavailable.');
     setAnalysisStatus('Analysis worker is unavailable.', true);
     return;
   }
@@ -781,6 +884,7 @@ async function startAnalysis(loadToken, payload) {
     }
 
     const message = error instanceof Error ? error.message : String(error);
+    setLoudnessSummaryUnavailable(message);
     setAnalysisStatus(`Analysis unavailable: ${message}`, true);
   } finally {
     if (state.fetchController === controller) {
@@ -814,6 +918,7 @@ async function createAnalysisWorker(loadToken) {
     }
 
     disposeAnalysisWorker();
+    setLoudnessSummaryUnavailable(event.message || 'Unknown worker error.');
     setAnalysisStatus(`Analysis failed: ${event.message || 'Unknown worker error.'}`, true);
   });
   worker.postMessage({ type: 'bootstrapRuntime' });
@@ -889,6 +994,16 @@ function handleAnalysisWorkerMessage(loadToken, message) {
     renderSpectrogramMeta();
     requestOverviewSpectrogram({ force: true });
     scheduleSpectrogramRender({ force: true });
+    return;
+  }
+
+  if (message?.type === 'loudnessSummaryReady') {
+    setReadyLoudnessSummary(message.body);
+    return;
+  }
+
+  if (message?.type === 'loudnessSummaryError') {
+    setLoudnessSummaryUnavailable(message.body?.message ?? 'Failed to measure loudness summary.');
     return;
   }
 
@@ -977,6 +1092,7 @@ function handleAnalysisWorkerMessage(loadToken, message) {
 
   if (message?.type === 'error') {
     disposeAnalysisWorker();
+    setLoudnessSummaryUnavailable(message.body.message);
     setAnalysisStatus(`Analysis failed: ${message.body.message}`, true);
   }
 }
@@ -2839,12 +2955,14 @@ function destroySession() {
   state.analysisStartedForLoadToken = 0;
   state.sessionVersion = 0;
   state.analysis = null;
+  state.loudness = createLoudnessSummaryState('idle');
   state.waveformSurfaceReadyPromise = null;
   state.spectrogramSurfaceReadyPromise = null;
   hideWaveformHoverTooltip();
   hideSpectrogramHoverTooltip();
   renderWaveformUi();
   renderSpectrogramMeta();
+  renderLoudnessSummary();
 }
 
 function disposeAnalysisWorker() {
