@@ -45,6 +45,8 @@ const PffftTransform = enum(c_int) {
     real = 0,
     complex = 1,
 };
+const Ebur128State = opaque {};
+const ebur128_summary_mode: c_int = 127;
 
 extern fn pffft_new_setup(size: c_int, transform: PffftTransform) ?*PffftSetup;
 extern fn pffft_destroy_setup(setup: *PffftSetup) void;
@@ -57,6 +59,13 @@ extern fn pffft_transform_ordered(
 ) void;
 extern fn pffft_aligned_malloc(byte_count: usize) ?*anyopaque;
 extern fn pffft_aligned_free(ptr: ?*anyopaque) void;
+extern fn ebur128_init(channels: c_uint, samplerate: c_ulong, mode: c_int) ?*Ebur128State;
+extern fn ebur128_destroy(st: *?*Ebur128State) void;
+extern fn ebur128_add_frames_float(st: *Ebur128State, src: [*]const f32, frames: usize) c_int;
+extern fn ebur128_loudness_global(st: *Ebur128State, out: *f64) c_int;
+extern fn ebur128_loudness_range(st: *Ebur128State, out: *f64) c_int;
+extern fn ebur128_sample_peak(st: *Ebur128State, channel_number: c_uint, out: *f64) c_int;
+extern fn ebur128_true_peak(st: *Ebur128State, channel_number: c_uint, out: *f64) c_int;
 
 const AllocationHeader = extern struct {
     total_size: usize,
@@ -183,6 +192,26 @@ fn clampf32(value: f32, min_value: f32, max_value: f32) f32 {
 
 fn clampf64(value: f64, min_value: f64, max_value: f64) f64 {
     return @min(max_value, @max(min_value, value));
+}
+
+fn castSummaryValue(value: f64) f32 {
+    if (!std.math.isFinite(value)) {
+        return if (value < 0.0) -std.math.inf(f32) else std.math.inf(f32);
+    }
+
+    return @as(f32, @floatCast(value));
+}
+
+fn linearToDecibels(value: f64) f32 {
+    if (!std.math.isFinite(value)) {
+        return if (value < 0.0) -std.math.inf(f32) else std.math.inf(f32);
+    }
+
+    if (value <= 0.0) {
+        return -std.math.inf(f32);
+    }
+
+    return @as(f32, @floatCast(20.0 * (@log(value) / @log(@as(f64, 10.0)))));
 }
 
 fn clampi32(value: i32, min_value: i32, max_value: i32) i32 {
@@ -809,6 +838,41 @@ pub export fn wave_prepare_session(sample_count: i32, sample_rate: f32, duration
 pub export fn wave_get_pcm_ptr() i32 {
     if (g_session.samples.len == 0) return 0;
     return @as(i32, @intCast(@intFromPtr(g_session.samples.ptr)));
+}
+
+pub export fn wave_measure_loudness_summary(output_ptr: i32) i32 {
+    if (g_session.samples.len == 0 or output_ptr == 0 or g_session.sample_count <= 0 or g_session.sample_rate <= 0.0) {
+        return 0;
+    }
+
+    var state = ebur128_init(1, @as(c_ulong, @intFromFloat(@round(g_session.sample_rate))), ebur128_summary_mode);
+    if (state == null) {
+        return 0;
+    }
+
+    defer ebur128_destroy(&state);
+    const meter = state.?;
+
+    if (ebur128_add_frames_float(meter, g_session.samples.ptr, @as(usize, @intCast(g_session.sample_count))) != 0) {
+        return 0;
+    }
+
+    var integrated_lufs: f64 = 0.0;
+    var loudness_range_lu: f64 = 0.0;
+    var sample_peak: f64 = 0.0;
+    var true_peak: f64 = 0.0;
+
+    if (ebur128_loudness_global(meter, &integrated_lufs) != 0) return 0;
+    if (ebur128_loudness_range(meter, &loudness_range_lu) != 0) return 0;
+    if (ebur128_sample_peak(meter, 0, &sample_peak) != 0) return 0;
+    if (ebur128_true_peak(meter, 0, &true_peak) != 0) return 0;
+
+    const output: [*]f32 = @ptrFromInt(@as(usize, @intCast(output_ptr)));
+    output[0] = castSummaryValue(integrated_lufs);
+    output[1] = castSummaryValue(loudness_range_lu);
+    output[2] = linearToDecibels(sample_peak);
+    output[3] = linearToDecibels(true_peak);
+    return 1;
 }
 
 pub export fn wave_build_waveform_pyramid() i32 {
