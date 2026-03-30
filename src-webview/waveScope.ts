@@ -2,7 +2,7 @@ import {
   DISPLAY_MIN_DPR,
   TILE_COLUMN_COUNT,
 } from './sharedBuffers';
-import { createAudioTransport } from './audioTransport';
+import { createAudioTransport, type PlaybackSession } from './audioTransport';
 
 const vscode = acquireVsCodeApi();
 const analysisWorkerScriptUri = document.body.dataset.workerSrc;
@@ -64,75 +64,94 @@ const QUALITY_PRESETS = {
 const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 
+function requireElement<T extends HTMLElement>(id: string): T {
+  const element = document.getElementById(id);
+
+  if (!(element instanceof HTMLElement)) {
+    throw new Error(`Wave Scope is missing required element #${id}.`);
+  }
+
+  return element as T;
+}
+
+type TimeRange = {
+  end: number;
+  start: number;
+};
+
+interface WaveformAxisRenderOptions {
+  displayRange?: TimeRange;
+  renderRange?: TimeRange;
+  renderWidth?: number;
+}
+
 const elements = {
-  viewport: document.getElementById('wave-scope-viewport'),
-  wavePanel: document.getElementById('wave-panel'),
-  waveToolbar: document.getElementById('wave-toolbar'),
-  mediaMetadataPanel: document.getElementById('media-metadata-panel'),
-  mediaMetadataSummary: document.getElementById('media-metadata-summary'),
-  mediaMetadataDetail: document.getElementById('media-metadata-detail'),
-  waveToolbarInfo: document.getElementById('wave-toolbar-info'),
-  waveformViewport: document.getElementById('waveform-viewport'),
-  waveformCanvasHost: document.getElementById('waveform-canvas-host'),
-  waveformHitTarget: document.getElementById('waveform-hit-target'),
-  waveformHoverTooltip: document.getElementById('waveform-hover-tooltip'),
-  waveformSampleMarker: document.getElementById('waveform-sample-marker'),
-  waveformSelection: document.getElementById('waveform-selection'),
-  waveformProgress: document.getElementById('waveform-progress'),
-  waveformCursor: document.getElementById('waveform-cursor'),
-  waveformLoopStart: document.getElementById('waveform-loop-start'),
-  waveformLoopEnd: document.getElementById('waveform-loop-end'),
-  waveformAxis: document.getElementById('waveform-axis'),
-  waveformOverview: document.getElementById('waveform-overview'),
-  waveformOverviewThumb: document.getElementById('waveform-overview-thumb'),
-  waveHint: document.getElementById('wave-hint'),
-  waveLoopLabel: document.getElementById('wave-loop-label'),
-  waveZoomChip: document.getElementById('wave-zoom-chip'),
-  waveClearLoop: document.getElementById('wave-clear-loop'),
-  waveZoomOut: document.getElementById('wave-zoom-out'),
-  waveZoomReset: document.getElementById('wave-zoom-reset'),
-  waveZoomIn: document.getElementById('wave-zoom-in'),
-  waveFollow: document.getElementById('wave-follow'),
-  viewportSplitter: document.getElementById('viewport-splitter'),
-  spectrogramPanel: document.getElementById('spectrogram-panel'),
-  spectrogramStage: document.getElementById('spectrogram-stage'),
-  spectrogram: document.getElementById('spectrogram'),
-  spectrogramSelection: document.getElementById('spectrogram-selection'),
-  spectrogramProgress: document.getElementById('spectrogram-progress'),
-  spectrogramCursor: document.getElementById('spectrogram-cursor'),
-  spectrogramLoopStart: document.getElementById('spectrogram-loop-start'),
-  spectrogramLoopEnd: document.getElementById('spectrogram-loop-end'),
-  spectrogramMeta: document.getElementById('spectrogram-meta'),
-  spectrogramTypeSelect: document.getElementById('spectrogram-type-select'),
-  spectrogramFftSelect: document.getElementById('spectrogram-fft-select'),
-  spectrogramOverlapSelect: document.getElementById('spectrogram-overlap-select'),
-  spectrogramScaleSelect: document.getElementById('spectrogram-scale-select'),
-  spectrogramHoverTooltip: document.getElementById('spectrogram-hover-tooltip'),
-  spectrogramAxis: document.getElementById('spectrogram-axis'),
-  spectrogramGuides: document.getElementById('spectrogram-guides'),
-  spectrogramHitTarget: document.getElementById('spectrogram-hit-target'),
-  seekBackward: document.getElementById('seek-backward'),
-  playToggle: document.getElementById('play-toggle'),
-  seekForward: document.getElementById('seek-forward'),
-  timeline: document.getElementById('timeline'),
-  timelineHoverTooltip: document.getElementById('timeline-hover-tooltip'),
-  timeReadout: document.getElementById('time-readout'),
-  loudnessSummary: document.getElementById('loudness-summary'),
-  loudnessIntegrated: document.getElementById('loudness-integrated'),
-  loudnessRange: document.getElementById('loudness-range'),
-  loudnessSamplePeak: document.getElementById('loudness-sample-peak'),
-  loudnessTruePeak: document.getElementById('loudness-true-peak'),
-  analysisStatus: document.getElementById('analysis-status'),
-  status: document.getElementById('status'),
+  viewport: requireElement<HTMLElement>('wave-scope-viewport'),
+  wavePanel: requireElement<HTMLElement>('wave-panel'),
+  waveToolbar: requireElement<HTMLElement>('wave-toolbar'),
+  mediaMetadataPanel: requireElement<HTMLElement>('media-metadata-panel'),
+  mediaMetadataSummary: requireElement<HTMLElement>('media-metadata-summary'),
+  mediaMetadataDetail: requireElement<HTMLElement>('media-metadata-detail'),
+  waveToolbarInfo: requireElement<HTMLElement>('wave-toolbar-info'),
+  waveformViewport: requireElement<HTMLElement>('waveform-viewport'),
+  waveformCanvasHost: requireElement<HTMLElement>('waveform-canvas-host'),
+  waveformHitTarget: requireElement<HTMLElement>('waveform-hit-target'),
+  waveformHoverTooltip: requireElement<HTMLElement>('waveform-hover-tooltip'),
+  waveformSampleMarker: document.getElementById('waveform-sample-marker') as HTMLElement | null,
+  waveformSelection: requireElement<HTMLElement>('waveform-selection'),
+  waveformProgress: requireElement<HTMLElement>('waveform-progress'),
+  waveformCursor: requireElement<HTMLElement>('waveform-cursor'),
+  waveformLoopStart: requireElement<HTMLElement>('waveform-loop-start'),
+  waveformLoopEnd: requireElement<HTMLElement>('waveform-loop-end'),
+  waveformAxis: requireElement<HTMLElement>('waveform-axis'),
+  waveformOverview: requireElement<HTMLElement>('waveform-overview'),
+  waveformOverviewThumb: requireElement<HTMLElement>('waveform-overview-thumb'),
+  waveHint: requireElement<HTMLElement>('wave-hint'),
+  waveLoopLabel: requireElement<HTMLElement>('wave-loop-label'),
+  waveZoomChip: requireElement<HTMLElement>('wave-zoom-chip'),
+  waveClearLoop: requireElement<HTMLButtonElement>('wave-clear-loop'),
+  waveZoomOut: requireElement<HTMLButtonElement>('wave-zoom-out'),
+  waveZoomReset: requireElement<HTMLButtonElement>('wave-zoom-reset'),
+  waveZoomIn: requireElement<HTMLButtonElement>('wave-zoom-in'),
+  waveFollow: requireElement<HTMLInputElement>('wave-follow'),
+  viewportSplitter: requireElement<HTMLElement>('viewport-splitter'),
+  spectrogramPanel: requireElement<HTMLElement>('spectrogram-panel'),
+  spectrogramStage: requireElement<HTMLElement>('spectrogram-stage'),
+  spectrogram: requireElement<HTMLCanvasElement>('spectrogram'),
+  spectrogramSelection: requireElement<HTMLElement>('spectrogram-selection'),
+  spectrogramProgress: requireElement<HTMLElement>('spectrogram-progress'),
+  spectrogramCursor: requireElement<HTMLElement>('spectrogram-cursor'),
+  spectrogramLoopStart: requireElement<HTMLElement>('spectrogram-loop-start'),
+  spectrogramLoopEnd: requireElement<HTMLElement>('spectrogram-loop-end'),
+  spectrogramMeta: requireElement<HTMLElement>('spectrogram-meta'),
+  spectrogramTypeSelect: requireElement<HTMLSelectElement>('spectrogram-type-select'),
+  spectrogramFftSelect: requireElement<HTMLSelectElement>('spectrogram-fft-select'),
+  spectrogramOverlapSelect: requireElement<HTMLSelectElement>('spectrogram-overlap-select'),
+  spectrogramScaleSelect: requireElement<HTMLSelectElement>('spectrogram-scale-select'),
+  spectrogramHoverTooltip: requireElement<HTMLElement>('spectrogram-hover-tooltip'),
+  spectrogramAxis: requireElement<HTMLElement>('spectrogram-axis'),
+  spectrogramGuides: requireElement<HTMLElement>('spectrogram-guides'),
+  spectrogramHitTarget: requireElement<HTMLElement>('spectrogram-hit-target'),
+  seekBackward: requireElement<HTMLButtonElement>('seek-backward'),
+  playToggle: requireElement<HTMLButtonElement>('play-toggle'),
+  seekForward: requireElement<HTMLButtonElement>('seek-forward'),
+  timeline: requireElement<HTMLInputElement>('timeline'),
+  timelineHoverTooltip: requireElement<HTMLElement>('timeline-hover-tooltip'),
+  timeReadout: requireElement<HTMLElement>('time-readout'),
+  loudnessSummary: requireElement<HTMLElement>('loudness-summary'),
+  loudnessIntegrated: requireElement<HTMLElement>('loudness-integrated'),
+  loudnessRange: requireElement<HTMLElement>('loudness-range'),
+  loudnessSamplePeak: requireElement<HTMLElement>('loudness-sample-peak'),
+  loudnessTruePeak: requireElement<HTMLElement>('loudness-true-peak'),
+  analysisStatus: requireElement<HTMLElement>('analysis-status'),
+  status: requireElement<HTMLElement>('status'),
 };
 
 const state = {
   activeFile: null,
   loadToken: 0,
   audioTransport: null,
-  decodedAudioBuffer: null,
-  sourceArrayBuffer: null,
-  sourceMimeType: null,
+  playbackSession: null as PlaybackSession | null,
   waveformSamples: null,
   sourceFetchController: null,
   externalTools: createExternalToolStatusState(),
@@ -219,7 +238,7 @@ function ensureWaveformSampleMarkerElement() {
 ensureWaveformSampleMarkerElement();
 
 if (
-  typeof elements.spectrogram?.transferControlToOffscreen !== 'function'
+  typeof elements.spectrogram.transferControlToOffscreen !== 'function'
   || typeof OffscreenCanvas !== 'function'
 ) {
   setFatalStatus('OffscreenCanvas is required for Wave Scope.');
@@ -927,7 +946,7 @@ async function loadAudioFile(payload) {
   clearFatalStatus();
   setAnalysisStatus('Preparing playback…');
   state.audioTransport = createPlaybackTransport(loadToken);
-  state.decodedAudioBuffer = null;
+  state.playbackSession = null;
   state.waveformViewRange = { start: 0, end: 0 };
 
   state.waveformSurfaceReadyPromise = initializeWaveformSurface(loadToken);
@@ -1037,11 +1056,16 @@ function requestMediaMetadata(loadToken, payload) {
   });
 }
 
-function setAnalysisSourceBuffer(arrayBuffer, mimeType, sourceKind) {
-  state.sourceArrayBuffer = arrayBuffer;
-  state.sourceMimeType = mimeType || state.sourceMimeType || 'application/octet-stream';
+function setAnalysisSourceKind(sourceKind) {
   state.analysisSourceKind = sourceKind;
   renderMediaMetadata();
+}
+
+function clearDecodeFallbackCache() {
+  state.decodeFallbackPromise = null;
+  state.decodeFallbackResult = null;
+  state.resolveDecodeFallback = null;
+  state.rejectDecodeFallback = null;
 }
 
 function requestDecodeFallback(loadToken, payload, reason) {
@@ -1106,7 +1130,7 @@ async function loadDecodedAudioSource(loadToken, payload) {
       return;
     }
 
-    setAnalysisSourceBuffer(audioData, mimeType, sourceKind);
+    setAnalysisSourceKind(sourceKind);
     state.playbackSourceKind = sourceKind;
     renderMediaMetadata();
 
@@ -1131,7 +1155,7 @@ async function loadDecodedAudioSource(loadToken, payload) {
       audioData = fallback.audioBuffer;
       mimeType = fallback.mimeType;
       sourceKind = 'ffmpeg-fallback';
-      setAnalysisSourceBuffer(audioData, mimeType, sourceKind);
+      setAnalysisSourceKind(sourceKind);
       state.playbackSourceKind = sourceKind;
       renderMediaMetadata();
       setAnalysisStatus('Decoding audio…');
@@ -1142,17 +1166,20 @@ async function loadDecodedAudioSource(loadToken, payload) {
       return;
     }
 
-    state.decodedAudioBuffer = decodedAudio;
     state.playbackSourceKind = sourceKind;
-    state.analysisSourceKind = sourceKind;
+    setAnalysisSourceKind(sourceKind);
     renderMediaMetadata();
 
     const playbackSession = createPlaybackSession(decodedAudio);
+    state.playbackSession = playbackSession;
     await state.audioTransport?.load({
       audioBuffer: decodedAudio,
       playbackSession,
       workletModuleUrl: audioTransportProcessorScriptUri,
     });
+    clearDecodeFallbackCache();
+    audioData = new ArrayBuffer(0);
+    mimeType = '';
     state.playbackTransportKind = state.audioTransport?.getTransportKind?.() ?? state.playbackTransportKind;
     state.playbackTransportError =
       state.audioTransport?.getLastFallbackReason?.() ?? state.playbackTransportError;
@@ -1185,7 +1212,7 @@ async function loadDecodedAudioSource(loadToken, payload) {
         }
 
         state.playbackSourceKind = 'ffmpeg-fallback';
-        setAnalysisSourceBuffer(fallback.audioBuffer, fallback.mimeType, 'ffmpeg-fallback');
+        setAnalysisSourceKind('ffmpeg-fallback');
         state.playbackSourceKind = 'ffmpeg-fallback';
         renderMediaMetadata();
         setAnalysisStatus('Decoding audio…');
@@ -1196,16 +1223,17 @@ async function loadDecodedAudioSource(loadToken, payload) {
           return;
         }
 
-        state.decodedAudioBuffer = decodedAudio;
         state.playbackSourceKind = 'ffmpeg-fallback';
-        state.analysisSourceKind = 'ffmpeg-fallback';
+        setAnalysisSourceKind('ffmpeg-fallback');
         renderMediaMetadata();
         const playbackSession = createPlaybackSession(decodedAudio);
+        state.playbackSession = playbackSession;
         await state.audioTransport?.load({
           audioBuffer: decodedAudio,
           playbackSession,
           workletModuleUrl: audioTransportProcessorScriptUri,
         });
+        clearDecodeFallbackCache();
         state.playbackTransportKind = state.audioTransport?.getTransportKind?.() ?? state.playbackTransportKind;
         state.playbackTransportError =
           state.audioTransport?.getLastFallbackReason?.() ?? state.playbackTransportError;
@@ -1401,10 +1429,10 @@ async function startAnalysis(loadToken, payload) {
   }
 
   try {
-    const decodedAudio = state.decodedAudioBuffer;
+    const playbackSession = state.playbackSession;
 
-    if (!(decodedAudio instanceof AudioBuffer)) {
-      throw new Error('Decoded playback buffer is unavailable.');
+    if (!playbackSession) {
+      throw new Error('Decoded playback session is unavailable.');
     }
 
     if (loadToken !== state.loadToken) {
@@ -1430,7 +1458,7 @@ async function startAnalysis(loadToken, payload) {
       return;
     }
 
-    const monoSamples = downmixToMono(decodedAudio);
+    const monoSamples = downmixPlaybackSessionToMono(playbackSession);
 
     if (loadToken !== state.loadToken) {
       return;
@@ -1439,12 +1467,12 @@ async function startAnalysis(loadToken, payload) {
     state.waveformSamples = monoSamples;
 
     state.analysis = createSpectrogramAnalysisState({
-      duration: decodedAudio.duration,
+      duration: playbackSession.durationSeconds,
       quality: normalizeSpectrogramQuality(payload.spectrogramQuality),
       minFrequency: SPECTROGRAM_MIN_FREQUENCY,
-      maxFrequency: Math.min(SPECTROGRAM_MAX_FREQUENCY, decodedAudio.sampleRate / 2),
+      maxFrequency: Math.min(SPECTROGRAM_MAX_FREQUENCY, playbackSession.sourceSampleRate / 2),
       sampleCount: monoSamples.length,
-      sampleRate: decodedAudio.sampleRate,
+      sampleRate: playbackSession.sourceSampleRate,
     });
 
     ensureWaveformViewRange();
@@ -1470,10 +1498,10 @@ async function startAnalysis(loadToken, payload) {
     waveformWorker.postMessage({
       type: 'attachAudioSession',
       body: {
-        duration: decodedAudio.duration,
+        duration: playbackSession.durationSeconds,
         quality: state.analysis.quality,
         sampleCount: waveformWorkerSamples.length,
-        sampleRate: decodedAudio.sampleRate,
+        sampleRate: playbackSession.sourceSampleRate,
         samplesBuffer: waveformWorkerSamples.buffer,
         sessionVersion,
       },
@@ -1484,16 +1512,15 @@ async function startAnalysis(loadToken, payload) {
     analysisWorker.postMessage({
       type: 'attachAudioSession',
       body: {
-        duration: decodedAudio.duration,
+        duration: playbackSession.durationSeconds,
         quality: state.analysis.quality,
         sampleCount: analysisWorkerSamples.length,
-        sampleRate: decodedAudio.sampleRate,
+        sampleRate: playbackSession.sourceSampleRate,
         samplesBuffer: analysisWorkerSamples.buffer,
         sessionVersion,
       },
     }, [analysisWorkerSamples.buffer]);
 
-    state.decodedAudioBuffer = null;
     requestOverviewSpectrogram({ force: true });
     scheduleSpectrogramRender({ force: true });
   } catch (error) {
@@ -2387,7 +2414,7 @@ function renderWaveformUi() {
   scheduleSpectrogramRender();
 }
 
-function renderWaveformAxis(options = {}) {
+function renderWaveformAxis(options: WaveformAxisRenderOptions = {}) {
   const { displayRange, renderRange, renderWidth, viewportWidth } = getWaveformAxisRenderMetrics(options);
   const span = renderRange.end - renderRange.start;
 
@@ -3554,7 +3581,7 @@ function attachUiEvents() {
       return;
     }
 
-    const progress = Number(event.target.value);
+    const progress = Number(elements.timeline.value);
     const duration = getEffectiveDuration();
 
     if (!Number.isFinite(duration) || duration <= 0) {
@@ -3583,7 +3610,7 @@ function attachUiEvents() {
     zoomWaveformIn();
   });
   elements.waveFollow.addEventListener('change', (event) => {
-    state.followPlayback = event.target.checked;
+    state.followPlayback = elements.waveFollow.checked;
     syncTransport();
   });
   elements.waveClearLoop.addEventListener('click', () => {
@@ -3780,9 +3807,7 @@ function destroySession() {
   state.waveformRawSamplePlotMode = false;
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
-  state.decodedAudioBuffer = null;
-  state.sourceArrayBuffer = null;
-  state.sourceMimeType = null;
+  state.playbackSession = null;
   state.waveformSamples = null;
   state.externalTools = createExternalToolStatusState();
   state.mediaMetadata = createMediaMetadataState('idle');
@@ -3956,22 +3981,29 @@ async function decodeAudioData(arrayBuffer) {
   }
 }
 
-function downmixToMono(audioBuffer) {
-  const mono = new Float32Array(audioBuffer.length);
-  const { numberOfChannels } = audioBuffer;
+function downmixPlaybackSessionToMono(playbackSession: PlaybackSession): Float32Array {
+  const channelCount = Math.max(1, playbackSession.numberOfChannels);
+  const sampleCount = Math.max(0, playbackSession.sourceLength);
+  const mono = new Float32Array(sampleCount);
 
-  for (let channelIndex = 0; channelIndex < numberOfChannels; channelIndex += 1) {
-    const channelData = audioBuffer.getChannelData(channelIndex);
+  for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+    const channelBuffer = playbackSession.channelBuffers[channelIndex];
 
-    for (let sampleIndex = 0; sampleIndex < channelData.length; sampleIndex += 1) {
-      mono[sampleIndex] += channelData[sampleIndex] / numberOfChannels;
+    if (!(channelBuffer instanceof ArrayBuffer)) {
+      continue;
+    }
+
+    const channelData = new Float32Array(channelBuffer);
+
+    for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+      mono[sampleIndex] += (channelData[sampleIndex] ?? 0) / channelCount;
     }
   }
 
   return mono;
 }
 
-function createPlaybackSession(audioBuffer) {
+function createPlaybackSession(audioBuffer: AudioBuffer): PlaybackSession {
   const channelBuffers = [];
 
   for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
@@ -4168,7 +4200,7 @@ function getWaveformRenderRequestMetrics(displayRange = getWaveformRange()) {
   };
 }
 
-function getWaveformAxisRenderMetrics(options = {}) {
+function getWaveformAxisRenderMetrics(options: WaveformAxisRenderOptions = {}) {
   const displayRange = options.displayRange ?? getWaveformRange();
   const explicitRenderRange = options.renderRange;
   const explicitRenderWidth = options.renderWidth;
@@ -4329,7 +4361,7 @@ function hasWaveformAxisRenderCoverage(displayRange = getWaveformRange()) {
     return false;
   }
 
-  const { renderWidth } = getWaveformAxisRenderMetrics(displayRange);
+  const { renderWidth } = getWaveformAxisRenderMetrics({ displayRange });
 
   if (state.waveformAxisRenderWidth < (renderWidth - 1)) {
     return false;

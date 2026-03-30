@@ -229,6 +229,13 @@ function buildWaveformPyramid() {
   }
 
   analysisState.waveformData = buildInteractiveWaveformData(samples, { copy: false });
+  if (analysisState.waveformData) {
+    analysisState.waveformData = {
+      ...analysisState.waveformData,
+      // Keep the pyramid but release the full sample copy once we no longer need it for aggregation.
+      samples: null,
+    };
+  }
   analysisState.waveformBuilt = true;
 
   self.postMessage({

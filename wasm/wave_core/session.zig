@@ -38,7 +38,9 @@ pub export fn wave_dispose_session() void {
 
 pub export fn wave_prepare_session(sample_count: i32, sample_rate: f32, duration: f32) i32 {
     resetSessionState();
-    if (sample_count <= 0 or sample_rate <= 0.0 or duration <= 0.0) return 0;
+    if (sample_count <= 0 or !core.isFiniteF32(sample_rate) or !core.isFiniteF32(duration) or sample_rate <= 0.0 or duration <= 0.0) {
+        return 0;
+    }
 
     core.g_session.samples = core.allocator.alloc(f32, @as(usize, @intCast(sample_count))) catch {
         resetSessionState();
@@ -54,7 +56,7 @@ pub export fn wave_prepare_session(sample_count: i32, sample_rate: f32, duration
     return 1;
 }
 
-pub export fn wave_get_pcm_ptr() i32 {
+pub export fn wave_get_pcm_ptr() usize {
     if (core.g_session.samples.len == 0) return 0;
-    return @as(i32, @intCast(@intFromPtr(core.g_session.samples.ptr)));
+    return @intFromPtr(core.g_session.samples.ptr);
 }

@@ -8,7 +8,47 @@ const exportedFunctionNames = [
   'wave_build_waveform_pyramid',
   'wave_extract_waveform_slice',
   'wave_render_spectrogram_tile_rgba',
-];
+] as const;
+
+type ExportedFunctionName = (typeof exportedFunctionNames)[number];
+
+type WaveCoreExportedFunction = (...args: number[]) => number;
+
+type WaveCoreWasmExports = WebAssembly.Exports & {
+  memory: WebAssembly.Memory;
+} & Record<ExportedFunctionName, WaveCoreExportedFunction>;
+
+export interface WaveCoreModule {
+  HEAPF32: Float32Array;
+  HEAPU8: Uint8Array;
+  _free(pointer: number): number;
+  _malloc(byteLength: number): number;
+  _wave_build_waveform_pyramid(): number;
+  _wave_dispose_session(): number;
+  _wave_extract_waveform_slice(viewStart: number, viewEnd: number, columnCount: number, outputPointer: number): number;
+  _wave_get_pcm_ptr(): number;
+  _wave_measure_loudness_summary(outputPointer: number): number;
+  _wave_prepare_session(sampleCount: number, sampleRate: number, duration: number): number;
+  _wave_render_spectrogram_tile_rgba(
+    tileStart: number,
+    tileEnd: number,
+    columnCount: number,
+    rowCount: number,
+    fftSize: number,
+    decimationFactor: number,
+    minFrequency: number,
+    maxFrequency: number,
+    analysisType: number,
+    frequencyScale: number,
+    outputPointer: number,
+  ): number;
+  memory: WebAssembly.Memory;
+}
+
+export interface WaveCoreRuntime {
+  module: WaveCoreModule;
+  variant: string;
+}
 
 const wasmCandidates = [
   {
@@ -21,7 +61,7 @@ const wasmCandidates = [
   },
 ];
 
-let runtimePromise = null;
+let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 
 export async function loadWaveCoreRuntime() {
   if (!runtimePromise) {
@@ -32,13 +72,13 @@ export async function loadWaveCoreRuntime() {
 }
 
 async function instantiateWaveCoreRuntime() {
-  const errors = [];
+  const errors: string[] = [];
 
   for (const candidate of wasmCandidates) {
     try {
       const instance = await instantiateWasm(candidate.url);
       return {
-        module: createModuleFacade(instance.exports),
+        module: createModuleFacade(instance.exports as WaveCoreWasmExports),
         variant: candidate.variant,
       };
     } catch (error) {
@@ -49,14 +89,14 @@ async function instantiateWaveCoreRuntime() {
   throw new Error(`Failed to load wave core runtime. ${errors.join(' | ')}`);
 }
 
-async function instantiateWasm(url) {
+async function instantiateWasm(url: URL): Promise<WebAssembly.Instance> {
   const response = await fetch(url, { credentials: 'same-origin' });
 
   if (!response.ok) {
     throw new Error(`Unable to fetch ${url.pathname}: ${response.status}`);
   }
 
-  const imports = {};
+  const imports: WebAssembly.Imports = {};
 
   if (typeof WebAssembly.instantiateStreaming === 'function') {
     try {
@@ -72,9 +112,9 @@ async function instantiateWasm(url) {
   return instance;
 }
 
-function createModuleFacade(exports) {
-  const module = {};
-  let currentBuffer = null;
+function createModuleFacade(exports: WaveCoreWasmExports): WaveCoreModule {
+  const module = {} as WaveCoreModule;
+  let currentBuffer: ArrayBuffer | null = null;
 
   const refreshViews = () => {
     const memory = exports.memory;
@@ -94,6 +134,7 @@ function createModuleFacade(exports) {
 
   refreshViews();
   module.memory = exports.memory;
+  const moduleRecord = module as unknown as Record<string, WaveCoreExportedFunction>;
 
   for (const name of exportedFunctionNames) {
     const fn = exports[name];
@@ -102,7 +143,7 @@ function createModuleFacade(exports) {
       throw new Error(`Wave core export "${name}" is missing.`);
     }
 
-    module[`_${name}`] = (...args) => {
+    moduleRecord[`_${name}`] = (...args: number[]) => {
       const result = fn(...args);
       refreshViews();
       return result;

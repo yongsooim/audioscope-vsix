@@ -413,6 +413,10 @@ fn writeDecimatedInput(resource: *core.FftResource, center_sample: i32, decimati
 
 fn writePowerSpectrum(resource: *const core.FftResource, power_spectrum: []f32) void {
     const output = resource.output.?;
+    if (power_spectrum.len == 0) return;
+
+    power_spectrum[0] = 0.0;
+    power_spectrum[resource.maximum_bin] = 0.0;
 
     var bin: usize = 1;
     while (bin < resource.maximum_bin) : (bin += 1) {
@@ -652,12 +656,23 @@ fn renderStftDerivedTile(
     decimation_factor: i32,
     min_frequency: f32,
     max_frequency: f32,
-    output_ptr: i32,
+    output_ptr: usize,
 ) i32 {
-    const resource = getFftResource(fft_size) orelse return 0;
+    if (!core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
+        return 0;
+    }
 
-    const safe_min_frequency = core.maxF32(core.g_session.min_frequency, min_frequency);
-    const safe_max_frequency = core.minF32(core.g_session.max_frequency, max_frequency);
+    const resource = getFftResource(fft_size) orelse return 0;
+    const session_duration = @as(f64, core.g_session.duration);
+    const minimum_tile_span = 1.0 / @as(f64, core.g_session.sample_rate);
+    const maximum_tile_start = @max(0.0, session_duration - minimum_tile_span);
+    const clamped_tile_start = core.clampf64(tile_start, 0.0, maximum_tile_start);
+    const clamped_tile_end = core.clampf64(tile_end, clamped_tile_start + minimum_tile_span, session_duration);
+    const safe_min_frequency = core.clampf32(min_frequency, core.g_session.min_frequency, core.g_session.max_frequency);
+    const safe_max_frequency = core.clampf32(max_frequency, safe_min_frequency, core.g_session.max_frequency);
+    if (safe_max_frequency <= safe_min_frequency) {
+        return 0;
+    }
     const layout = getBandLayoutResource(
         analysis_type,
         frequency_scale,
@@ -667,8 +682,8 @@ fn renderStftDerivedTile(
         safe_min_frequency,
         safe_max_frequency,
     ) orelse return 0;
-    const output = @as([*]u8, @ptrFromInt(@as(usize, @intCast(output_ptr))));
-    const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(tile_end - tile_start)));
+    const output = @as([*]u8, @ptrFromInt(output_ptr));
+    const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(clamped_tile_end - clamped_tile_start)));
     const output_width = @as(usize, @intCast(column_count));
     const power_spectrum = resource.power_spectrum;
     const low_power_spectrum = resource.low_power_spectrum;
@@ -679,7 +694,7 @@ fn renderStftDerivedTile(
             0.5
         else
             (@as(f64, @floatFromInt(column_index)) + 0.5) / @as(f64, @floatFromInt(column_count));
-        const center_time = tile_start + (center_ratio * @as(f64, safe_tile_span));
+        const center_time = clamped_tile_start + (center_ratio * @as(f64, safe_tile_span));
         const center_sample = @as(i32, @intFromFloat(@round(center_time * @as(f64, core.g_session.sample_rate))));
         const input = resource.input.?;
         const output_buffer = resource.output.?;
@@ -734,14 +749,27 @@ fn renderScalogramTile(
     row_count: i32,
     min_frequency: f32,
     max_frequency: f32,
-    output_ptr: i32,
+    output_ptr: usize,
 ) i32 {
-    const safe_min_frequency = core.maxF32(core.g_session.min_frequency, min_frequency);
-    const safe_max_frequency = core.minF32(core.g_session.max_frequency, max_frequency);
+    if (!core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
+        return 0;
+    }
+
+    const session_duration = @as(f64, core.g_session.duration);
+    const minimum_tile_span = 1.0 / @as(f64, core.g_session.sample_rate);
+    const maximum_tile_start = @max(0.0, session_duration - minimum_tile_span);
+    const clamped_tile_start = core.clampf64(tile_start, 0.0, maximum_tile_start);
+    const clamped_tile_end = core.clampf64(tile_end, clamped_tile_start + minimum_tile_span, session_duration);
+    const safe_min_frequency = core.clampf32(min_frequency, core.g_session.min_frequency, core.g_session.max_frequency);
+    const safe_max_frequency = core.clampf32(max_frequency, safe_min_frequency, core.g_session.max_frequency);
+    if (safe_max_frequency <= safe_min_frequency) {
+        return 0;
+    }
+
     const resource = getScalogramResource(row_count, safe_min_frequency, safe_max_frequency) orelse return 0;
     const kernel_bank = &resource.bank;
-    const output = @as([*]u8, @ptrFromInt(@as(usize, @intCast(output_ptr))));
-    const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(tile_end - tile_start)));
+    const output = @as([*]u8, @ptrFromInt(output_ptr));
+    const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(clamped_tile_end - clamped_tile_start)));
     const output_width = @as(usize, @intCast(column_count));
     const center_samples = resource.ensureCenterSampleCapacity(column_count) catch return 0;
 
@@ -751,7 +779,7 @@ fn renderScalogramTile(
             0.5
         else
             (@as(f64, @floatFromInt(column_index)) + 0.5) / @as(f64, @floatFromInt(column_count));
-        const center_time = tile_start + (center_ratio * @as(f64, safe_tile_span));
+        const center_time = clamped_tile_start + (center_ratio * @as(f64, safe_tile_span));
         center_samples[@as(usize, @intCast(column_index))] = @as(i32, @intFromFloat(@round(center_time * @as(f64, core.g_session.sample_rate))));
     }
 
@@ -793,9 +821,9 @@ pub export fn wave_render_spectrogram_tile_rgba(
     max_frequency: f32,
     analysis_type_value: i32,
     frequency_scale_value: i32,
-    output_ptr: i32,
+    output_ptr: usize,
 ) i32 {
-    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or tile_end <= tile_start) {
+    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or decimation_factor <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or !core.isFiniteF32(core.g_session.duration) or core.g_session.sample_rate <= 0.0 or core.g_session.duration <= 0.0 or !core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or tile_end <= tile_start) {
         return 0;
     }
 
