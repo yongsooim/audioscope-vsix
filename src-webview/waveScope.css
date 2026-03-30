@@ -135,7 +135,7 @@ body {
   left: 0;
   z-index: 24;
   display: grid;
-  gap: 10px;
+  gap: 16px;
   width: min(280px, calc(100vw - (var(--surface-inline-padding) * 2)));
   max-height: min(35.2vh, 272px);
   padding: 10px 12px;
@@ -1000,8 +1000,8 @@ body {
 }
 
 .transport-rate-select {
-  min-width: 58px;
-  padding: 5px 22px 5px 10px;
+  min-width: 62px;
+  padding: 5px 18px;
   border: 1px solid rgba(96, 165, 250, 0.22);
   border-radius: 999px;
   background-color: rgba(10, 17, 31, 0.98);
@@ -1016,7 +1016,7 @@ body {
     linear-gradient(180deg, rgba(17, 27, 48, 0.98) 0%, rgba(10, 17, 31, 0.98) 100%),
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath fill='%23dbeafe' d='M2 3.5 5 6.5 8 3.5'/%3E%3C/svg%3E");
   background-repeat: no-repeat, no-repeat;
-  background-position: 0 0, calc(100% - 8px) 50%;
+  background-position: 0 0, calc(100% - 7px) 50%;
   background-size: auto, 10px 10px;
   cursor: pointer;
 }
@@ -1024,6 +1024,12 @@ body {
 .transport-rate-select:disabled {
   cursor: default;
   opacity: 0.6;
+}
+
+.transport-rate-select:focus,
+.transport-rate-select:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .timeline {

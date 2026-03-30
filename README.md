@@ -4,7 +4,19 @@
 
 Wave Scope is a custom read-only audio viewer for VS Code. Open a supported audio file and inspect timing, frequency content, playback position, loop ranges, metadata, and loudness without leaving the editor.
 
-> For richer metadata and decode fallback on local files, install the `ffmpeg` CLI tools including `ffprobe`: [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
+ For metadata and decode fallback, install the `ffmpeg` CLI first.
+
+ macOS
+ ```bash
+ brew install ffmpeg
+ ```
+
+ Windows
+ ```powershell
+ winget install --id Gyan.FFmpeg --exact
+ ```
+
+ Other platforms: [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 
 | Inspect | Navigate | Analyze |
 | --- | --- | --- |
@@ -22,7 +34,7 @@ Wave Scope is a custom read-only audio viewer for VS Code. Open a supported audi
 
 ## Supported Formats
 
-`Wave Scope` registers as the default editor for these file types:
+`Wave Scope` registers as the default editor for these file types (with ffmpeg decoder):
 
 - `.wav`
 - `.wave`
@@ -39,7 +51,7 @@ Wave Scope is a custom read-only audio viewer for VS Code. Open a supported audi
 ## Requirements
 
 - VS Code `1.100.0` or later
-- Optional but recommended: `ffmpeg` and `ffprobe` for richer metadata and decode fallback on local filesystem files
+- Optional but recommended: `ffmpeg` CLI tools including `ffprobe` for richer metadata and decode fallback on local filesystem files
 
 ## Getting Started
 
@@ -65,6 +77,12 @@ Wave Scope works out of the box for formats the runtime can decode natively. Ins
 
 - richer metadata via `ffprobe`
 - decode fallback for files the runtime cannot open directly
+
+Quick install examples:
+
+- macOS (Homebrew): [`brew install ffmpeg`](https://formulae.brew.sh/formula/ffmpeg)
+- Windows (winget): [`winget install --id Gyan.FFmpeg --exact`](https://github.com/microsoft/winget-pkgs/tree/master/manifests/g/Gyan/FFmpeg)
+- Other platforms: use your package manager of choice from [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 
 If the binaries are not on `PATH`, configure them with:
 

@@ -143,6 +143,8 @@ interface ExecutableStatus {
   version: string | null;
 }
 
+const FFMPEG_CLI_INSTALL_GUIDANCE = 'Install ffmpeg CLI first: brew install ffmpeg or winget install --id Gyan.FFmpeg --exact.';
+
 interface ResolvedExternalTools {
   ffmpeg: ExecutableStatus;
   ffprobe: ExecutableStatus;
@@ -304,15 +306,15 @@ function buildExternalToolGuidance(fileBacked: boolean, tools: ResolvedExternalT
   }
 
   if (!tools.ffprobe.available && !tools.ffmpeg.available) {
-    return 'Install ffmpeg CLI to view metadata and decode unsupported audio files.';
+    return `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata and decode fallback for local files.`;
   }
 
   if (!tools.ffprobe.available) {
-    return 'Install ffmpeg CLI to view metadata.';
+    return `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata via ffprobe.`;
   }
 
   if (!tools.ffmpeg.available) {
-    return 'Install ffmpeg CLI to decode unsupported audio files.';
+    return `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables decode fallback.`;
   }
 
   return 'Using installed ffmpeg CLI tools.';

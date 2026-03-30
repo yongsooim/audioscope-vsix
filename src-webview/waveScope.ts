@@ -26,6 +26,9 @@ const VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX = 140;
 const VIEWPORT_RATIO_MIN = 0.15;
 const VIEWPORT_RATIO_MAX = 0.85;
 const FFMPEG_DOWNLOAD_URL = 'https://ffmpeg.org/download.html';
+const FFMPEG_HOMEBREW_URL = 'https://formulae.brew.sh/formula/ffmpeg';
+const FFMPEG_WINGET_URL = 'https://github.com/microsoft/winget-pkgs/tree/master/manifests/g/Gyan/FFmpeg';
+const FFMPEG_CLI_INSTALL_GUIDANCE = 'Install ffmpeg CLI first: brew install ffmpeg or winget install --id Gyan.FFmpeg --exact.';
 
 const WAVEFORM_COLOR = '#8ccadd';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
@@ -454,7 +457,7 @@ function createExternalToolStatusState() {
     ffprobePath: null,
     ffprobeVersion: null,
     fileBacked: false,
-    guidance: 'Install ffmpeg CLI to view metadata and decode unsupported audio files.',
+    guidance: `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata and decode fallback for local files.`,
   };
 }
 
@@ -639,7 +642,7 @@ function formatMetadataSummaryText() {
   }
 
   if (!state.externalTools.canReadMetadata) {
-    return state.externalTools.guidance || 'Install ffmpeg CLI to view metadata.';
+    return state.externalTools.guidance || `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata for local files.`;
   }
 
   return 'Metadata unavailable.';
@@ -686,7 +689,15 @@ function getMissingToolInstallLinks(toolName) {
 
   return [
     {
-      label: 'Install',
+      label: 'brew',
+      url: FFMPEG_HOMEBREW_URL,
+    },
+    {
+      label: 'winget',
+      url: FFMPEG_WINGET_URL,
+    },
+    {
+      label: 'download',
       url: FFMPEG_DOWNLOAD_URL,
     },
   ];
@@ -1013,7 +1024,7 @@ async function loadAudioFile(payload) {
     loadToken,
     message: state.externalTools.canReadMetadata
       ? 'Loading metadata with ffprobe…'
-      : state.externalTools.guidance || 'Install ffmpeg CLI to view metadata.',
+      : state.externalTools.guidance || `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata for local files.`,
   };
   state.playbackSourceKind = 'native';
   state.analysisSourceKind = 'native';
@@ -1164,7 +1175,7 @@ function requestDecodeFallback(loadToken, payload, reason) {
   }
 
   if (!state.externalTools.canDecodeFallback) {
-    return Promise.reject(new Error(state.externalTools.guidance || 'Install ffmpeg CLI to decode this audio file.'));
+    return Promise.reject(new Error(state.externalTools.guidance || `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables decode fallback.`));
   }
 
   state.decodeFallbackLoadToken = loadToken;
