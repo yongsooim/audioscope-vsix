@@ -2,17 +2,13 @@ import {
   DISPLAY_MIN_DPR,
   TILE_COLUMN_COUNT,
 } from './sharedBuffers';
+import { createAudioTransport } from './audioTransport';
 
 const vscode = acquireVsCodeApi();
 const analysisWorkerScriptUri = document.body.dataset.workerSrc;
 const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc;
+const audioTransportProcessorScriptUri = document.body.dataset.audioTransportProcessorSrc;
 const DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
-const HAS_SHARED_RUNTIME_SUPPORT =
-  typeof SharedArrayBuffer === 'function'
-  && window.crossOriginIsolated
-  && typeof Worker !== 'undefined';
-const TRANSPORT_MODE_OVERRIDE_KEY = 'waveScope.transportModeOverride';
-const RUNTIME_TRANSPORT_MODE = getRuntimeTransportMode();
 
 const SPECTROGRAM_MIN_FREQUENCY = 20;
 const SPECTROGRAM_MAX_FREQUENCY = 20000;
@@ -43,11 +39,8 @@ const LOOP_SELECTION_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const LOOP_HANDLE_WIDTH_PX = 12;
 const LOOP_WRAP_EPSILON_SECONDS = 1 / 120;
-const SEEK_END_EPSILON_SECONDS = 1 / 120;
 const ANALYSIS_IDLE_TIMEOUT_MS = 1500;
 const ANALYSIS_FALLBACK_DELAY_MS = 240;
-const SEEK_COMMIT_TOLERANCE_SECONDS = 0.02;
-const SEEK_COMMIT_TIMEOUT_MS = 250;
 const WAVEFORM_TOP_PADDING_PX = 10;
 const WAVEFORM_BOTTOM_PADDING_PX = 10;
 const WAVEFORM_AMPLITUDE_HEIGHT_RATIO = 0.38;
@@ -136,17 +129,18 @@ const elements = {
 const state = {
   activeFile: null,
   loadToken: 0,
-  audio: null,
-  audioBlobUrl: null,
+  audioTransport: null,
+  decodedAudioBuffer: null,
   sourceArrayBuffer: null,
   sourceMimeType: null,
   waveformSamples: null,
   sourceFetchController: null,
-  fetchController: null,
   externalTools: createExternalToolStatusState(),
   mediaMetadata: createMediaMetadataState('idle'),
   mediaMetadataDetailOpen: false,
   playbackSourceKind: 'native',
+  playbackTransportKind: 'unavailable',
+  playbackTransportError: null,
   analysisSourceKind: 'native',
   decodeFallbackLoadToken: 0,
   decodeFallbackPromise: null,
@@ -178,12 +172,7 @@ const state = {
   selectionDraft: null,
   loopHandleDrag: null,
   loopRange: null,
-  pendingSeekTime: 0,
-  pendingSeekActive: false,
-  playbackResumeAnchorTime: 0,
-  playbackResumeStartedAt: 0,
   followPlayback: true,
-  transportMode: RUNTIME_TRANSPORT_MODE,
   spectrogramRenderConfig: {
     analysisType: 'spectrogram',
     fftSize: 4096,
@@ -193,7 +182,6 @@ const state = {
   analysis: null,
   loudness: createLoudnessSummaryState('idle'),
   sessionVersion: 0,
-  pcmSab: null,
   waveformRequestGeneration: 0,
   waveformPendingRequest: null,
   waveformRenderRange: { start: 0, end: 0 },
@@ -384,26 +372,6 @@ function initializeKeyboardFocus() {
       window.requestAnimationFrame(focusKeyboardSurface);
     }
   });
-}
-
-function getRuntimeTransportMode() {
-  let override = null;
-
-  try {
-    override = window.localStorage?.getItem(TRANSPORT_MODE_OVERRIDE_KEY) ?? null;
-  } catch {
-    override = null;
-  }
-
-  if (override === 'shared' && HAS_SHARED_RUNTIME_SUPPORT) {
-    return 'shared';
-  }
-
-  if (override === 'transfer') {
-    return 'transfer';
-  }
-
-  return HAS_SHARED_RUNTIME_SUPPORT ? 'shared' : 'transfer';
 }
 
 function normalizeSpectrogramFftSize(value) {
@@ -597,6 +565,12 @@ function formatMetadataDecodeSourceLabel() {
     : 'native browser decode';
 }
 
+function formatPlaybackTransportLabel() {
+  return state.playbackTransportKind === 'audio-worklet-copy'
+    ? 'AudioWorklet (copied buffers)'
+    : 'Playback unavailable';
+}
+
 function formatMetadataSummarySegments(summary) {
   if (!summary || !Array.isArray(summary.segments)) {
     return [];
@@ -750,12 +724,18 @@ function renderMediaMetadata() {
 
   const metadata = state.mediaMetadata ?? createMediaMetadataState('idle');
   const summaryText = formatMetadataSummaryText();
+  const playbackTransportLabel = formatPlaybackTransportLabel();
+  const playbackTransportError = state.playbackTransportError || null;
   const detailRoot = elements.mediaMetadataDetail;
 
   elements.mediaMetadataPanel.dataset.state = metadata.status;
   elements.mediaMetadataPanel.dataset.sourceKind = getActiveDecodeSourceKind();
   elements.mediaMetadataSummary.textContent = summaryText;
-  elements.mediaMetadataSummary.title = summaryText;
+  elements.mediaMetadataSummary.title = [
+    summaryText,
+    `Playback: ${playbackTransportLabel}`,
+    playbackTransportError ? `Playback status: ${playbackTransportError}` : null,
+  ].filter(Boolean).join('\n');
 
   detailRoot.replaceChildren();
 
@@ -785,6 +765,8 @@ function renderMediaMetadata() {
 
   const toolSection = appendMetadataDetailSection(detailRoot, 'Tools');
   appendMetadataDetailRow(toolSection, 'Decode', formatMetadataDecodeSourceLabel());
+  appendMetadataDetailRow(toolSection, 'Playback', playbackTransportLabel);
+  appendMetadataDetailRow(toolSection, 'Playback Status', playbackTransportError);
   appendMetadataDetailRow(toolSection, 'Probe', detail?.probeSource === 'ffprobe' ? 'ffprobe' : 'Unavailable');
   appendMetadataDetailRow(
     toolSection,
@@ -824,6 +806,10 @@ function syncMediaMetadataDetailVisibility() {
   elements.mediaMetadataPanel.dataset.detailOpen = shouldShowDetail ? 'true' : 'false';
   elements.mediaMetadataDetail.hidden = !shouldShowDetail;
   elements.mediaMetadataDetail.setAttribute('aria-hidden', shouldShowDetail ? 'false' : 'true');
+
+  if (shouldShowDetail) {
+    updateMediaMetadataDetailPosition();
+  }
 }
 
 function setMediaMetadataDetailOpen(nextOpen) {
@@ -836,6 +822,28 @@ function setMediaMetadataDetailOpen(nextOpen) {
 
   state.mediaMetadataDetailOpen = normalizedOpen;
   syncMediaMetadataDetailVisibility();
+}
+
+function updateMediaMetadataDetailPosition() {
+  if (
+    !elements.mediaMetadataSummary
+    || !elements.mediaMetadataDetail
+    || elements.mediaMetadataDetail.hidden
+  ) {
+    return;
+  }
+
+  const summaryRect = elements.mediaMetadataSummary.getBoundingClientRect();
+  const detailRect = elements.mediaMetadataDetail.getBoundingClientRect();
+  const detailWidth = detailRect.width || elements.mediaMetadataDetail.offsetWidth || 280;
+  const detailHeight = detailRect.height || elements.mediaMetadataDetail.offsetHeight || 0;
+  const maxLeft = Math.max(12, window.innerWidth - detailWidth - 12);
+  const maxTop = Math.max(12, window.innerHeight - detailHeight - 12);
+  const left = clamp(summaryRect.left, 12, maxLeft);
+  const top = clamp(summaryRect.bottom + 2, 12, maxTop);
+
+  elements.mediaMetadataDetail.style.left = `${left}px`;
+  elements.mediaMetadataDetail.style.top = `${top}px`;
 }
 
 function renderLoudnessSummary() {
@@ -865,7 +873,7 @@ function renderLoudnessSummary() {
 }
 
 window.addEventListener('keydown', (event) => {
-  if (!state.audio || event.defaultPrevented) {
+  if (!hasPlaybackTransport() || event.defaultPrevented) {
     return;
   }
 
@@ -918,131 +926,48 @@ async function loadAudioFile(payload) {
   setPendingLoudnessSummary();
   clearFatalStatus();
   setAnalysisStatus('Preparing playback…');
-
-  const audio = new Audio();
-  audio.preload = 'auto';
-  state.audio = audio;
-  state.pendingSeekTime = 0;
-  state.pendingSeekActive = false;
-  clearPlaybackResumeSmoothing();
+  state.audioTransport = createPlaybackTransport(loadToken);
+  state.decodedAudioBuffer = null;
   state.waveformViewRange = { start: 0, end: 0 };
 
-  bindAudioEvents(audio, loadToken, payload);
   state.waveformSurfaceReadyPromise = initializeWaveformSurface(loadToken);
   state.spectrogramSurfaceReadyPromise = initializeSpectrogramSurface(loadToken);
   syncTransport();
   renderWaveformUi();
   renderSpectrogramScale();
   requestMediaMetadata(loadToken, payload);
-  void loadPlaybackSource(loadToken, payload, audio);
+  void loadDecodedAudioSource(loadToken, payload);
 }
 
-function bindAudioEvents(audio, loadToken, payload) {
-  const syncPlaybackTime = () => {
-    if (loadToken !== state.loadToken) {
-      return;
-    }
+function createPlaybackTransport(loadToken) {
+  let transport = null;
 
-    if (audio.paused === false && Number.isFinite(audio.currentTime)) {
-      state.pendingSeekTime = audio.currentTime;
-      state.pendingSeekActive = false;
-    }
+  transport = createAudioTransport({
+    onStateChange: () => {
+      if (loadToken !== state.loadToken || state.audioTransport !== transport) {
+        return;
+      }
 
-    syncTransport();
-  };
+      const nextPlaybackTransportKind = transport.getTransportKind?.() ?? state.playbackTransportKind;
+      const nextPlaybackTransportError = transport.getLastFallbackReason?.() ?? null;
+      const transportKindChanged = nextPlaybackTransportKind !== state.playbackTransportKind;
+      const transportErrorChanged =
+        nextPlaybackTransportError !== state.playbackTransportError;
+      state.playbackTransportKind = nextPlaybackTransportKind;
+      state.playbackTransportError = nextPlaybackTransportError;
 
-  const syncPausedTime = () => {
-    if (loadToken !== state.loadToken) {
-      return;
-    }
+      if (transportKindChanged || transportErrorChanged) {
+        renderMediaMetadata();
+      }
 
-    clearPlaybackResumeSmoothing();
-    if (Number.isFinite(audio.currentTime)) {
-      state.pendingSeekTime = audio.currentTime;
-      state.pendingSeekActive = false;
-    }
-
-    syncTransport();
-  };
-
-  const syncWithoutCommit = () => {
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
-    syncPendingSeekFromAudio();
-    syncTransport();
-  };
-
-  const syncMetadata = () => {
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
-    ensureWaveformViewRange();
-    renderWaveformUi();
-    void syncWaveformView();
-    syncTransport();
-  };
-
-  audio.addEventListener('canplay', syncWithoutCommit);
-  audio.addEventListener('canplay', () => {
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
-    scheduleDeferredAnalysis(loadToken, payload);
-  }, { once: true });
-  audio.addEventListener('durationchange', syncMetadata);
-  audio.addEventListener('loadedmetadata', syncMetadata);
-  audio.addEventListener('play', () => {
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
-    startPlaybackResumeSmoothing();
-    startPlaybackLoop();
-    if (Number.isFinite(audio.currentTime)) {
-      state.pendingSeekTime = audio.currentTime;
-      state.pendingSeekActive = false;
-    }
-    syncTransport();
+      syncTransport();
+    },
+    workletModuleUrl: audioTransportProcessorScriptUri,
   });
-  audio.addEventListener('pause', syncPausedTime);
-  audio.addEventListener('ended', () => {
-    if (loadToken !== state.loadToken) {
-      return;
-    }
 
-    clearPlaybackResumeSmoothing();
-
-    if (state.loopRange && state.loopRange.end > state.loopRange.start) {
-      void restartLoopPlayback(audio, state.loopRange.start);
-      return;
-    }
-
-    syncTransport();
-  });
-  audio.addEventListener('timeupdate', syncPlaybackTime);
-  audio.addEventListener('seeking', syncWithoutCommit);
-  audio.addEventListener('seeked', syncWithoutCommit);
-  audio.addEventListener('error', () => {
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
-    cancelDeferredAnalysis();
-
-    const nativeErrorMessage = getAudioElementErrorMessage(audio);
-
-    void recoverPlaybackWithDecodeFallback(
-      loadToken,
-      payload,
-      audio,
-      'playback-error',
-      nativeErrorMessage,
-    );
-  });
+  state.playbackTransportKind = transport.getTransportKind?.() ?? 'unavailable';
+  state.playbackTransportError = transport.getLastFallbackReason?.() ?? null;
+  return transport;
 }
 
 function guessAudioMimeType(resourcePath) {
@@ -1119,42 +1044,6 @@ function setAnalysisSourceBuffer(arrayBuffer, mimeType, sourceKind) {
   renderMediaMetadata();
 }
 
-function applyPlaybackSourceBuffer(loadToken, audio, audioData, mimeType, sourceKind) {
-  if (loadToken !== state.loadToken) {
-    return;
-  }
-
-  setAnalysisSourceBuffer(audioData, mimeType, sourceKind);
-
-  const audioBlob = new Blob([audioData], { type: mimeType || 'application/octet-stream' });
-  const audioBlobUrl = URL.createObjectURL(audioBlob);
-
-  if (state.audioBlobUrl) {
-    URL.revokeObjectURL(state.audioBlobUrl);
-  }
-
-  state.audioBlobUrl = audioBlobUrl;
-  state.playbackSourceKind = sourceKind;
-  audio.src = audioBlobUrl;
-  audio.load();
-  renderMediaMetadata();
-}
-
-function getAudioElementErrorMessage(audio) {
-  switch (audio?.error?.code) {
-    case MediaError.MEDIA_ERR_ABORTED:
-      return 'Audio loading was aborted.';
-    case MediaError.MEDIA_ERR_NETWORK:
-      return 'A network error interrupted audio playback.';
-    case MediaError.MEDIA_ERR_DECODE:
-      return 'The browser could not decode this audio file.';
-    case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
-      return 'The browser does not support this audio format.';
-    default:
-      return 'Unable to play this audio file.';
-  }
-}
-
 function requestDecodeFallback(loadToken, payload, reason) {
   if (loadToken !== state.loadToken) {
     return Promise.reject(new Error('Decode fallback request is stale.'));
@@ -1196,43 +1085,7 @@ function requestDecodeFallback(loadToken, payload, reason) {
   return state.decodeFallbackPromise;
 }
 
-async function recoverPlaybackWithDecodeFallback(loadToken, payload, audio, reason, nativeErrorMessage) {
-  if (loadToken !== state.loadToken || !audio) {
-    return false;
-  }
-
-  if (state.playbackSourceKind === 'ffmpeg-fallback') {
-    setLoudnessSummaryUnavailable(nativeErrorMessage || 'Unable to play this audio file.');
-    setFatalStatus(nativeErrorMessage || 'Unable to play this audio file.');
-    return false;
-  }
-
-  try {
-    setAnalysisStatus('Requesting ffmpeg decode fallback…');
-    const fallback = await requestDecodeFallback(loadToken, payload, reason);
-
-    if (loadToken !== state.loadToken || !audio) {
-      return true;
-    }
-
-    applyPlaybackSourceBuffer(loadToken, audio, fallback.audioBuffer, fallback.mimeType, 'ffmpeg-fallback');
-    setAnalysisStatus('Buffering playback…');
-    scheduleDeferredAnalysis(loadToken, payload);
-    return true;
-  } catch (error) {
-    if (loadToken !== state.loadToken) {
-      return true;
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-    const fatalMessage = `${nativeErrorMessage || 'Unable to play this audio file.'} ${message}`.trim();
-    setLoudnessSummaryUnavailable(message);
-    setFatalStatus(fatalMessage);
-    return false;
-  }
-}
-
-async function loadPlaybackSource(loadToken, payload, audio) {
+async function loadDecodedAudioSource(loadToken, payload) {
   const controller = new AbortController();
   state.sourceFetchController = controller;
 
@@ -1245,23 +1098,144 @@ async function loadPlaybackSource(loadToken, payload, audio) {
       throw new Error(`HTTP ${response.status}`);
     }
 
-    const audioData = await response.arrayBuffer();
+    let audioData = await response.arrayBuffer();
+    let mimeType = resolvePlayableAudioMimeType(payload, response.headers.get('content-type'));
+    let sourceKind = 'native';
 
     if (loadToken !== state.loadToken) {
       return;
     }
 
-    const mimeType = resolvePlayableAudioMimeType(payload, response.headers.get('content-type'));
-    applyPlaybackSourceBuffer(loadToken, audio, audioData, mimeType, 'native');
-    setAnalysisStatus('Buffering playback…');
+    setAnalysisSourceBuffer(audioData, mimeType, sourceKind);
+    state.playbackSourceKind = sourceKind;
+    renderMediaMetadata();
+
+    setAnalysisStatus('Decoding audio…');
+
+    let decodedAudio;
+
+    try {
+      decodedAudio = await decodeAudioData(audioData);
+    } catch (nativeDecodeError) {
+      if (loadToken !== state.loadToken) {
+        return;
+      }
+
+      setAnalysisStatus('Requesting ffmpeg decode fallback…');
+      const fallback = await requestDecodeFallback(loadToken, payload, 'analysis-decode-error');
+
+      if (loadToken !== state.loadToken) {
+        return;
+      }
+
+      audioData = fallback.audioBuffer;
+      mimeType = fallback.mimeType;
+      sourceKind = 'ffmpeg-fallback';
+      setAnalysisSourceBuffer(audioData, mimeType, sourceKind);
+      state.playbackSourceKind = sourceKind;
+      renderMediaMetadata();
+      setAnalysisStatus('Decoding audio…');
+      decodedAudio = await decodeAudioData(audioData);
+    }
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    state.decodedAudioBuffer = decodedAudio;
+    state.playbackSourceKind = sourceKind;
+    state.analysisSourceKind = sourceKind;
+    renderMediaMetadata();
+
+    const playbackSession = createPlaybackSession(decodedAudio);
+    await state.audioTransport?.load({
+      audioBuffer: decodedAudio,
+      playbackSession,
+      workletModuleUrl: audioTransportProcessorScriptUri,
+    });
+    state.playbackTransportKind = state.audioTransport?.getTransportKind?.() ?? state.playbackTransportKind;
+    state.playbackTransportError =
+      state.audioTransport?.getLastFallbackReason?.() ?? state.playbackTransportError;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    ensureWaveformViewRange();
+    renderWaveformUi();
+    syncTransport();
+    if (state.playbackTransportKind === 'unavailable' && state.playbackTransportError) {
+      setAnalysisStatus(`Playback unavailable: ${state.playbackTransportError}`, true);
+    } else {
+      setAnalysisStatus('Playback ready');
+    }
     scheduleDeferredAnalysis(loadToken, payload);
   } catch (error) {
     if (loadToken !== state.loadToken || controller.signal.aborted) {
       return;
     }
 
+    if (state.playbackSourceKind !== 'ffmpeg-fallback' && state.externalTools.canDecodeFallback) {
+      try {
+        setAnalysisStatus('Requesting ffmpeg decode fallback…');
+        const fallback = await requestDecodeFallback(loadToken, payload, 'fetch-error');
+
+        if (loadToken !== state.loadToken) {
+          return;
+        }
+
+        state.playbackSourceKind = 'ffmpeg-fallback';
+        setAnalysisSourceBuffer(fallback.audioBuffer, fallback.mimeType, 'ffmpeg-fallback');
+        state.playbackSourceKind = 'ffmpeg-fallback';
+        renderMediaMetadata();
+        setAnalysisStatus('Decoding audio…');
+
+        const decodedAudio = await decodeAudioData(fallback.audioBuffer);
+
+        if (loadToken !== state.loadToken) {
+          return;
+        }
+
+        state.decodedAudioBuffer = decodedAudio;
+        state.playbackSourceKind = 'ffmpeg-fallback';
+        state.analysisSourceKind = 'ffmpeg-fallback';
+        renderMediaMetadata();
+        const playbackSession = createPlaybackSession(decodedAudio);
+        await state.audioTransport?.load({
+          audioBuffer: decodedAudio,
+          playbackSession,
+          workletModuleUrl: audioTransportProcessorScriptUri,
+        });
+        state.playbackTransportKind = state.audioTransport?.getTransportKind?.() ?? state.playbackTransportKind;
+        state.playbackTransportError =
+          state.audioTransport?.getLastFallbackReason?.() ?? state.playbackTransportError;
+
+        if (loadToken !== state.loadToken) {
+          return;
+        }
+
+        ensureWaveformViewRange();
+        renderWaveformUi();
+        syncTransport();
+        if (state.playbackTransportKind === 'unavailable' && state.playbackTransportError) {
+          setAnalysisStatus(`Playback unavailable: ${state.playbackTransportError}`, true);
+        } else {
+          setAnalysisStatus('Playback ready');
+        }
+        scheduleDeferredAnalysis(loadToken, payload);
+        return;
+      } catch (fallbackError) {
+        if (loadToken !== state.loadToken) {
+          return;
+        }
+
+        error = fallbackError;
+      }
+    }
+
     const message = error instanceof Error ? error.message : String(error);
-    await recoverPlaybackWithDecodeFallback(loadToken, payload, audio, 'fetch-error', `Unable to load this audio file: ${message}`);
+    setLoudnessSummaryUnavailable(message);
+    setFatalStatus(`Unable to load this audio file: ${message}`);
   } finally {
     if (state.sourceFetchController === controller) {
       state.sourceFetchController = null;
@@ -1426,22 +1400,11 @@ async function startAnalysis(loadToken, payload) {
     return;
   }
 
-  const controller = new AbortController();
-  state.fetchController = controller;
-
   try {
-    let audioData = state.sourceArrayBuffer;
+    const decodedAudio = state.decodedAudioBuffer;
 
-    if (!audioData) {
-      setAnalysisStatus('Loading audio for analysis…');
-
-      const response = await fetch(payload.sourceUri, { signal: controller.signal });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      audioData = await response.arrayBuffer();
+    if (!(decodedAudio instanceof AudioBuffer)) {
+      throw new Error('Decoded playback buffer is unavailable.');
     }
 
     if (loadToken !== state.loadToken) {
@@ -1467,39 +1430,13 @@ async function startAnalysis(loadToken, payload) {
       return;
     }
 
-    setAnalysisStatus('Decoding audio…');
-
-    let decodedAudio;
-
-    try {
-      decodedAudio = await decodeAudioData(audioData);
-    } catch (error) {
-      if (state.analysisSourceKind === 'ffmpeg-fallback') {
-        throw error;
-      }
-
-      setAnalysisStatus('Requesting ffmpeg decode fallback…');
-      const fallback = await requestDecodeFallback(loadToken, payload, 'analysis-decode-error');
-
-      if (loadToken !== state.loadToken) {
-        return;
-      }
-
-      setAnalysisSourceBuffer(fallback.audioBuffer, fallback.mimeType, 'ffmpeg-fallback');
-      decodedAudio = await decodeAudioData(fallback.audioBuffer);
-    }
-
     const monoSamples = downmixToMono(decodedAudio);
 
     if (loadToken !== state.loadToken) {
       return;
     }
 
-    const waveformSamples = state.transportMode === 'shared'
-      ? monoSamples
-      : monoSamples.slice();
-
-    state.waveformSamples = waveformSamples;
+    state.waveformSamples = monoSamples;
 
     state.analysis = createSpectrogramAnalysisState({
       duration: decodedAudio.duration,
@@ -1527,76 +1464,46 @@ async function startAnalysis(loadToken, payload) {
     state.sessionVersion += 1;
     const sessionVersion = state.sessionVersion;
     setAnalysisStatus('Queued');
+    const waveformWorkerSamples = monoSamples.slice();
+    const analysisWorkerSamples = monoSamples.slice();
 
-    if (state.transportMode === 'shared') {
-      ensureSharedAudioBuffer(monoSamples, decodedAudio.sampleRate);
-
-      const sharedBody = {
+    waveformWorker.postMessage({
+      type: 'attachAudioSession',
+      body: {
         duration: decodedAudio.duration,
-        pcmSab: state.pcmSab,
         quality: state.analysis.quality,
-        sampleCount: monoSamples.length,
+        sampleCount: waveformWorkerSamples.length,
         sampleRate: decodedAudio.sampleRate,
+        samplesBuffer: waveformWorkerSamples.buffer,
         sessionVersion,
-        transportMode: state.transportMode,
-      };
+      },
+    }, [waveformWorkerSamples.buffer]);
+    void syncWaveformView({ force: true });
+    scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
 
-      waveformWorker.postMessage({
-        type: 'attachAudioSession',
-        body: sharedBody,
-      });
-      void syncWaveformView({ force: true });
-      scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
-      analysisWorker.postMessage({
-        type: 'attachAudioSession',
-        body: sharedBody,
-      });
-    } else {
-      const analysisWorkerSamples = waveformSamples.slice();
+    analysisWorker.postMessage({
+      type: 'attachAudioSession',
+      body: {
+        duration: decodedAudio.duration,
+        quality: state.analysis.quality,
+        sampleCount: analysisWorkerSamples.length,
+        sampleRate: decodedAudio.sampleRate,
+        samplesBuffer: analysisWorkerSamples.buffer,
+        sessionVersion,
+      },
+    }, [analysisWorkerSamples.buffer]);
 
-      waveformWorker.postMessage({
-        type: 'attachAudioSession',
-        body: {
-          duration: decodedAudio.duration,
-          quality: state.analysis.quality,
-          sampleCount: monoSamples.length,
-          sampleRate: decodedAudio.sampleRate,
-          samplesBuffer: monoSamples.buffer,
-          sessionVersion,
-          transportMode: state.transportMode,
-        },
-      }, [monoSamples.buffer]);
-      void syncWaveformView({ force: true });
-      scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
-
-      analysisWorker.postMessage({
-        type: 'attachAudioSession',
-        body: {
-          duration: decodedAudio.duration,
-          quality: state.analysis.quality,
-          sampleCount: analysisWorkerSamples.length,
-          sampleRate: decodedAudio.sampleRate,
-          samplesBuffer: analysisWorkerSamples.buffer,
-          sessionVersion,
-          transportMode: state.transportMode,
-        },
-      }, [analysisWorkerSamples.buffer]);
-    }
-
+    state.decodedAudioBuffer = null;
     requestOverviewSpectrogram({ force: true });
     scheduleSpectrogramRender({ force: true });
   } catch (error) {
-    if (loadToken !== state.loadToken || controller.signal.aborted) {
+    if (loadToken !== state.loadToken) {
       return;
     }
 
     const message = error instanceof Error ? error.message : String(error);
     setLoudnessSummaryUnavailable(message);
     setAnalysisStatus(`Analysis unavailable: ${message}`, true);
-  } finally {
-    if (state.fetchController === controller) {
-      state.fetchController = null;
-    }
   }
 }
 
@@ -1976,19 +1883,6 @@ function normalizeSpectrogramQuality(value) {
   return value === 'balanced' || value === 'max' ? value : 'high';
 }
 
-function ensureSharedAudioBuffer(samples, sampleRate) {
-  if (!state.pcmSab || new Float32Array(state.pcmSab).length !== samples.length) {
-    state.pcmSab = new SharedArrayBuffer(samples.length * Float32Array.BYTES_PER_ELEMENT);
-  }
-
-  new Float32Array(state.pcmSab).set(samples);
-
-  if (state.analysis) {
-    state.analysis.sampleRate = sampleRate;
-    state.analysis.sampleCount = samples.length;
-  }
-}
-
 function getSpectrogramCanvasTargetSize() {
   const clientWidth = Math.max(1, elements.spectrogram.clientWidth);
   const clientHeight = Math.max(1, elements.spectrogram.clientHeight);
@@ -2334,81 +2228,24 @@ function isTimeWithinLoopRange(loopRange, timeSeconds) {
   return timeSeconds >= loopRange.start && timeSeconds <= loopRange.end;
 }
 
-function getSeekableEndTime(duration = getEffectiveDuration()) {
-  if (!Number.isFinite(duration) || duration <= 0) {
-    return 0;
-  }
-
-  return Math.max(0, duration - Math.min(SEEK_END_EPSILON_SECONDS, duration / 2));
+function hasPlaybackTransport() {
+  return Boolean(state.audioTransport)
+    && state.playbackTransportKind === 'audio-worklet-copy'
+    && getEffectiveDuration() > 0;
 }
 
-function clearPlaybackResumeSmoothing() {
-  state.playbackResumeAnchorTime = 0;
-  state.playbackResumeStartedAt = 0;
+function isPlaybackActive() {
+  return state.audioTransport?.isPlaying() === true;
 }
 
-function armPlaybackResumeSmoothing(anchorTime) {
-  state.playbackResumeAnchorTime = anchorTime;
-  state.playbackResumeStartedAt = -1;
-}
-
-function startPlaybackResumeSmoothing() {
-  if (state.playbackResumeStartedAt < 0) {
-    state.playbackResumeStartedAt = performance.now();
-  }
-}
-
-function syncPendingSeekFromAudio() {
-  const currentTime = state.audio?.currentTime;
-
-  if (!Number.isFinite(currentTime)) {
-    return;
-  }
-
-  if (
-    !state.pendingSeekActive
-    || Math.abs(currentTime - state.pendingSeekTime) <= SEEK_COMMIT_TOLERANCE_SECONDS
-  ) {
-    state.pendingSeekTime = currentTime;
-    state.pendingSeekActive = false;
-  }
-}
-
-function getPreferredPlaybackTime() {
+function getCurrentPlaybackTime() {
   const duration = getEffectiveDuration();
-  const seekableEndTime = getSeekableEndTime(duration);
-  const audioTime = state.audio?.currentTime;
-  const isPlaying = state.audio?.paused === false;
-  const hasPendingSeek = state.pendingSeekActive && Number.isFinite(state.pendingSeekTime);
-  const baseTime = isPlaying && Number.isFinite(audioTime)
-    ? audioTime
-    : hasPendingSeek
-      ? state.pendingSeekTime
-      : Number.isFinite(audioTime)
-        ? audioTime
-        : 0;
-  const shouldRestartFromStart = !isPlaying && (
-    state.audio?.ended === true
-    || baseTime >= (seekableEndTime - SEEK_COMMIT_TOLERANCE_SECONDS)
-  );
-
-  if (state.loopRange && state.loopRange.end > state.loopRange.start) {
-    if (baseTime < state.loopRange.start || shouldWrapLoop(state.loopRange, baseTime)) {
-      return state.loopRange.start;
-    }
-
-    return clamp(baseTime, state.loopRange.start, getSeekableEndTime(state.loopRange.end));
-  }
-
-  if (shouldRestartFromStart) {
-    return 0;
-  }
-
-  return clamp(baseTime, 0, getSeekableEndTime(duration));
+  const currentTime = Number(state.audioTransport?.getCurrentTime());
+  return clamp(currentTime, 0, duration || 0);
 }
 
 function setPlaybackPosition(timeSeconds, { sync = true } = {}) {
-  if (!state.audio) {
+  if (!state.audioTransport) {
     return;
   }
 
@@ -2418,92 +2255,12 @@ function setPlaybackPosition(timeSeconds, { sync = true } = {}) {
     return;
   }
 
-  const nextTime = clamp(timeSeconds, 0, getSeekableEndTime(duration));
-  state.pendingSeekTime = nextTime;
-  state.pendingSeekActive = true;
-
-  if (Number.isFinite(state.audio.currentTime) && Math.abs(state.audio.currentTime - nextTime) <= 1e-4) {
-    state.pendingSeekActive = false;
-    if (sync) {
-      syncTransport();
-    }
-    return;
-  }
-
-  try {
-    state.audio.currentTime = nextTime;
-  } catch {
-    // Keep pendingSeekTime so the next playback start still honors the user's seek.
-  }
-
-  syncPendingSeekFromAudio();
+  const nextTime = clamp(timeSeconds, 0, duration);
+  state.audioTransport.seek(nextTime);
 
   if (sync) {
     syncTransport();
   }
-}
-
-function isPlaybackTimeCommitted(targetTime) {
-  if (!state.audio || !Number.isFinite(targetTime)) {
-    return true;
-  }
-
-  return Math.abs((state.audio.currentTime ?? 0) - targetTime) <= SEEK_COMMIT_TOLERANCE_SECONDS;
-}
-
-async function ensurePlaybackPositionCommitted(targetTime) {
-  if (!state.audio || isPlaybackTimeCommitted(targetTime)) {
-    return;
-  }
-
-  await new Promise((resolve) => {
-    if (!state.audio) {
-      resolve();
-      return;
-    }
-
-    const audio = state.audio;
-    let timeoutId = 0;
-
-    const finalize = () => {
-      audio.removeEventListener('seeked', handleCommitCheck);
-      audio.removeEventListener('timeupdate', handleCommitCheck);
-      audio.removeEventListener('canplay', handleCommitCheck);
-
-      if (timeoutId) {
-        window.clearTimeout(timeoutId);
-      }
-
-      resolve();
-    };
-
-    const handleCommitCheck = () => {
-      if (isPlaybackTimeCommitted(targetTime)) {
-        finalize();
-      }
-    };
-
-    audio.addEventListener('seeked', handleCommitCheck);
-    audio.addEventListener('timeupdate', handleCommitCheck);
-    audio.addEventListener('canplay', handleCommitCheck);
-    timeoutId = window.setTimeout(finalize, SEEK_COMMIT_TIMEOUT_MS);
-    handleCommitCheck();
-  });
-}
-
-async function restartLoopPlayback(audio, loopStartTime) {
-  state.pendingSeekTime = loopStartTime;
-  state.pendingSeekActive = true;
-
-  try {
-    audio.currentTime = loopStartTime;
-  } catch {
-    // Keep pending seek time so a later playback retry still restarts at the loop start.
-  }
-
-  await ensurePlaybackPositionCommitted(loopStartTime);
-  await audio.play().catch(() => {});
-  syncTransport();
 }
 
 function getAdjustedLoopRange(baseRange, edge, clientX, targetElement = elements.waveformHitTarget ?? elements.waveformViewport) {
@@ -2618,13 +2375,13 @@ function renderWaveformUi() {
   }
   elements.waveLoopLabel.textContent = loopLabelRange
     ? `Loop ${formatAxisLabel(loopLabelRange.start)} - ${formatAxisLabel(loopLabelRange.end)}`
-    : 'Loop not set';
+    : 'Drag to set loop';
   elements.waveClearLoop.hidden = !state.loopRange;
 
   renderWaveformAxis();
   applyWaveformOverviewThumb();
   syncWaveformSelection();
-  applyWaveformPlaybackTime(state.audio?.currentTime ?? 0);
+  applyWaveformPlaybackTime(getCurrentPlaybackTime());
   applyWaveformCanvasTransform(range);
   refreshWaveformHoverPresentation();
   scheduleSpectrogramRender();
@@ -2697,9 +2454,8 @@ function renderWaveformAxis(options = {}) {
   applyWaveformAxisTransform(displayRange);
 }
 
-function applyWaveformOverviewThumb() {
+function applyWaveformOverviewThumb(range = getWaveformRange()) {
   const duration = getEffectiveDuration();
-  const range = getWaveformRange();
   const span = Math.max(0, range.end - range.start);
   const trackWidth = Math.max(1, elements.waveformOverview.clientWidth);
 
@@ -2724,8 +2480,7 @@ function applyWaveformOverviewThumb() {
   elements.waveformOverviewThumb.style.transform = `translate3d(${leftPx}px, 0, 0)`;
 }
 
-function applyWaveformPlaybackTime(timeSeconds) {
-  const range = getWaveformRange();
+function applyWaveformPlaybackTime(timeSeconds, range = getWaveformRange(timeSeconds)) {
   const span = Math.max(0, range.end - range.start);
 
   if (span <= 0 || !Number.isFinite(timeSeconds)) {
@@ -2749,7 +2504,7 @@ function applyWaveformPlaybackTime(timeSeconds) {
   elements.spectrogramCursor.style.display = isCursorVisible ? 'block' : 'none';
 }
 
-function syncFollowView(timeSeconds) {
+function syncFollowView(timeSeconds, range = getWaveformRange(timeSeconds)) {
   if (
     !state.followPlayback ||
     !Number.isFinite(timeSeconds) ||
@@ -2760,8 +2515,8 @@ function syncFollowView(timeSeconds) {
   }
 
   if (isSmoothFollowPlaybackActive()) {
-    const range = getWaveformRange();
-    applyWaveformOverviewThumb();
+    commitWaveformDisplayRange(range);
+    applyWaveformOverviewThumb(range);
     syncWaveformSelection();
     applyWaveformCanvasTransform(range);
     applyWaveformAxisTransform(range);
@@ -2783,7 +2538,6 @@ function syncFollowView(timeSeconds) {
   }
 
   const duration = getEffectiveDuration();
-  const range = getWaveformRange();
   const span = Math.max(0, range.end - range.start);
 
   if (duration <= 0 || span <= 0) {
@@ -2827,10 +2581,6 @@ async function syncWaveformView({ force = false } = {}) {
 
   if (!force && hasWaveformRenderCoverage(displayRange)) {
     applyWaveformCanvasTransform(displayRange);
-    return;
-  }
-
-  if (state.transportMode === 'shared' && state.analysis && !state.pcmSab) {
     return;
   }
 
@@ -3181,7 +2931,7 @@ function refreshWaveformHoverPresentation() {
   const duration = getEffectiveDuration();
   const point = state.waveformHoverClientPoint;
 
-  if (!point || !state.audio || duration <= 0) {
+  if (!point || !hasPlaybackTransport() || duration <= 0) {
     hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
     hideWaveformSampleMarker();
     return;
@@ -3245,7 +2995,7 @@ function getFrequencyAtSpectrogramPointerEvent(event) {
 function updateSpectrogramHoverTooltip(event) {
   const duration = getEffectiveDuration();
 
-  if (!state.audio || duration <= 0) {
+  if (!hasPlaybackTransport() || duration <= 0) {
     hideSurfaceHoverTooltip(elements.spectrogramHoverTooltip);
     return;
   }
@@ -3345,26 +3095,20 @@ function releaseSelectionDrag(event, targetElement, cancelled = false) {
 
   if (selectionDrag.moved && nextSelection) {
     state.loopRange = nextSelection;
-    if (
-      state.audio &&
-      state.audio.paused === false &&
-      (state.audio.currentTime < nextSelection.start || state.audio.currentTime >= nextSelection.end)
-    ) {
-      state.audio.currentTime = nextSelection.start;
-      state.pendingSeekTime = nextSelection.start;
-      state.pendingSeekActive = false;
-      syncTransport();
-    }
+    state.audioTransport?.setLoop(nextSelection);
     renderWaveformUi();
+    syncTransport();
     return;
   }
 
   if (!isTimeWithinLoopRange(state.loopRange, selectionDrag.anchorTime)) {
     state.loopRange = null;
+    state.audioTransport?.setLoop(null);
   }
 
   seekWaveformTo(selectionDrag.anchorTime);
   renderWaveformUi();
+  syncTransport();
 }
 
 function startLoopHandleDrag(event, edge, handleElement, targetElement) {
@@ -3417,9 +3161,11 @@ function releaseLoopHandleDrag(event, cancelled = false) {
 
   if (!cancelled) {
     state.loopRange = nextRange;
+    state.audioTransport?.setLoop(nextRange);
   }
 
   renderWaveformUi();
+  syncTransport();
 }
 
 function bindLoopHandle(handleElement, edge, targetElement) {
@@ -3680,8 +3426,9 @@ function handleSharedViewportWheel(event, targetElement) {
   const intent = verticalMagnitude >= horizontalMagnitude ? 'zoom' : 'pan';
   const shouldPreserveFollowZoom = state.followPlayback && intent === 'zoom' && verticalMagnitude > 0.01;
   const pointerRatio = getViewportPointerRatio(event.clientX, targetElement);
-  const anchorTime = shouldPreserveFollowZoom && Number.isFinite(state.audio?.currentTime)
-    ? clamp(state.audio.currentTime, 0, duration)
+  const currentPlaybackTime = getCurrentPlaybackTime();
+  const anchorTime = shouldPreserveFollowZoom && Number.isFinite(currentPlaybackTime)
+    ? clamp(currentPlaybackTime, 0, duration)
     : getTimeAtViewportClientX(event.clientX, targetElement);
 
   if (intent === 'pan' && horizontalMagnitude > 0.01) {
@@ -3741,6 +3488,12 @@ function attachUiEvents() {
 
     setMediaMetadataDetailOpen(false);
   });
+  elements.waveToolbar?.addEventListener('scroll', () => {
+    updateMediaMetadataDetailPosition();
+  }, { passive: true });
+  window.addEventListener('resize', () => {
+    updateMediaMetadataDetailPosition();
+  });
 
   elements.viewportSplitter?.addEventListener('pointerdown', (event) => {
     beginViewportSplitDrag(event);
@@ -3797,7 +3550,7 @@ function attachUiEvents() {
     seekBy(5);
   });
   elements.timeline.addEventListener('input', (event) => {
-    if (!state.audio) {
+    if (!hasPlaybackTransport()) {
       return;
     }
 
@@ -3836,7 +3589,9 @@ function attachUiEvents() {
   elements.waveClearLoop.addEventListener('click', () => {
     state.loopRange = null;
     state.selectionDraft = null;
+    state.audioTransport?.setLoop(null);
     renderWaveformUi();
+    syncTransport();
   });
 
   elements.waveformViewport.addEventListener('wheel', (event) => {
@@ -3847,7 +3602,7 @@ function attachUiEvents() {
     const duration = getEffectiveDuration();
     const range = getWaveformRange();
 
-    if (!state.audio || duration <= 0 || range.end <= range.start) {
+    if (!hasPlaybackTransport() || duration <= 0 || range.end <= range.start) {
       return;
     }
 
@@ -3881,7 +3636,7 @@ function attachUiEvents() {
     const duration = getEffectiveDuration();
     const range = getWaveformRange();
 
-    if (!state.audio || duration <= 0 || range.end <= range.start) {
+    if (!hasPlaybackTransport() || duration <= 0 || range.end <= range.start) {
       return;
     }
 
@@ -4005,30 +3760,16 @@ function destroySession() {
     state.sourceFetchController = null;
   }
 
-  if (state.fetchController) {
-    state.fetchController.abort();
-    state.fetchController = null;
-  }
-
   state.rejectDecodeFallback?.(new Error('Decode fallback request was cancelled.'));
 
   disposeAnalysisWorker();
   disposeWaveformRenderer();
   disposeSpectrogramSurface();
 
-  if (state.audio) {
-    state.audio.pause();
-    state.audio.removeAttribute('src');
-    state.audio.load();
-    state.audio = null;
-  }
+  const audioTransport = state.audioTransport;
+  state.audioTransport = null;
+  void audioTransport?.dispose();
 
-  if (state.audioBlobUrl) {
-    URL.revokeObjectURL(state.audioBlobUrl);
-    state.audioBlobUrl = null;
-  }
-
-  state.pcmSab = null;
   state.waveformRequestGeneration = 0;
   state.waveformPendingRequest = null;
   state.waveformRenderRange = { start: 0, end: 0 };
@@ -4039,6 +3780,7 @@ function destroySession() {
   state.waveformRawSamplePlotMode = false;
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
+  state.decodedAudioBuffer = null;
   state.sourceArrayBuffer = null;
   state.sourceMimeType = null;
   state.waveformSamples = null;
@@ -4046,6 +3788,8 @@ function destroySession() {
   state.mediaMetadata = createMediaMetadataState('idle');
   state.mediaMetadataDetailOpen = false;
   state.playbackSourceKind = 'native';
+  state.playbackTransportKind = 'unavailable';
+  state.playbackTransportError = null;
   state.analysisSourceKind = 'native';
   state.decodeFallbackLoadToken = 0;
   state.decodeFallbackPromise = null;
@@ -4060,9 +3804,6 @@ function destroySession() {
   state.selectionDraft = null;
   state.loopHandleDrag = null;
   state.loopRange = null;
-  state.pendingSeekTime = 0;
-  state.pendingSeekActive = false;
-  clearPlaybackResumeSmoothing();
   state.analysisStartedForLoadToken = 0;
   state.analysisQueuedForLoadToken = 0;
   state.sessionVersion = 0;
@@ -4135,26 +3876,15 @@ function disposeWaveformRenderer() {
 }
 
 async function togglePlayback() {
-  if (!state.audio) {
+  if (!state.audioTransport) {
     return;
   }
 
-  if (state.audio.paused) {
+  if (!state.audioTransport.isPlaying()) {
     try {
-      syncPendingSeekFromAudio();
-      const targetTime = getPreferredPlaybackTime();
-      armPlaybackResumeSmoothing(targetTime);
-
-      // Plain pause/resume should continue immediately without forcing a redundant
-      // seek commit wait when there is no outstanding user-driven seek to honor.
-      if (state.pendingSeekActive && !isPlaybackTimeCommitted(targetTime)) {
-        setPlaybackPosition(targetTime, { sync: false });
-        await ensurePlaybackPositionCommitted(targetTime);
-      }
-
-      await state.audio.play();
+      await state.audioTransport.play();
+      syncTransport();
     } catch (error) {
-      clearPlaybackResumeSmoothing();
       const message = error instanceof Error ? error.message : String(error);
       setAnalysisStatus(`Playback unavailable: ${message}`, true);
     }
@@ -4162,62 +3892,29 @@ async function togglePlayback() {
     return;
   }
 
-  state.audio.pause();
+  state.audioTransport.pause();
+  syncTransport();
 }
 
 function seekBy(deltaSeconds) {
-  if (!state.audio) {
+  if (!state.audioTransport) {
     return;
   }
 
-  setPlaybackPosition(getPreferredPlaybackTime() + deltaSeconds);
+  setPlaybackPosition(getCurrentPlaybackTime() + deltaSeconds);
 }
 
 function syncTransport() {
   const duration = getEffectiveDuration();
-  const isPlayable = Boolean(state.audio) && Number.isFinite(duration) && duration > 0;
-
-  if (
-    state.audio &&
-    state.audio.paused === false &&
-    state.loopRange &&
-    state.loopRange.end > state.loopRange.start &&
-    shouldWrapLoop(state.loopRange, state.audio.currentTime)
-  ) {
-    state.pendingSeekTime = state.loopRange.start;
-    state.pendingSeekActive = true;
-    state.audio.currentTime = state.loopRange.start;
-    syncPendingSeekFromAudio();
-  }
-
-  const liveCurrentTime = Number.isFinite(state.audio?.currentTime) ? state.audio.currentTime : 0;
-  startPlaybackResumeSmoothing();
-
-  let playbackDisplayTime = liveCurrentTime;
-
-  if (state.audio?.paused === false && state.playbackResumeStartedAt > 0) {
-    const resumeElapsedSeconds = Math.max(0, (performance.now() - state.playbackResumeStartedAt) / 1000);
-    const syntheticTime = state.playbackResumeAnchorTime + Math.min(0.12, resumeElapsedSeconds);
-    playbackDisplayTime = clamp(
-      Math.max(liveCurrentTime, syntheticTime),
-      0,
-      duration || 0,
-    );
-
-    if (
-      liveCurrentTime + SEEK_COMMIT_TOLERANCE_SECONDS >= syntheticTime
-      || resumeElapsedSeconds >= 0.12
-    ) {
-      clearPlaybackResumeSmoothing();
-    }
-  }
-
-  const preferredCurrentTime = state.audio?.paused === false ? playbackDisplayTime : getPreferredPlaybackTime();
-  const currentTime = clamp(preferredCurrentTime, 0, duration || 0);
+  const isPlayable = hasPlaybackTransport() && Number.isFinite(duration) && duration > 0;
+  const currentTime = isPlayable ? getCurrentPlaybackTime() : 0;
+  const displayRange = isSmoothFollowPlaybackActive()
+    ? getWaveformRange(currentTime)
+    : getWaveformRange();
   const progress = isPlayable && duration > 0 ? (currentTime / duration) : 0;
 
-  elements.playToggle.disabled = !state.audio;
-  elements.playToggle.textContent = state.audio?.paused === false ? 'Pause' : 'Play';
+  elements.playToggle.disabled = !hasPlaybackTransport();
+  elements.playToggle.textContent = isPlaybackActive() ? 'Pause' : 'Play';
   elements.seekBackward.disabled = !isPlayable;
   elements.seekForward.disabled = !isPlayable;
   elements.timeline.disabled = !isPlayable;
@@ -4225,10 +3922,10 @@ function syncTransport() {
   elements.timeline.style.setProperty('--seek-progress', `${Math.round(progress * 100)}%`);
   elements.timeReadout.textContent = `${formatTime(currentTime)} / ${formatTime(duration)}`;
 
-  applyWaveformPlaybackTime(currentTime);
-  syncFollowView(currentTime);
+  applyWaveformPlaybackTime(currentTime, displayRange);
+  syncFollowView(currentTime, displayRange);
 
-  if (state.audio?.paused === false && !state.playbackFrame) {
+  if (isPlaybackActive() && !state.playbackFrame) {
     startPlaybackLoop();
   }
 }
@@ -4237,10 +3934,7 @@ function startPlaybackLoop() {
   window.cancelAnimationFrame(state.playbackFrame);
   state.playbackFrame = window.requestAnimationFrame(() => {
     state.playbackFrame = 0;
-
-    if (state.audio?.paused === false) {
-      syncTransport();
-    }
+    syncTransport();
   });
 }
 
@@ -4277,6 +3971,23 @@ function downmixToMono(audioBuffer) {
   return mono;
 }
 
+function createPlaybackSession(audioBuffer) {
+  const channelBuffers = [];
+
+  for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
+    const sourceChannelData = audioBuffer.getChannelData(channelIndex);
+    channelBuffers.push(sourceChannelData.slice().buffer);
+  }
+
+  return {
+    channelBuffers,
+    durationSeconds: audioBuffer.duration,
+    numberOfChannels: audioBuffer.numberOfChannels,
+    sourceLength: audioBuffer.length,
+    sourceSampleRate: audioBuffer.sampleRate,
+  };
+}
+
 function getWaveformViewportSize() {
   return {
     width: Math.max(1, elements.waveformViewport.clientWidth),
@@ -4288,7 +3999,7 @@ function getWaveformViewportWidth() {
   return Math.max(1, elements.waveformViewport.clientWidth);
 }
 
-function getWaveformRange() {
+function getWaveformRange(playbackTime = null) {
   const duration = getEffectiveDuration();
   const storedRange = getStoredWaveformRange(duration);
 
@@ -4297,7 +4008,7 @@ function getWaveformRange() {
   }
 
   const timeSeconds = clamp(
-    Number.isFinite(state.audio?.currentTime) ? state.audio.currentTime : getPreferredPlaybackTime(),
+    Number.isFinite(playbackTime) ? Number(playbackTime) : getCurrentPlaybackTime(),
     0,
     duration,
   );
@@ -4320,6 +4031,14 @@ function getStoredWaveformRange(duration = getEffectiveDuration()) {
   }
 
   return normalizeWaveformRange(current, duration);
+}
+
+function commitWaveformDisplayRange(range, duration = getEffectiveDuration()) {
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return;
+  }
+
+  state.waveformViewRange = normalizeWaveformRange(range, duration);
 }
 
 function centerWaveformRangeOnTime(range, timeSeconds, duration = getEffectiveDuration()) {
@@ -4399,8 +4118,8 @@ function isFollowPlaybackInteractionActive() {
 function isSmoothFollowPlaybackActive() {
   return Boolean(
     state.followPlayback
-      && state.audio?.paused === false
-      && Number.isFinite(state.audio?.currentTime)
+      && isPlaybackActive()
+      && Number.isFinite(getCurrentPlaybackTime())
       && !isFollowPlaybackInteractionActive()
   );
 }
@@ -4760,16 +4479,16 @@ function getMinVisibleDuration(duration) {
 }
 
 function getEffectiveDuration() {
+  const transportDuration = Number(state.audioTransport?.getDuration());
+
+  if (Number.isFinite(transportDuration) && transportDuration > 0) {
+    return transportDuration;
+  }
+
   const analysisDuration = state.analysis?.duration;
 
   if (Number.isFinite(analysisDuration) && analysisDuration > 0) {
     return analysisDuration;
-  }
-
-  const audioDuration = state.audio?.duration;
-
-  if (Number.isFinite(audioDuration) && audioDuration > 0) {
-    return audioDuration;
   }
 
   return 0;
