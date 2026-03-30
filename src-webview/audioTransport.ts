@@ -2,14 +2,100 @@ import { AUDIO_TRANSPORT_PROCESSOR_NAME } from './audioTransportShared';
 
 const DEFAULT_SAMPLE_RATE = 48000;
 
-export function createAudioTransport(options = {}) {
+export type PlaybackLoopRange = {
+  end: number;
+  start: number;
+};
+
+type TransportKind = 'audio-worklet-copy' | 'unavailable';
+
+export interface PlaybackSession {
+  channelBuffers: ArrayBuffer[];
+  durationSeconds: number;
+  numberOfChannels: number;
+  sourceLength: number;
+  sourceSampleRate: number;
+}
+
+interface PlaybackSnapshotState {
+  contextTime: number;
+  currentFrame: number;
+  ended: boolean;
+  playing: boolean;
+}
+
+interface AudioTransportOptions {
+  onStateChange?: () => void;
+  workletModuleUrl?: string;
+}
+
+interface PlaybackSourceObject {
+  audioBuffer?: AudioBuffer | null;
+  playbackSession?: PlaybackSession | null;
+  workletModuleUrl?: string;
+}
+
+interface NormalizedPlaybackSource {
+  playbackSession: PlaybackSession;
+  workletModuleUrl: string;
+}
+
+type PlaybackSource = AudioBuffer | PlaybackSession | PlaybackSourceObject;
+
+interface WorkletControlMessage {
+  body?: {
+    loopEnabled?: boolean;
+    loopEndFrame?: number;
+    loopStartFrame?: number;
+    playing?: boolean;
+    seekFrame?: number | null;
+    seekSerial?: number | null;
+  };
+  type?: string;
+}
+
+interface WorkletStateMessage {
+  body?: {
+    contextTime?: number;
+    currentFrame?: number;
+    ended?: boolean;
+    playing?: boolean;
+  };
+  type?: 'state';
+}
+
+interface WorkletEndedMessage {
+  body?: {
+    currentFrame?: number;
+    durationSeconds?: number;
+  };
+  type?: 'ended';
+}
+
+type WorkletMessage = WorkletEndedMessage | WorkletStateMessage | WorkletControlMessage;
+
+export function createAudioTransport(options: AudioTransportOptions = {}): AudioWorkletTransport {
   return new AudioWorkletTransport(options);
 }
 
 class AudioWorkletTransport {
-  constructor(options = {}) {
+  private audioContext: AudioContext | null;
+  private ended: boolean;
+  private lastFallbackReason: string | null;
+  private loopRange: PlaybackLoopRange | null;
+  private onStateChange: (() => void) | null;
+  private pausedAtSeconds: number;
+  private playbackSession: PlaybackSession | null;
+  private playing: boolean;
+  private seekSerial: number;
+  private snapshotState: PlaybackSnapshotState | null;
+  private transportKind: TransportKind;
+  private workletModuleReadyPromise: Promise<void> | null;
+  private workletModuleUrl: string;
+  private workletNode: AudioWorkletNode | null;
+
+  constructor(options: AudioTransportOptions = {}) {
     this.audioContext = null;
-    this.audioBuffer = null;
     this.playbackSession = null;
     this.workletNode = null;
     this.workletModuleReadyPromise = null;
@@ -29,11 +115,10 @@ class AudioWorkletTransport {
       : null;
   }
 
-  async load(source) {
+  async load(source: PlaybackSource): Promise<void> {
     const normalizedSource = normalizePlaybackSource(source, this.workletModuleUrl);
 
     this.disposeWorkletNode();
-    this.audioBuffer = normalizedSource.audioBuffer;
     this.playbackSession = normalizedSource.playbackSession;
     this.workletModuleUrl = normalizedSource.workletModuleUrl;
     this.workletModuleReadyPromise = null;
@@ -50,7 +135,7 @@ class AudioWorkletTransport {
   }
 
   async play() {
-    if (!(this.audioBuffer instanceof AudioBuffer)) {
+    if (!this.playbackSession) {
       return;
     }
 
@@ -79,8 +164,8 @@ class AudioWorkletTransport {
     }
   }
 
-  pause() {
-    if (!(this.audioBuffer instanceof AudioBuffer)) {
+  pause(): void {
+    if (!this.playbackSession) {
       return;
     }
 
@@ -92,8 +177,8 @@ class AudioWorkletTransport {
     this.notifyStateChange();
   }
 
-  seek(timeSeconds) {
-    if (!(this.audioBuffer instanceof AudioBuffer) || !Number.isFinite(timeSeconds)) {
+  seek(timeSeconds: number): void {
+    if (!this.playbackSession || !Number.isFinite(timeSeconds)) {
       return;
     }
 
@@ -105,7 +190,7 @@ class AudioWorkletTransport {
     this.notifyStateChange();
   }
 
-  setLoop(loopRangeOrNull) {
+  setLoop(loopRangeOrNull: PlaybackLoopRange | null): void {
     const nextLoopRange = normalizeLoopRange(loopRangeOrNull, this.getDuration());
     const loopChanged = !areLoopRangesEqual(this.loopRange, nextLoopRange);
 
@@ -123,7 +208,7 @@ class AudioWorkletTransport {
     this.notifyStateChange();
   }
 
-  getCurrentTime() {
+  getCurrentTime(): number {
     const duration = this.getDuration();
 
     if (!(duration > 0)) {
@@ -142,28 +227,25 @@ class AudioWorkletTransport {
     return this.normalizePausedTime(this.pausedAtSeconds);
   }
 
-  getDuration() {
-    return this.audioBuffer instanceof AudioBuffer
-      ? this.audioBuffer.duration
-      : 0;
+  getDuration(): number {
+    return this.playbackSession?.durationSeconds ?? 0;
   }
 
-  getTransportKind() {
+  getTransportKind(): TransportKind {
     return this.transportKind;
   }
 
-  getLastFallbackReason() {
+  getLastFallbackReason(): string | null {
     return this.lastFallbackReason;
   }
 
-  isPlaying() {
+  isPlaying(): boolean {
     return this.playing || this.snapshotState?.playing === true;
   }
 
   async dispose() {
     this.disposeWorkletNode();
 
-    this.audioBuffer = null;
     this.playbackSession = null;
     this.pausedAtSeconds = 0;
     this.loopRange = null;
@@ -183,12 +265,12 @@ class AudioWorkletTransport {
     this.notifyStateChange();
   }
 
-  async ensureAudioContext() {
+  async ensureAudioContext(): Promise<AudioContext> {
     if (this.audioContext) {
       return this.audioContext;
     }
 
-    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+    const AudioContextConstructor = window.AudioContext ?? window.webkitAudioContext;
 
     if (!AudioContextConstructor) {
       throw new Error('Web Audio API is unavailable in this webview.');
@@ -198,7 +280,7 @@ class AudioWorkletTransport {
     return this.audioContext;
   }
 
-  async ensureWorkletNode(initialTimeSeconds = this.pausedAtSeconds) {
+  async ensureWorkletNode(initialTimeSeconds = this.pausedAtSeconds): Promise<AudioWorkletNode> {
     if (this.workletNode) {
       return this.workletNode;
     }
@@ -267,7 +349,7 @@ class AudioWorkletTransport {
     return node;
   }
 
-  disposeWorkletNode() {
+  disposeWorkletNode(): void {
     if (this.workletNode) {
       const workletNode = this.workletNode;
       this.workletNode = null;
@@ -284,7 +366,7 @@ class AudioWorkletTransport {
     this.snapshotState = null;
   }
 
-  getWorkletUnavailableReason() {
+  getWorkletUnavailableReason(): string | null {
     if (!this.playbackSession) {
       return 'Decoded playback session is unavailable.';
     }
@@ -315,8 +397,8 @@ class AudioWorkletTransport {
     return null;
   }
 
-  getControlLoopFrames() {
-    const sourceLength = this.playbackSession?.sourceLength ?? this.audioBuffer?.length ?? 0;
+  getControlLoopFrames(): { loopEndFrame: number; loopStartFrame: number } {
+    const sourceLength = this.playbackSession?.sourceLength ?? 0;
 
     if (!(this.loopRange?.end > this.loopRange?.start)) {
       return {
@@ -342,7 +424,7 @@ class AudioWorkletTransport {
     };
   }
 
-  getPlaybackStartOffset() {
+  getPlaybackStartOffset(): number {
     const duration = this.getDuration();
 
     if (!(duration > 0)) {
@@ -366,7 +448,7 @@ class AudioWorkletTransport {
     return pausedAt >= playbackEnd ? 0 : pausedAt;
   }
 
-  normalizePausedTime(timeSeconds) {
+  normalizePausedTime(timeSeconds: number): number {
     const duration = this.getDuration();
 
     if (!(duration > 0)) {
@@ -382,29 +464,29 @@ class AudioWorkletTransport {
     return clampedTime;
   }
 
-  getPlayableEndTime() {
+  getPlayableEndTime(): number {
     const duration = this.getDuration();
 
     if (!(duration > 0)) {
       return 0;
     }
 
-    const sampleRate = this.audioBuffer?.sampleRate || this.playbackSession?.sourceSampleRate || DEFAULT_SAMPLE_RATE;
+    const sampleRate = this.playbackSession?.sourceSampleRate || DEFAULT_SAMPLE_RATE;
     const epsilon = Math.min(1 / sampleRate, duration / 2);
     return Math.max(0, duration - epsilon);
   }
 
-  getLoopPlayableEnd() {
+  getLoopPlayableEnd(): number {
     if (!(this.loopRange?.end > this.loopRange?.start)) {
       return this.getPlayableEndTime();
     }
 
-    const sampleRate = this.audioBuffer?.sampleRate || this.playbackSession?.sourceSampleRate || DEFAULT_SAMPLE_RATE;
+    const sampleRate = this.playbackSession?.sourceSampleRate || DEFAULT_SAMPLE_RATE;
     const epsilon = Math.min(1 / sampleRate, (this.loopRange.end - this.loopRange.start) / 2);
     return Math.max(this.loopRange.start, this.loopRange.end - epsilon);
   }
 
-  getEndedPauseTime() {
+  getEndedPauseTime(): number {
     if (this.loopRange && this.loopRange.end > this.loopRange.start) {
       return this.loopRange.start;
     }
@@ -412,7 +494,7 @@ class AudioWorkletTransport {
     return this.getDuration();
   }
 
-  updateControlState(seekTimeSeconds = null) {
+  updateControlState(seekTimeSeconds: number | null = null): void {
     if (!this.workletNode) {
       return;
     }
@@ -423,7 +505,7 @@ class AudioWorkletTransport {
     this.pushPortControl(seekFrame);
   }
 
-  pushPortControl(seekFrame = null) {
+  pushPortControl(seekFrame: number | null = null): void {
     if (!this.workletNode) {
       return;
     }
@@ -447,16 +529,17 @@ class AudioWorkletTransport {
     });
   }
 
-  handleWorkletMessage(message) {
+  handleWorkletMessage(message: WorkletMessage): void {
     if (message?.type === 'state') {
+      const body = message.body as WorkletStateMessage['body'] | undefined;
       this.snapshotState = {
-        contextTime: Number(message.body?.contextTime) || 0,
+        contextTime: Number(body?.contextTime) || 0,
         currentFrame: clampFrame(
-          Number(message.body?.currentFrame) || 0,
-          this.playbackSession?.sourceLength ?? this.audioBuffer?.length ?? 0,
+          Number(body?.currentFrame) || 0,
+          this.playbackSession?.sourceLength ?? 0,
         ),
-        ended: message.body?.ended === true,
-        playing: message.body?.playing === true,
+        ended: body?.ended === true,
+        playing: body?.playing === true,
       };
       return;
     }
@@ -470,8 +553,8 @@ class AudioWorkletTransport {
     }
   }
 
-  projectFrameFromSnapshot(snapshotState) {
-    const sourceLength = this.playbackSession?.sourceLength ?? this.audioBuffer?.length ?? 0;
+  projectFrameFromSnapshot(snapshotState: PlaybackSnapshotState | null): number {
+    const sourceLength = this.playbackSession?.sourceLength ?? 0;
 
     if (!snapshotState?.playing || snapshotState.ended) {
       return clampFrame(snapshotState?.currentFrame ?? 0, sourceLength);
@@ -493,7 +576,7 @@ class AudioWorkletTransport {
     return clampFrame(projectedFrame, sourceLength);
   }
 
-  applyObservedState(currentFrame, playing, ended) {
+  applyObservedState(currentFrame: number, playing: boolean, ended: boolean): number {
     const currentTime = this.sourceFrameToSeconds(currentFrame);
     this.playing = playing;
     this.ended = ended;
@@ -507,7 +590,7 @@ class AudioWorkletTransport {
     return currentTime;
   }
 
-  markUnavailable(reason) {
+  markUnavailable(reason: unknown): void {
     const currentTime = this.getCurrentTime();
     this.transportKind = 'unavailable';
     this.lastFallbackReason = formatTransportFailureReason(reason);
@@ -518,60 +601,63 @@ class AudioWorkletTransport {
     this.notifyStateChange();
   }
 
-  getSourceSampleRate() {
-    return this.playbackSession?.sourceSampleRate
-      || this.audioBuffer?.sampleRate
-      || DEFAULT_SAMPLE_RATE;
+  getSourceSampleRate(): number {
+    return this.playbackSession?.sourceSampleRate || DEFAULT_SAMPLE_RATE;
   }
 
-  secondsToSourceFrame(timeSeconds) {
-    const sourceLength = this.playbackSession?.sourceLength ?? this.audioBuffer?.length ?? 0;
+  secondsToSourceFrame(timeSeconds: number): number {
+    const sourceLength = this.playbackSession?.sourceLength ?? 0;
     return clampFrame(Math.round(timeSeconds * this.getSourceSampleRate()), sourceLength);
   }
 
-  sourceFrameToSeconds(frame) {
-    const sourceLength = this.playbackSession?.sourceLength ?? this.audioBuffer?.length ?? 0;
+  sourceFrameToSeconds(frame: number): number {
+    const sourceLength = this.playbackSession?.sourceLength ?? 0;
     const safeFrame = clampFrame(frame, sourceLength);
     const duration = this.getDuration();
     return clamp(safeFrame / this.getSourceSampleRate(), 0, duration);
   }
 
-  notifyStateChange() {
+  notifyStateChange(): void {
     this.onStateChange?.();
   }
 }
 
-function normalizePlaybackSource(source, defaultWorkletModuleUrl) {
+function normalizePlaybackSource(source: PlaybackSource, defaultWorkletModuleUrl: string): NormalizedPlaybackSource {
   const sourceOptions = isPlaybackSourceObject(source) ? source : null;
-  const audioBuffer = sourceOptions?.audioBuffer ?? source;
+  const audioBuffer = source instanceof AudioBuffer
+    ? source
+    : (sourceOptions?.audioBuffer instanceof AudioBuffer ? sourceOptions.audioBuffer : null);
+  const playbackSession = normalizePlaybackSession(
+    isPlaybackSession(source) ? source : sourceOptions?.playbackSession,
+    audioBuffer,
+  );
 
-  if (!(audioBuffer instanceof AudioBuffer)) {
-    throw new Error('A decoded AudioBuffer is required for playback.');
+  if (!playbackSession) {
+    throw new Error('A decoded playback session is required for playback.');
   }
 
   return {
-    audioBuffer,
-    playbackSession: normalizePlaybackSession(sourceOptions?.playbackSession, audioBuffer),
+    playbackSession,
     workletModuleUrl: typeof sourceOptions?.workletModuleUrl === 'string' && sourceOptions.workletModuleUrl.length > 0
       ? sourceOptions.workletModuleUrl
       : defaultWorkletModuleUrl,
   };
 }
 
-function normalizePlaybackSession(session, audioBuffer) {
-  if (!session || typeof session !== 'object') {
+function normalizePlaybackSession(session: PlaybackSession | null | undefined, audioBuffer: AudioBuffer | null = null): PlaybackSession | null {
+  if ((!session || typeof session !== 'object') && !(audioBuffer instanceof AudioBuffer)) {
     return null;
   }
 
-  const sourceLength = Math.max(0, Math.trunc(Number(session.sourceLength) || audioBuffer.length || 0));
-  const sourceSampleRate = Math.max(1, Number(session.sourceSampleRate) || audioBuffer.sampleRate || DEFAULT_SAMPLE_RATE);
-  const durationSeconds = Number.isFinite(session.durationSeconds)
-    ? Math.max(0, Number(session.durationSeconds))
-    : audioBuffer.duration;
-  const buffers = Array.isArray(session.channelBuffers)
+  const sourceLength = Math.max(0, Math.trunc(Number(session?.sourceLength) || audioBuffer?.length || 0));
+  const sourceSampleRate = Math.max(1, Number(session?.sourceSampleRate) || audioBuffer?.sampleRate || DEFAULT_SAMPLE_RATE);
+  const durationSeconds = Number.isFinite(session?.durationSeconds)
+    ? Math.max(0, Number(session?.durationSeconds))
+    : (audioBuffer?.duration ?? 0);
+  const buffers = Array.isArray(session?.channelBuffers)
     ? session.channelBuffers.filter((buffer) => buffer instanceof ArrayBuffer)
-    : [];
-  const numberOfChannels = Math.max(1, Math.trunc(Number(session.numberOfChannels) || buffers.length || audioBuffer.numberOfChannels || 1));
+    : (audioBuffer ? createPlaybackSession(audioBuffer).channelBuffers : []);
+  const numberOfChannels = Math.max(1, Math.trunc(Number(session?.numberOfChannels) || buffers.length || audioBuffer?.numberOfChannels || 1));
 
   if (buffers.length === 0) {
     return null;
@@ -586,11 +672,41 @@ function normalizePlaybackSession(session, audioBuffer) {
   };
 }
 
-function isPlaybackSourceObject(value) {
-  return Boolean(value && typeof value === 'object' && !(value instanceof AudioBuffer));
+function createPlaybackSession(audioBuffer: AudioBuffer): PlaybackSession {
+  const channelBuffers = [];
+
+  for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
+    const sourceChannelData = audioBuffer.getChannelData(channelIndex);
+    channelBuffers.push(sourceChannelData.slice().buffer);
+  }
+
+  return {
+    channelBuffers,
+    durationSeconds: audioBuffer.duration,
+    numberOfChannels: audioBuffer.numberOfChannels,
+    sourceLength: audioBuffer.length,
+    sourceSampleRate: audioBuffer.sampleRate,
+  };
 }
 
-function getProjectedContextTime(audioContext) {
+function isPlaybackSession(value: unknown): value is PlaybackSession {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && Array.isArray((value as PlaybackSession).channelBuffers),
+  );
+}
+
+function isPlaybackSourceObject(value: PlaybackSource): value is PlaybackSourceObject {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !(value instanceof AudioBuffer)
+    && !Array.isArray((value as PlaybackSession).channelBuffers),
+  );
+}
+
+function getProjectedContextTime(audioContext: AudioContext | null): number {
   if (!audioContext) {
     return 0;
   }
@@ -607,7 +723,7 @@ function getProjectedContextTime(audioContext) {
   return Number(audioContext.currentTime) || 0;
 }
 
-function formatTransportFailureReason(reason) {
+function formatTransportFailureReason(reason: unknown): string {
   if (typeof reason === 'string' && reason.trim().length > 0) {
     return reason.trim();
   }
@@ -617,7 +733,7 @@ function formatTransportFailureReason(reason) {
   }
 
   if (reason && typeof reason === 'object') {
-    const message = reason.message;
+    const message = 'message' in reason ? (reason as { message?: unknown }).message : null;
 
     if (typeof message === 'string' && message.trim().length > 0) {
       return message.trim();
@@ -627,17 +743,17 @@ function formatTransportFailureReason(reason) {
   return 'AudioWorklet playback is unavailable.';
 }
 
-function clamp(value, min, max) {
+function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function clampFrame(frame, sourceLength) {
+function clampFrame(frame: number, sourceLength: number): number {
   const maxFrame = Math.max(0, Math.trunc(Number(sourceLength) || 0));
   const normalizedFrame = Math.round(Number(frame) || 0);
   return clamp(normalizedFrame, 0, maxFrame);
 }
 
-function normalizeLoopRange(range, duration) {
+function normalizeLoopRange(range: PlaybackLoopRange | null | undefined, duration: number): PlaybackLoopRange | null {
   if (
     !range
     || !Number.isFinite(range.start)
@@ -658,7 +774,7 @@ function normalizeLoopRange(range, duration) {
   return { start, end };
 }
 
-function positiveModulo(value, divisor) {
+function positiveModulo(value: number, divisor: number): number {
   if (!Number.isFinite(value) || !Number.isFinite(divisor) || divisor <= 0) {
     return 0;
   }
@@ -666,7 +782,7 @@ function positiveModulo(value, divisor) {
   return ((value % divisor) + divisor) % divisor;
 }
 
-function areLoopRangesEqual(left, right) {
+function areLoopRangesEqual(left: PlaybackLoopRange | null, right: PlaybackLoopRange | null): boolean {
   if (!left && !right) {
     return true;
   }

@@ -10,10 +10,29 @@ const LINE_BLEND_END_SAMPLES_PER_PIXEL = 1;
 const SYMMETRIC_BLEND_START_SAMPLES_PER_PIXEL = 12;
 const SYMMETRIC_BLEND_END_SAMPLES_PER_PIXEL = 2;
 
-export function buildInteractiveWaveformData(channelData, options = {}) {
+interface WaveformLevel {
+  blockSize: number;
+  maxPeaks: Float32Array;
+  minPeaks: Float32Array;
+}
+
+export interface InteractiveWaveformData {
+  levels: WaveformLevel[];
+  sampleCount: number;
+  samples: Float32Array | null;
+}
+
+interface InteractiveWaveformSampleOptions {
+  copy?: boolean;
+}
+
+export function buildInteractiveWaveformData(
+  channelData: ArrayLike<number>,
+  options: InteractiveWaveformSampleOptions = {},
+): InteractiveWaveformData {
   const samples = normalizeInteractiveWaveformSamples(channelData, options);
-  const levels = [];
-  let previousLevel = null;
+  const levels: WaveformLevel[] = [];
+  let previousLevel: WaveformLevel | null = null;
 
   for (const blockSize of getInteractiveWaveformBlockSizes(samples.length)) {
     const level = previousLevel && blockSize === previousLevel.blockSize * LEVEL_SCALE_FACTOR
@@ -26,7 +45,10 @@ export function buildInteractiveWaveformData(channelData, options = {}) {
   return { sampleCount: samples.length, samples, levels };
 }
 
-export function normalizeInteractiveWaveformSamples(channelData, options = {}) {
+export function normalizeInteractiveWaveformSamples(
+  channelData: ArrayLike<number>,
+  options: InteractiveWaveformSampleOptions = {},
+): Float32Array {
   const shouldCopy = options?.copy !== false || !(channelData instanceof Float32Array);
 
   if (!shouldCopy) {
@@ -43,7 +65,10 @@ export function normalizeInteractiveWaveformSamples(channelData, options = {}) {
   return samples;
 }
 
-export function createInteractiveWaveformData(samples, levels = []) {
+export function createInteractiveWaveformData(
+  samples: Float32Array | null,
+  levels: WaveformLevel[] = [],
+): InteractiveWaveformData {
   return {
     sampleCount: samples instanceof Float32Array ? samples.length : 0,
     samples: samples instanceof Float32Array ? samples : null,
@@ -51,8 +76,8 @@ export function createInteractiveWaveformData(samples, levels = []) {
   };
 }
 
-export function getInteractiveWaveformBlockSizes(sampleCount) {
-  const blockSizes = [];
+export function getInteractiveWaveformBlockSizes(sampleCount: number): number[] {
+  const blockSizes: number[] = [];
   let blockSize = MIN_LEVEL_BLOCK_SIZE;
 
   while (blockSize < sampleCount) {
@@ -69,18 +94,18 @@ export function getInteractiveWaveformBlockSizes(sampleCount) {
   return blockSizes;
 }
 
-export function buildInteractiveWaveformLevel(samples, blockSize) {
+export function buildInteractiveWaveformLevel(samples: Float32Array, blockSize: number): WaveformLevel {
   return buildPeakLevel(samples, blockSize);
 }
 
 export function extractInteractiveWaveformSlice(
-  waveformData,
-  duration,
-  viewStart,
-  viewEnd,
-  columnCount,
-  output = null,
-) {
+  waveformData: InteractiveWaveformData | null,
+  duration: number,
+  viewStart: number,
+  viewEnd: number,
+  columnCount: number,
+  output: Float32Array | null = null,
+): Float32Array {
   const safeColumnCount = Math.max(1, Math.round(columnCount || 0));
   const target = output instanceof Float32Array && output.length >= safeColumnCount * 2
     ? output
@@ -128,22 +153,27 @@ export function extractInteractiveWaveformSlice(
   return target;
 }
 
-export function resizeInteractiveWaveformSurface(surface, width, height, renderScale) {
+export function resizeInteractiveWaveformSurface(
+  surface: OffscreenCanvas,
+  width: number,
+  height: number,
+  renderScale: number,
+): void {
   surface.width = Math.max(1, Math.round(width * renderScale));
   surface.height = Math.max(1, Math.round(height * renderScale));
 }
 
 export function renderInteractiveWaveform(
-  ctx,
-  width,
-  height,
-  renderScale,
-  duration,
-  viewStart,
-  viewEnd,
-  color,
-  waveformData,
-) {
+  ctx: OffscreenCanvasRenderingContext2D,
+  width: number,
+  height: number,
+  renderScale: number,
+  duration: number,
+  viewStart: number,
+  viewEnd: number,
+  color: string,
+  waveformData: InteractiveWaveformData | null,
+): void {
   const deviceWidth = Math.max(1, Math.round(width * renderScale));
   const deviceHeight = Math.max(1, Math.round(height * renderScale));
 

@@ -9,8 +9,7 @@
       "WebWorker"
     ],
     "skipLibCheck": true,
-    "noEmit": true,
-    "noCheck": true
+    "noEmit": true
   },
   "include": [
     "src-webview/**/*.ts",

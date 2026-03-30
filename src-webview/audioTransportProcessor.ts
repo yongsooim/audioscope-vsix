@@ -2,8 +2,55 @@ import { AUDIO_TRANSPORT_PROCESSOR_NAME } from './audioTransportShared';
 
 const SNAPSHOT_INTERVAL_QUANTA = 8;
 
+interface ProcessorControlBody {
+  loopEnabled?: boolean;
+  loopEndFrame?: number;
+  loopStartFrame?: number;
+  playing?: boolean;
+  seekFrame?: number | null;
+  seekSerial?: number | null;
+}
+
+interface ProcessorMessage {
+  body?: ProcessorControlBody;
+  type?: string;
+}
+
+interface ProcessorOptionsPayload {
+  channelBuffers?: ArrayBuffer[];
+  durationSeconds?: number;
+  initialFrame?: number;
+  initialLoopEnabled?: boolean;
+  initialLoopEndFrame?: number;
+  initialLoopStartFrame?: number;
+  initialPlaying?: boolean;
+  initialSeekSerial?: number;
+  sourceLength?: number;
+  sourceSampleRate?: number;
+}
+
+interface ProcessorCtorOptions {
+  processorOptions?: ProcessorOptionsPayload;
+}
+
 class WaveScopeAudioTransportProcessor extends AudioWorkletProcessor {
-  constructor(options) {
+  private channelData: Float32Array[];
+  private durationSeconds: number;
+  private ended: boolean;
+  private lastPublishedEnded: boolean;
+  private lastPublishedFrame: number;
+  private lastPublishedPlaying: boolean;
+  private lastSeekSerial: number;
+  private loopEnabled: boolean;
+  private loopEndFrame: number;
+  private loopStartFrame: number;
+  private playing: boolean;
+  private positionFrame: number;
+  private snapshotCountdown: number;
+  private sourceLength: number;
+  private sourceSampleRate: number;
+
+  constructor(options?: ProcessorCtorOptions) {
     super();
 
     const processorOptions = options?.processorOptions ?? {};
@@ -40,7 +87,7 @@ class WaveScopeAudioTransportProcessor extends AudioWorkletProcessor {
     this.publishState(true);
   }
 
-  handleMessage(message) {
+  handleMessage(message: ProcessorMessage): void {
     if (message?.type !== 'setControl') {
       return;
     }
@@ -74,7 +121,7 @@ class WaveScopeAudioTransportProcessor extends AudioWorkletProcessor {
     this.publishState(true);
   }
 
-  process(_inputs, outputs) {
+  process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const output = outputs[0];
 
     if (!output || output.length === 0) {
@@ -130,7 +177,7 @@ class WaveScopeAudioTransportProcessor extends AudioWorkletProcessor {
     return true;
   }
 
-  advanceFrame(sourceStep) {
+  advanceFrame(sourceStep: number): void {
     if (this.loopEnabled && this.loopEndFrame > this.loopStartFrame) {
       const loopSpan = this.loopEndFrame - this.loopStartFrame;
       const nextFrame = this.positionFrame + sourceStep;
@@ -154,7 +201,7 @@ class WaveScopeAudioTransportProcessor extends AudioWorkletProcessor {
     this.positionFrame = nextFrame;
   }
 
-  finishPlayback() {
+  finishPlayback(): void {
     this.positionFrame = this.sourceLength;
 
     if (!this.playing && this.ended) {
@@ -173,7 +220,7 @@ class WaveScopeAudioTransportProcessor extends AudioWorkletProcessor {
     });
   }
 
-  publishState(force) {
+  publishState(force: boolean): void {
     const currentFrame = clampFrame(Math.floor(this.positionFrame), this.sourceLength);
 
     const changed = force
@@ -208,13 +255,13 @@ class WaveScopeAudioTransportProcessor extends AudioWorkletProcessor {
   }
 }
 
-function fillSilence(output) {
+function fillSilence(output: Float32Array[]): void {
   for (const channel of output) {
     channel.fill(0);
   }
 }
 
-function zeroRemainingFrames(output, startIndex) {
+function zeroRemainingFrames(output: Float32Array[], startIndex: number): void {
   for (const channel of output) {
     for (let frameIndex = startIndex; frameIndex < channel.length; frameIndex += 1) {
       channel[frameIndex] = 0;
@@ -222,7 +269,7 @@ function zeroRemainingFrames(output, startIndex) {
   }
 }
 
-function clampFrame(value, sourceLength) {
+function clampFrame(value: number, sourceLength: number): number {
   if (!Number.isFinite(value)) {
     return 0;
   }
@@ -230,22 +277,22 @@ function clampFrame(value, sourceLength) {
   return Math.min(Math.max(0, value), Math.max(0, sourceLength));
 }
 
-function normalizeLoopStartFrame(value, sourceLength) {
+function normalizeLoopStartFrame(value: number, sourceLength: number): number {
   return clampFrame(Math.floor(value), sourceLength);
 }
 
-function normalizeLoopEndFrame(value, loopStartFrame, sourceLength) {
+function normalizeLoopEndFrame(value: number, loopStartFrame: number, sourceLength: number): number {
   return Math.min(
     Math.max(loopStartFrame + 1, Math.ceil(value)),
     Math.max(loopStartFrame + 1, sourceLength),
   );
 }
 
-function clampUnit(value) {
+function clampUnit(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
-function positiveModulo(value, divisor) {
+function positiveModulo(value: number, divisor: number): number {
   if (!Number.isFinite(value) || !Number.isFinite(divisor) || divisor <= 0) {
     return 0;
   }

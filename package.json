@@ -23,7 +23,9 @@
     "flac"
   ],
   "files": [
-    "out/**/*.js",
+    "out/extension.js",
+    "out/externalAudioTools.js",
+    "out/waveScopeEditor.js",
     "dist/**",
     "src-webview/**/*.css",
     "images/icon.png",
@@ -127,9 +129,10 @@
   },
   "scripts": {
     "vscode:prepublish": "bun run compile",
+    "clean": "node -e \"const fs=require('node:fs'); for (const dir of ['dist','out']) fs.rmSync(dir,{recursive:true,force:true});\"",
     "build:wave-core": "zig build wave-core-artifacts",
     "build:webview": "tsx ./scripts/build-webview.mts",
-    "compile": "bun run build:wave-core && bun run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
+    "compile": "bun run clean && bun run build:wave-core && bun run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
     "watch": "tsc -w -p ./"
   },
   "devDependencies": {

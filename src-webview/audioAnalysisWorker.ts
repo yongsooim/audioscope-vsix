@@ -1,4 +1,4 @@
-import { loadWaveCoreRuntime } from './waveCoreRuntime';
+import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from './waveCoreRuntime';
 import {
   TILE_COLUMN_COUNT,
   quantizeCeil,
@@ -32,6 +32,8 @@ const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_ROW_BLOCK_SIZE = 32;
 const LOUDNESS_SUMMARY_OUTPUT_LENGTH = 4;
+const MAX_TILE_CACHE_ENTRIES = 24;
+const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
 const ANALYSIS_TYPE_CODES = {
   spectrogram: 0,
   mel: 1,
@@ -47,21 +49,148 @@ const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
   max: 512,
 };
 
-let runtimePromise = null;
+type QualityPreset = 'balanced' | 'high' | 'max';
+type AnalysisType = 'mel' | 'scalogram' | 'spectrogram';
+type FrequencyScale = 'linear' | 'log';
+type LayerKind = 'overview' | 'visible';
+
+interface CanvasInitOptions {
+  offscreenCanvas?: OffscreenCanvas;
+  pixelHeight?: number;
+  pixelWidth?: number;
+}
+
+interface AudioSessionOptions {
+  duration?: number;
+  quality?: QualityPreset;
+  sampleCount?: number;
+  sampleRate?: number;
+  samplesBuffer?: ArrayBuffer;
+  sessionVersion?: number;
+}
+
+interface SpectrogramRequest {
+  analysisType?: AnalysisType;
+  configVersion?: number;
+  displayEnd?: number;
+  displayStart?: number;
+  dpr?: number;
+  fftSize?: number;
+  frequencyScale?: FrequencyScale;
+  generation?: number;
+  overlapRatio?: number;
+  pixelHeight?: number;
+  pixelWidth?: number;
+  requestEnd?: number;
+  requestKind?: LayerKind;
+  requestStart?: number;
+  viewEnd?: number;
+  viewStart?: number;
+}
+
+interface LayerState {
+  generation: number;
+  kind: LayerKind;
+  plan: RenderRequestPlan | null;
+  ready: boolean;
+  requestPending: boolean;
+}
+
+interface TileRecord {
+  byteLength: number;
+  canvas: OffscreenCanvas;
+  columnCount: number;
+  complete: boolean;
+  context: OffscreenCanvasRenderingContext2D | null;
+  imageData: ImageData;
+  renderedColumns: number;
+  rowCount: number;
+  tileEnd: number;
+  tileIndex: number;
+  tileKey: string;
+  tileStart: number;
+}
+
+interface RenderRequestPlan {
+  analysisType: AnalysisType;
+  configKey: string;
+  configVersion: number;
+  decimationFactor: number;
+  displayEnd: number;
+  displayStart: number;
+  dprBucket: number;
+  endTileIndex: number;
+  fftSize: number;
+  frequencyScale: FrequencyScale;
+  generation: number;
+  hopSamples: number;
+  hopSeconds: number;
+  overlapRatio: number;
+  pixelHeight: number;
+  pixelWidth: number;
+  requestKind: LayerKind;
+  rowCount: number;
+  startTileIndex: number;
+  targetColumns: number;
+  tileDuration: number;
+  viewEnd: number;
+  viewStart: number;
+  windowSeconds: number;
+}
+
+interface EnsurePlanTilesOptions {
+  onTileReady?: () => void;
+  shouldAbort?: () => boolean;
+}
+
+interface RenderTileOptions {
+  cacheKey?: string;
+  existingTile?: TileRecord | null;
+  onChunkReady?: () => void;
+  shouldAbort?: () => boolean;
+}
+
+interface AnalysisWorkerState {
+  activeConfigVersion: number;
+  attachedSessionVersion: number;
+  currentDisplayRange: {
+    end: number;
+    pixelHeight: number;
+    pixelWidth: number;
+    start: number;
+  };
+  duration: number;
+  generationStatus: Map<number, { cancelled: boolean }>;
+  initialized: boolean;
+  maxFrequency: number;
+  minFrequency: number;
+  overview: LayerState;
+  quality: QualityPreset;
+  runtimeVariant: string | null;
+  sampleCount: number;
+  sampleRate: number;
+  spectrogramOutputCapacity: number;
+  spectrogramOutputPointer: number;
+  tileCache: Map<string, TileRecord>;
+  tileCacheBytes: number;
+  visible: LayerState;
+}
+
+let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 let requestQueue = Promise.resolve();
 let overviewRenderLoopActive = false;
 let visibleRenderLoopActive = false;
-let pendingOverviewRequest = null;
-let pendingVisibleRequest = null;
+let pendingOverviewRequest: SpectrogramRequest | null = null;
+let pendingVisibleRequest: SpectrogramRequest | null = null;
 
 const surfaceState = {
-  canvas: null,
-  context: null,
+  canvas: null as OffscreenCanvas | null,
+  context: null as OffscreenCanvasRenderingContext2D | null,
   pixelWidth: 0,
   pixelHeight: 0,
 };
 
-let analysisState = createEmptyAnalysisState();
+let analysisState: AnalysisWorkerState = createEmptyAnalysisState();
 
 self.onmessage = (event) => {
   const message = event.data ?? {};
@@ -126,7 +255,7 @@ self.onmessage = (event) => {
   }
 };
 
-function createEmptyLayerState(kind) {
+function createEmptyLayerState(kind: LayerKind): LayerState {
   return {
     kind,
     generation: kind === 'overview' ? 0 : -1,
@@ -136,7 +265,7 @@ function createEmptyLayerState(kind) {
   };
 }
 
-function createEmptyAnalysisState() {
+function createEmptyAnalysisState(): AnalysisWorkerState {
   return {
     initialized: false,
     attachedSessionVersion: -1,
@@ -150,6 +279,7 @@ function createEmptyAnalysisState() {
     activeConfigVersion: 0,
     generationStatus: new Map(),
     tileCache: new Map(),
+    tileCacheBytes: 0,
     overview: createEmptyLayerState('overview'),
     visible: createEmptyLayerState('visible'),
     currentDisplayRange: {
@@ -163,7 +293,86 @@ function createEmptyAnalysisState() {
   };
 }
 
-function enqueueRequest(task) {
+function clearTileCache(): void {
+  analysisState.tileCache.clear();
+  analysisState.tileCacheBytes = 0;
+}
+
+function getPinnedTileKeys(): Set<string> {
+  const pinnedKeys = new Set<string>();
+
+  for (const plan of [analysisState.overview.plan, analysisState.visible.plan]) {
+    if (!plan) {
+      continue;
+    }
+
+    for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
+      pinnedKeys.add(buildTileCacheKey(plan, tileIndex));
+    }
+  }
+
+  return pinnedKeys;
+}
+
+function touchTileRecord(cacheKey: string): TileRecord | null {
+  const tileRecord = analysisState.tileCache.get(cacheKey) ?? null;
+
+  if (!tileRecord) {
+    return null;
+  }
+
+  analysisState.tileCache.delete(cacheKey);
+  analysisState.tileCache.set(cacheKey, tileRecord);
+  return tileRecord;
+}
+
+function pruneTileCache(): void {
+  if (
+    analysisState.tileCache.size <= MAX_TILE_CACHE_ENTRIES
+    && analysisState.tileCacheBytes <= MAX_TILE_CACHE_BYTES
+  ) {
+    return;
+  }
+
+  const pinnedKeys = getPinnedTileKeys();
+
+  for (const [cacheKey, tileRecord] of analysisState.tileCache) {
+    if (
+      analysisState.tileCache.size <= MAX_TILE_CACHE_ENTRIES
+      && analysisState.tileCacheBytes <= MAX_TILE_CACHE_BYTES
+    ) {
+      break;
+    }
+
+    if (pinnedKeys.has(cacheKey)) {
+      continue;
+    }
+
+    analysisState.tileCache.delete(cacheKey);
+    analysisState.tileCacheBytes = Math.max(0, analysisState.tileCacheBytes - tileRecord.byteLength);
+  }
+}
+
+function setTileRecord(cacheKey: string, tileRecord: TileRecord): void {
+  const previousRecord = analysisState.tileCache.get(cacheKey) ?? null;
+
+  if (!previousRecord) {
+    analysisState.tileCacheBytes += tileRecord.byteLength;
+  } else if (previousRecord !== tileRecord) {
+    analysisState.tileCacheBytes += tileRecord.byteLength - previousRecord.byteLength;
+  } else {
+    analysisState.tileCache.delete(cacheKey);
+  }
+
+  analysisState.tileCache.set(cacheKey, tileRecord);
+  pruneTileCache();
+}
+
+function getTileRecord(cacheKey: string): TileRecord | null {
+  return touchTileRecord(cacheKey);
+}
+
+function enqueueRequest(task: () => Promise<void>): void {
   requestQueue = requestQueue
     .then(task)
     .catch((error) => {
@@ -171,7 +380,7 @@ function enqueueRequest(task) {
     });
 }
 
-function getRuntime() {
+function getRuntime(): Promise<WaveCoreRuntime> {
   if (!runtimePromise) {
     runtimePromise = loadWaveCoreRuntime();
   }
@@ -179,27 +388,27 @@ function getRuntime() {
   return runtimePromise;
 }
 
-function normalizeQualityPreset(value) {
+function normalizeQualityPreset(value: unknown): QualityPreset {
   return value === 'balanced' || value === 'max' ? value : 'high';
 }
 
-function normalizeAnalysisType(value) {
+function normalizeAnalysisType(value: unknown): AnalysisType {
   return value === 'mel' || value === 'scalogram' ? value : 'spectrogram';
 }
 
-function normalizeFrequencyScale(value) {
+function normalizeFrequencyScale(value: unknown): FrequencyScale {
   return value === 'linear' ? 'linear' : 'log';
 }
 
-function getEffectiveFrequencyScale(analysisType, value) {
+function getEffectiveFrequencyScale(analysisType: AnalysisType, value: unknown): FrequencyScale {
   return analysisType === 'spectrogram' ? normalizeFrequencyScale(value) : 'log';
 }
 
-function getScalogramHopSamples(quality) {
+function getScalogramHopSamples(quality: QualityPreset): number {
   return SCALOGRAM_HOP_SAMPLES_BY_QUALITY[quality] ?? SCALOGRAM_HOP_SAMPLES_BY_QUALITY.high;
 }
 
-function initializeCanvas(options) {
+function initializeCanvas(options: CanvasInitOptions | undefined): void {
   if (options?.offscreenCanvas) {
     surfaceState.canvas = options.offscreenCanvas;
   }
@@ -217,7 +426,7 @@ function initializeCanvas(options) {
   paintSpectrogramDisplay();
 }
 
-function resizeCanvas(options) {
+function resizeCanvas(options: CanvasInitOptions | undefined): void {
   surfaceState.pixelWidth = Math.max(1, Math.round(Number(options?.pixelWidth) || surfaceState.pixelWidth || 1));
   surfaceState.pixelHeight = Math.max(1, Math.round(Number(options?.pixelHeight) || surfaceState.pixelHeight || 1));
 
@@ -232,7 +441,7 @@ function resizeCanvas(options) {
   paintSpectrogramDisplay();
 }
 
-function attachAudioSession(runtime, options) {
+function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptions | undefined): void {
   const module = runtime.module;
   const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
@@ -280,6 +489,7 @@ function attachAudioSession(runtime, options) {
 
   if (isNewAudioSession) {
     analysisState.tileCache.clear();
+    analysisState.tileCacheBytes = 0;
     analysisState.generationStatus.clear();
     analysisState.overview = createEmptyLayerState('overview');
     analysisState.visible = createEmptyLayerState('visible');
@@ -317,7 +527,7 @@ function attachAudioSession(runtime, options) {
   }
 }
 
-function updateCurrentDisplayRange(request) {
+function updateCurrentDisplayRange(request: SpectrogramRequest | null): void {
   const start = clamp(Number(request?.displayStart) || 0, 0, analysisState.duration);
   const end = clamp(
     Number(request?.displayEnd) || analysisState.duration,
@@ -333,7 +543,7 @@ function updateCurrentDisplayRange(request) {
   };
 }
 
-function cancelGeneration(generation) {
+function cancelGeneration(generation: unknown): void {
   if (!Number.isFinite(generation)) {
     return;
   }
@@ -341,19 +551,19 @@ function cancelGeneration(generation) {
   analysisState.generationStatus.set(Number(generation), { cancelled: true });
 }
 
-function isGenerationCancelled(generation) {
+function isGenerationCancelled(generation: number): boolean {
   return analysisState.generationStatus.get(generation)?.cancelled === true;
 }
 
-function normalizeConfigVersion(value) {
+function normalizeConfigVersion(value: unknown): number {
   return Number.isFinite(value) ? Math.max(0, Math.trunc(Number(value))) : 0;
 }
 
-function getRequestConfigVersion(request) {
+function getRequestConfigVersion(request: SpectrogramRequest | null): number {
   return normalizeConfigVersion(request?.configVersion);
 }
 
-function registerActiveConfigVersion(value) {
+function registerActiveConfigVersion(value: unknown): void {
   const nextConfigVersion = normalizeConfigVersion(value);
 
   if (nextConfigVersion === analysisState.activeConfigVersion) {
@@ -362,6 +572,7 @@ function registerActiveConfigVersion(value) {
 
   analysisState.activeConfigVersion = nextConfigVersion;
   analysisState.generationStatus.clear();
+  clearTileCache();
   analysisState.overview = createEmptyLayerState('overview');
   analysisState.visible = createEmptyLayerState('visible');
   pendingOverviewRequest = null;
@@ -513,7 +724,7 @@ async function pumpVisibleLoop() {
   }
 }
 
-function shouldAbortVisiblePlan(plan) {
+function shouldAbortVisiblePlan(plan: RenderRequestPlan): boolean {
   if (plan.configVersion !== analysisState.activeConfigVersion) {
     return true;
   }
@@ -534,7 +745,7 @@ function shouldAbortVisiblePlan(plan) {
   );
 }
 
-function shouldAbortOverviewPlan(plan) {
+function shouldAbortOverviewPlan(plan: RenderRequestPlan): boolean {
   if (plan.configVersion !== analysisState.activeConfigVersion) {
     return true;
   }
@@ -545,7 +756,11 @@ function shouldAbortOverviewPlan(plan) {
   );
 }
 
-async function ensurePlanTiles(runtime, plan, options = {}) {
+async function ensurePlanTiles(
+  runtime: WaveCoreRuntime,
+  plan: RenderRequestPlan,
+  options: EnsurePlanTilesOptions = {},
+): Promise<boolean> {
   const onTileReady = typeof options.onTileReady === 'function' ? options.onTileReady : null;
   const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
 
@@ -557,7 +772,7 @@ async function ensurePlanTiles(runtime, plan, options = {}) {
     const cacheKey = buildTileCacheKey(plan, tileIndex);
     const tileStart = tileIndex * plan.tileDuration;
     const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
-    const existingTile = analysisState.tileCache.get(cacheKey) ?? null;
+    const existingTile = getTileRecord(cacheKey);
 
     if (!existingTile || existingTile.complete !== true) {
       const tileRecord = await renderTile(runtime, plan, tileIndex, tileStart, tileEnd, {
@@ -579,7 +794,19 @@ async function ensurePlanTiles(runtime, plan, options = {}) {
   return true;
 }
 
-function createTileRecord({ cacheKey, rowCount, tileEnd, tileIndex, tileStart }) {
+function createTileRecord({
+  cacheKey,
+  rowCount,
+  tileEnd,
+  tileIndex,
+  tileStart,
+}: {
+  cacheKey: string;
+  rowCount: number;
+  tileEnd: number;
+  tileIndex: number;
+  tileStart: number;
+}): TileRecord {
   const canvas = new OffscreenCanvas(TILE_COLUMN_COUNT, rowCount);
   const context = canvas.getContext('2d', { alpha: false });
 
@@ -590,6 +817,7 @@ function createTileRecord({ cacheKey, rowCount, tileEnd, tileIndex, tileStart })
   const imageData = context.createImageData(TILE_COLUMN_COUNT, rowCount);
 
   return {
+    byteLength: TILE_COLUMN_COUNT * rowCount * 4,
     canvas,
     columnCount: TILE_COLUMN_COUNT,
     complete: false,
@@ -604,7 +832,13 @@ function createTileRecord({ cacheKey, rowCount, tileEnd, tileIndex, tileStart })
   };
 }
 
-function drawTileChunk(tileRecord, rgba, columnOffset, columnCount, rowCount) {
+function drawTileChunk(
+  tileRecord: TileRecord,
+  rgba: Uint8Array,
+  columnOffset: number,
+  columnCount: number,
+  rowCount: number,
+): void {
   const destination = tileRecord.imageData.data;
 
   if (columnOffset === 0 && columnCount === tileRecord.columnCount) {
@@ -625,7 +859,16 @@ function drawTileChunk(tileRecord, rgba, columnOffset, columnCount, rowCount) {
   tileRecord.context.putImageData(tileRecord.imageData, 0, 0, columnOffset, 0, columnCount, rowCount);
 }
 
-function renderTileChunk(runtime, plan, tileIndex, tileStart, tileEnd, tileRecord, startColumn, columnCount) {
+function renderTileChunk(
+  runtime: WaveCoreRuntime,
+  plan: RenderRequestPlan,
+  tileIndex: number,
+  tileStart: number,
+  tileEnd: number,
+  tileRecord: TileRecord,
+  startColumn: number,
+  columnCount: number,
+): void {
   const tileSpan = tileEnd - tileStart;
   const chunkStart = tileStart + ((startColumn / TILE_COLUMN_COUNT) * tileSpan);
   const chunkEnd = tileStart + (((startColumn + columnCount) / TILE_COLUMN_COUNT) * tileSpan);
@@ -655,7 +898,14 @@ function renderTileChunk(runtime, plan, tileIndex, tileStart, tileEnd, tileRecor
   drawTileChunk(tileRecord, rgba, startColumn, columnCount, plan.rowCount);
 }
 
-async function renderTile(runtime, plan, tileIndex, tileStart, tileEnd, options = {}) {
+async function renderTile(
+  runtime: WaveCoreRuntime,
+  plan: RenderRequestPlan,
+  tileIndex: number,
+  tileStart: number,
+  tileEnd: number,
+  options: RenderTileOptions = {},
+): Promise<TileRecord | null> {
   const cacheKey = typeof options.cacheKey === 'string' ? options.cacheKey : buildTileCacheKey(plan, tileIndex);
   const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
   const onChunkReady = typeof options.onChunkReady === 'function' ? options.onChunkReady : null;
@@ -677,7 +927,7 @@ async function renderTile(runtime, plan, tileIndex, tileStart, tileEnd, options 
     tileRecord.imageData = tileRecord.context.createImageData(tileRecord.columnCount, tileRecord.rowCount);
   }
 
-  analysisState.tileCache.set(cacheKey, tileRecord);
+  setTileRecord(cacheKey, tileRecord);
 
   while (tileRecord.renderedColumns < TILE_COLUMN_COUNT) {
     if (shouldAbort?.()) {
@@ -699,7 +949,7 @@ async function renderTile(runtime, plan, tileIndex, tileStart, tileEnd, options 
   return tileRecord;
 }
 
-function paintSpectrogramDisplay() {
+function paintSpectrogramDisplay(): void {
   const context = surfaceState.context;
 
   if (!context) {
@@ -729,7 +979,7 @@ function paintSpectrogramDisplay() {
   }
 }
 
-function drawBackground(context, width, height) {
+function drawBackground(context: OffscreenCanvasRenderingContext2D, width: number, height: number): void {
   context.setTransform(1, 0, 0, 1, 0, 0);
   context.clearRect(0, 0, width, height);
 
@@ -742,7 +992,12 @@ function drawBackground(context, width, height) {
   context.fillRect(0, 0, width, height);
 }
 
-function paintLayer(context, plan, displayRange, { smoothing, smoothingQuality }) {
+function paintLayer(
+  context: OffscreenCanvasRenderingContext2D,
+  plan: RenderRequestPlan | null,
+  displayRange: AnalysisWorkerState['currentDisplayRange'],
+  { smoothing, smoothingQuality }: { smoothing: boolean; smoothingQuality: ImageSmoothingQuality },
+): void {
   if (!plan) {
     return;
   }
@@ -756,7 +1011,7 @@ function paintLayer(context, plan, displayRange, { smoothing, smoothingQuality }
 
   for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
     const cacheKey = buildTileCacheKey(plan, tileIndex);
-    const tile = analysisState.tileCache.get(cacheKey);
+      const tile = getTileRecord(cacheKey);
 
     if (!tile) {
       continue;
@@ -810,7 +1065,7 @@ function paintLayer(context, plan, displayRange, { smoothing, smoothingQuality }
   }
 }
 
-function createRequestPlan(request) {
+function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPlan {
   const preset = QUALITY_PRESETS[analysisState.quality];
   const requestKind = request?.requestKind === 'overview' ? 'overview' : 'visible';
   const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
@@ -898,7 +1153,7 @@ function createRequestPlan(request) {
   };
 }
 
-function buildTileCacheKey(plan, tileIndex) {
+function buildTileCacheKey(plan: RenderRequestPlan, tileIndex: number): string {
   return [
     analysisState.quality,
     plan.configKey,
@@ -907,7 +1162,7 @@ function buildTileCacheKey(plan, tileIndex) {
   ].join(':');
 }
 
-function createLayerReadyBody(plan) {
+function createLayerReadyBody(plan: RenderRequestPlan) {
   return {
     analysisType: plan.analysisType,
     configVersion: plan.configVersion,
@@ -932,7 +1187,7 @@ function createLayerReadyBody(plan) {
   };
 }
 
-function isEquivalentPlan(left, right) {
+function isEquivalentPlan(left: RenderRequestPlan | null, right: RenderRequestPlan | null): boolean {
   if (!left || !right) {
     return false;
   }
@@ -952,17 +1207,17 @@ function isEquivalentPlan(left, right) {
     && Math.abs(left.viewEnd - right.viewEnd) <= 1e-6;
 }
 
-function normalizeFftSize(value) {
+function normalizeFftSize(value: unknown): number {
   const numericValue = Number(value);
   return FFT_SIZE_OPTIONS.includes(numericValue) ? numericValue : 4096;
 }
 
-function normalizeOverlapRatio(value) {
+function normalizeOverlapRatio(value: unknown): number {
   const numericValue = Number(value);
   return OVERLAP_RATIO_OPTIONS.includes(numericValue) ? numericValue : 0.75;
 }
 
-function ensureSpectrogramOutputCapacity(module, byteLength) {
+function ensureSpectrogramOutputCapacity(module: WaveCoreModule, byteLength: number): void {
   if (analysisState.spectrogramOutputCapacity >= byteLength && analysisState.spectrogramOutputPointer) {
     return;
   }
@@ -975,7 +1230,7 @@ function ensureSpectrogramOutputCapacity(module, byteLength) {
   analysisState.spectrogramOutputCapacity = byteLength;
 }
 
-function computeLoudnessSummary(runtime) {
+function computeLoudnessSummary(runtime: WaveCoreRuntime) {
   const module = runtime.module;
   const byteLength = LOUDNESS_SUMMARY_OUTPUT_LENGTH * Float32Array.BYTES_PER_ELEMENT;
   const outputPointer = module._malloc(byteLength);
@@ -1002,15 +1257,15 @@ function computeLoudnessSummary(runtime) {
   }
 }
 
-function getHeapF32View(module, pointer, length) {
+function getHeapF32View(module: WaveCoreModule, pointer: number, length: number): Float32Array {
   return new Float32Array(module.HEAPF32.buffer, pointer, length);
 }
 
-function getHeapU8View(module, pointer, length) {
+function getHeapU8View(module: WaveCoreModule, pointer: number, length: number): Uint8Array {
   return new Uint8Array(module.HEAPU8.buffer, pointer, length);
 }
 
-function disposeWasmSession(module) {
+function disposeWasmSession(module: WaveCoreModule): void {
   if (analysisState.spectrogramOutputPointer) {
     module._free(analysisState.spectrogramOutputPointer);
   }
@@ -1020,21 +1275,22 @@ function disposeWasmSession(module) {
   analysisState.spectrogramOutputCapacity = 0;
 }
 
-function disposeSession(runtime) {
+function disposeSession(runtime: WaveCoreRuntime): void {
   if (analysisState.initialized) {
     disposeWasmSession(runtime.module);
   }
 
+  clearTileCache();
   analysisState = createEmptyAnalysisState();
 }
 
-function yieldToEventLoop() {
+function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, 0);
   });
 }
 
-function postError(error) {
+function postError(error: unknown): void {
   const text = error instanceof Error ? error.message : String(error);
 
   self.postMessage({

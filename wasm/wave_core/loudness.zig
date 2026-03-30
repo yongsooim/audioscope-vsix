@@ -1,7 +1,7 @@
 const core = @import("./core.zig");
 
-pub export fn wave_measure_loudness_summary(output_ptr: i32) i32 {
-    if (core.g_session.samples.len == 0 or output_ptr == 0 or core.g_session.sample_count <= 0 or core.g_session.sample_rate <= 0.0) {
+pub export fn wave_measure_loudness_summary(output_ptr: usize) i32 {
+    if (core.g_session.samples.len == 0 or output_ptr == 0 or core.g_session.sample_count <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or core.g_session.sample_rate <= 0.0) {
         return 0;
     }
 
@@ -27,7 +27,7 @@ pub export fn wave_measure_loudness_summary(output_ptr: i32) i32 {
     if (core.ebur128_sample_peak(meter, 0, &sample_peak) != 0) return 0;
     if (core.ebur128_true_peak(meter, 0, &true_peak) != 0) return 0;
 
-    const output: [*]f32 = @ptrFromInt(@as(usize, @intCast(output_ptr)));
+    const output: [*]f32 = @ptrFromInt(output_ptr);
     output[0] = core.castSummaryValue(integrated_lufs);
     output[1] = core.castSummaryValue(loudness_range_lu);
     output[2] = core.linearToDecibels(sample_peak);

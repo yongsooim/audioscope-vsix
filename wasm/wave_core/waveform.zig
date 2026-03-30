@@ -114,12 +114,12 @@ pub export fn wave_build_waveform_pyramid() i32 {
     return @as(i32, @intCast(core.g_session.levels.len));
 }
 
-pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column_count: i32, output_ptr: i32) i32 {
-    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or view_end <= view_start or core.g_session.duration <= 0.0) {
+pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column_count: i32, output_ptr: usize) i32 {
+    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or !core.isFiniteF64(view_start) or !core.isFiniteF64(view_end) or view_end <= view_start or !core.isFiniteF32(core.g_session.duration) or core.g_session.duration <= 0.0) {
         return 0;
     }
 
-    const output: [*]f32 = @ptrFromInt(@as(usize, @intCast(output_ptr)));
+    const output: [*]f32 = @ptrFromInt(output_ptr);
     const clamped_start = core.clampf64(view_start, 0.0, @as(f64, core.g_session.duration));
     const clamped_end = core.clampf64(view_end, clamped_start + 0.0001, @as(f64, core.g_session.duration));
     const duration_f64 = @as(f64, core.g_session.duration);
