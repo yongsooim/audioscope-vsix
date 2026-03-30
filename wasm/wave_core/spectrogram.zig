@@ -1,6 +1,9 @@
 const std = @import("std");
 const core = @import("./core.zig");
 
+const palette_lut_size: usize = 1024;
+const palette_lut = buildPaletteLut();
+
 pub fn freeFftResources() void {
     var current = core.g_session.fft_resources;
     while (current) |node| {
@@ -467,7 +470,7 @@ fn computeMelBandMeanPower(power_spectrum: []const f32, band: core.MelBand, fft_
 }
 
 fn normalizePowerToDecibels(power: f32) f32 {
-    const decibels = 10.0 * @log10(power + 1e-14);
+    const decibels = 10.0 * core.approxLog10Positive(power + 1e-14);
     return (decibels - core.min_db) / (core.max_db - core.min_db);
 }
 
@@ -558,7 +561,7 @@ fn lerpColorChannel(start: f32, end: f32, t: f32) u8 {
     return @as(u8, @intFromFloat(@round(start + ((end - start) * t))));
 }
 
-fn writePaletteColor(normalized: f32, output: []u8) void {
+fn paletteColorAt(normalized: f32) [4]u8 {
     const t = core.clampf32(normalized, 0.0, 1.0);
     var local_t: f32 = 0.0;
     var start_r: f32 = 0.0;
@@ -610,10 +613,32 @@ fn writePaletteColor(normalized: f32, output: []u8) void {
         end_b = 176.0;
     }
 
-    output[0] = lerpColorChannel(start_r, end_r, local_t);
-    output[1] = lerpColorChannel(start_g, end_g, local_t);
-    output[2] = lerpColorChannel(start_b, end_b, local_t);
-    output[3] = 255;
+    return .{
+        lerpColorChannel(start_r, end_r, local_t),
+        lerpColorChannel(start_g, end_g, local_t),
+        lerpColorChannel(start_b, end_b, local_t),
+        255,
+    };
+}
+
+fn buildPaletteLut() [palette_lut_size][4]u8 {
+    @setEvalBranchQuota(10_000);
+    var lut: [palette_lut_size][4]u8 = undefined;
+    for (&lut, 0..) |*entry, index| {
+        const t = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(palette_lut_size - 1));
+        entry.* = paletteColorAt(t);
+    }
+    return lut;
+}
+
+fn writePaletteColor(normalized: f32, output: []u8) void {
+    const clamped = core.clampf32(normalized, 0.0, 1.0);
+    const index = @as(usize, @intFromFloat(@round(clamped * @as(f32, @floatFromInt(palette_lut_size - 1)))));
+    const color = palette_lut[index];
+    output[0] = color[0];
+    output[1] = color[1];
+    output[2] = color[2];
+    output[3] = color[3];
 }
 
 fn renderStftDerivedTile(
