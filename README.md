@@ -1,21 +1,26 @@
 # Wave Scope
 
-An audio-focused custom editor scaffold for VS Code, based on the structure of the `custom-editor-sample`.
+<p align="center">Inspect audio files in VS Code with synchronized waveform, spectrogram, playback, and loudness views.</p>
 
-The current setup includes:
+Wave Scope is a custom read-only audio viewer for VS Code. Open a supported audio file and inspect timing, frequency content, playback position, loop ranges, metadata, and loudness without leaving the editor.
 
-- An audio custom editor built on `CustomReadonlyEditorProvider`
-- A unified spectrogram/loudness compute pipeline powered by freestanding Zig `wave_core`
-- `SharedArrayBuffer`-based zero-copy PCM sharing with a JS waveform render worker
-- An OffscreenCanvas-based waveform render worker
-- An integrated loudness/LRA/peak summary panel backed by `libebur128`
-- A fullscreen preview without scrollbars
-- Drag-to-seek, `Shift`+drag loop selection, zoom/pan, overview thumb scrolling, and quick jump buttons
-- `Space` to play/pause, `←/→` to seek 5 seconds, and double-click to play/pause
-- The `Wave Scope: Open Active Audio File in Wave Scope` command
-- Automatic opening of the bundled sample WAV when debugging starts
+| Inspect | Navigate | Analyze |
+| --- | --- | --- |
+| Waveform and spectrogram side by side | Seek, zoom, pan, follow playback, and loop sections | Metadata, LUFS/LRA, sample peak, and true peak summary |
 
-Supported file patterns:
+## Highlights
+
+- Open common audio formats directly in a dedicated VS Code view
+- View waveform and spectrogram together in a fullscreen-first, resizable layout
+- Click to seek, drag to create loop ranges, and refine loop points with direct handles
+- Use follow mode, overview scrolling, and zoom controls for long recordings
+- Review codec, container, duration, bitrate, and channel metadata
+- Inspect integrated loudness, loudness range, sample peak, and true peak at a glance
+- Use optional `ffmpeg` and `ffprobe` integration for richer metadata and decode fallback on local files
+
+## Supported Formats
+
+`Wave Scope` registers as the default editor for these file types:
 
 - `.wav`
 - `.wave`
@@ -29,57 +34,72 @@ Supported file patterns:
 - `.aif`
 - `.aiff`
 
-## Run
+## Requirements
+
+- VS Code `1.100.0` or later
+- Optional: `ffmpeg` and `ffprobe` for richer metadata and decode fallback on local filesystem files
+
+## Getting Started
+
+1. Install the extension.
+2. Open a supported audio file in VS Code.
+3. The file opens in `Wave Scope` automatically.
+4. To open manually, run `Wave Scope: Open Active Audio File in Wave Scope` from the Command Palette or use `Reopen Editor With...`.
+
+## Interaction
+
+- `Space`: play or pause
+- `←` / `→`: seek backward or forward by 5 seconds
+- `-` / `=`: zoom out or zoom in
+- Click on the waveform or spectrogram: seek to that point
+- Drag on the waveform or spectrogram: create a loop range
+- Drag loop handles: adjust loop boundaries
+- Mouse wheel or trackpad: zoom or pan the visible range
+- Drag the center splitter: resize waveform and spectrogram panels
+
+## Optional ffmpeg Integration
+
+Wave Scope works out of the box for formats the runtime can decode natively. Installing `ffmpeg` and `ffprobe` improves the experience for local filesystem files by enabling:
+
+- richer metadata via `ffprobe`
+- decode fallback for files the runtime cannot open directly
+
+If the binaries are not on `PATH`, configure them with:
+
+- `waveScope.ffmpegPath`
+- `waveScope.ffprobePath`
+
+## Settings
+
+- `waveScope.spectrogramQuality`: choose `balanced`, `high`, or `max`
+- `waveScope.ffmpegPath`: custom `ffmpeg` executable path or command name
+- `waveScope.ffprobePath`: custom `ffprobe` executable path or command name
+- `waveScope.openSampleOnStartupInDevelopment`: open the bundled sample file automatically in development mode
+
+## Notes
+
+- Wave Scope is currently read-only. It does not modify the source audio file.
+- Loudness values currently use the same mono downmix used for waveform and spectrogram analysis. Multichannel audio renders correctly, but LUFS/LRA/peak numbers are downmix-based.
+
+## Development
 
 ```bash
-npm install
+bun install
 git submodule update --init --recursive
-npm run compile
+bun run compile
 ```
 
-`npm run compile` requires `zig` 0.15+. The FFT backend uses the original Bitbucket `pffft` submodule, and loudness summaries use the `libebur128` submodule. The build targets `wasm32-freestanding`, producing `dist/wasm/wave_core_simd.wasm` and `dist/wasm/wave_core_fallback.wasm`, while the webview bundles are emitted to `dist/webview/`. The webview runtime selects the appropriate module depending on SIMD support.
+`bun run compile` requires `bun` and `zig` 0.15+ and produces:
 
-At the moment, the loudness summary reuses the same mono downmixed PCM used for waveform and spectrogram analysis. Stereo and multichannel files are displayed correctly, but LUFS/LRA/peak values are based on the downmix rather than channel-preserving measurement.
+- `dist/webview/` webview bundles
+- `dist/wasm/wave_core_simd.wasm`
+- `dist/wasm/wave_core_fallback.wasm`
 
-Then open this folder in VS Code and press `F5` to launch the Extension Development Host.
-In development mode, `exampleFiles/sample-tone.wav` opens automatically in `Wave Scope`.
-If you do not want that behavior, set `waveScope.openSampleOnStartupInDevelopment` to `false` in VS Code settings.
+Open this folder in VS Code and press `F5` to launch the Extension Development Host.
 
-The runtime supports two paths:
-
-- When `crossOriginIsolated + SharedArrayBuffer` is available: SAB fast path
-- Otherwise in VS Code desktop environments: transferable fallback path
-
-The custom editor is registered with `default` priority, so supported audio files open in `Wave Scope` automatically. You can also reopen files manually through:
-
-- The Command Palette: `Wave Scope: Open Active Audio File in Wave Scope`
-- The editor tab menu: `Reopen Editor With...` then `Wave Scope`
-
-## Project Structure
-
-- `src/extension.ts`: extension activation entry
-- `src/waveScopeEditor.ts`: custom editor provider and webview bootstrap
-- `src-webview/waveScope.ts`: playback, waveform interaction, and spectrogram drawing source
-- `src-webview/waveScope.css`: fullscreen webview style source
-- `dist/webview/`: generated webview bundles
-- `wasm/wave_core.zig`: freestanding wasm export entry
-- `wasm/wave_core/`: Zig modules split by session, waveform, loudness, and spectrogram responsibilities
-- `wasm/freestanding/include`: minimal C/NEON compatibility headers for freestanding PFFFT builds
-- `wasm/third_party/libebur128`: `libebur128` submodule used for EBU R128 loudness summaries
-- `wasm/third_party/pffft`: original Bitbucket `pffft` submodule
-- `src-webview/sharedBuffers.ts`: SAB/control slot layout helper
-- `src-webview/interactiveWaveformWorker.ts`: worker source that reads PCM directly, builds the waveform pyramid, and renders waveform data only
-- `src-webview/audioAnalysisWorker.ts`: orchestration for the unified Zig/WASM spectrogram and loudness compute worker
-- `dist/wasm/wave_core_simd.wasm`, `dist/wasm/wave_core_fallback.wasm`: generated freestanding Zig wasm artifacts
-- `exampleFiles/sample-tone.wav`: sample audio used for debugging
+In development mode, `exampleFiles/sample-tone.wav` opens automatically in `Wave Scope`. To disable that behavior, set `waveScope.openSampleOnStartupInDevelopment` to `false`.
 
 ## Acknowledgements
 
-- `scalogram` optimization was informed by the public implementation and documentation of [`fCWT`](https://github.com/fastlib/fCWT), especially around precomputed `scale/frequency` mappings, wavelet kernel reuse, and vectorization-friendly computation structure.
-- This project does not embed or depend on `fCWT` directly at runtime. It only adapts the underlying ideas to fit the current Zig/WASM renderer.
-
-## Next Ideas
-
-- marker, cue, transcript overlay
-- larger-file spectrogram optimization with workers
-- editable annotations persisted in sidecar JSON
+- Scalogram optimization was informed by the public implementation and documentation of [`fCWT`](https://github.com/fastlib/fCWT), especially around precomputed scale-to-frequency mappings, wavelet kernel reuse, and vectorization-friendly computation structure.
+- Wave Scope does not embed or depend on `fCWT` directly at runtime.
