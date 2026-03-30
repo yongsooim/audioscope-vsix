@@ -5,7 +5,7 @@ import {
   getExternalToolStatus,
   getMediaMetadata,
   probeAudioOpen,
-  type AudioPreviewPayload,
+  type WaveScopePayload,
 } from './externalAudioTools';
 
 const KNOWN_AUDIO_EXTENSIONS = new Set([
@@ -22,15 +22,15 @@ const KNOWN_AUDIO_EXTENSIONS = new Set([
   'aiff',
 ]);
 
-class AudioPreviewDocument implements vscode.CustomDocument {
+class WaveScopeDocument implements vscode.CustomDocument {
   private readonly onDidDisposeEmitter = new vscode.EventEmitter<void>();
 
   public readonly onDidDispose = this.onDidDisposeEmitter.event;
 
   private constructor(public readonly uri: vscode.Uri) {}
 
-  public static async create(uri: vscode.Uri): Promise<AudioPreviewDocument> {
-    return new AudioPreviewDocument(uri);
+  public static async create(uri: vscode.Uri): Promise<WaveScopeDocument> {
+    return new WaveScopeDocument(uri);
   }
 
   public dispose(): void {
@@ -39,20 +39,20 @@ class AudioPreviewDocument implements vscode.CustomDocument {
   }
 }
 
-export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorProvider<AudioPreviewDocument> {
-  public static readonly viewType = 'waveScope.audioPreview';
+export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvider<WaveScopeDocument> {
+  public static readonly viewType = 'waveScope.editor';
 
   public static register(context: vscode.ExtensionContext): vscode.Disposable {
-    const provider = new AudioPreviewEditorProvider(context);
+    const provider = new WaveScopeEditorProvider(context);
 
     return vscode.Disposable.from(
-      vscode.window.registerCustomEditorProvider(AudioPreviewEditorProvider.viewType, provider, {
+      vscode.window.registerCustomEditorProvider(WaveScopeEditorProvider.viewType, provider, {
         webviewOptions: {
           retainContextWhenHidden: true,
         },
         supportsMultipleEditorsPerDocument: true,
       }),
-      vscode.commands.registerCommand('waveScope.openActiveAudioPreview', async (resource?: vscode.Uri) => {
+      vscode.commands.registerCommand('waveScope.openActiveFileInWaveScope', async (resource?: vscode.Uri) => {
         const target = resource ?? getActiveResource();
 
         if (!target) {
@@ -64,7 +64,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           return;
         }
 
-        await vscode.commands.executeCommand('vscode.openWith', target, AudioPreviewEditorProvider.viewType);
+        await vscode.commands.executeCommand('vscode.openWith', target, WaveScopeEditorProvider.viewType);
       }),
     );
   }
@@ -77,12 +77,12 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     uri: vscode.Uri,
     _openContext: vscode.CustomDocumentOpenContext,
     _token: vscode.CancellationToken,
-  ): Promise<AudioPreviewDocument> {
-    return AudioPreviewDocument.create(uri);
+  ): Promise<WaveScopeDocument> {
+    return WaveScopeDocument.create(uri);
   }
 
   public async resolveCustomEditor(
-    document: AudioPreviewDocument,
+    document: WaveScopeDocument,
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken,
   ): Promise<void> {
@@ -170,7 +170,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     });
   }
 
-  private async buildPayload(document: AudioPreviewDocument, webview: vscode.Webview): Promise<AudioPreviewPayload> {
+  private async buildPayload(document: WaveScopeDocument, webview: vscode.Webview): Promise<WaveScopePayload> {
     let fileSize: number | null = null;
 
     try {
@@ -198,10 +198,10 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
   }
 
   private getHtmlForWebview(webview: vscode.Webview): string {
-    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'audioPreview.js'));
-    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'audioPreview.css'));
-    const workerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'audioAnalysisWorker.js'));
-    const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'interactiveWaveformWorker.js'));
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'waveScope.js'));
+    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'src-webview', 'waveScope.css'));
+    const workerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'audioAnalysisWorker.js'));
+    const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'interactiveWaveformWorker.js'));
 
     return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -217,7 +217,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
   </head>
   <body data-worker-src="${workerUri}" data-waveform-worker-src="${waveformWorkerUri}">
     <main class="app-shell">
-      <section id="preview-viewport" class="viewport" aria-label="Waveform and spectrogram preview">
+      <section id="wave-scope-viewport" class="viewport" aria-label="Wave Scope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">
           <div id="wave-toolbar" class="wave-toolbar">
             <div id="wave-toolbar-info" class="wave-toolbar-info">
@@ -307,6 +307,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
                   <option value="0.5">50%</option>
                   <option value="0.75" selected>75%</option>
                   <option value="0.875">87.5%</option>
+                  <option value="0.9375">93.75%</option>
                 </select>
               </label>
               <label class="spectrogram-control">
@@ -356,7 +357,7 @@ export class AudioPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
             <span id="loudness-true-peak" class="loudness-chip-value">--</span>
           </div>
         </div>
-        <div id="analysis-status" class="analysis-status">Preparing preview…</div>
+        <div id="analysis-status" class="analysis-status">Preparing Wave Scope…</div>
       </footer>
       <div id="status" class="status-overlay" hidden></div>
     </main>

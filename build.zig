@@ -23,21 +23,21 @@ pub fn build(b: *std.Build) void {
     });
 
     const update_artifacts = b.addUpdateSourceFiles();
-    const wave_core_step = b.step("wave-core-artifacts", "Build wave core wasm artifacts into media/");
+    const wave_core_step = b.step("wave-core-artifacts", "Build wave core wasm artifacts into dist/wasm/");
 
     const simd_artifact = addWaveCoreArtifact(b, .{
         .artifact_name = "wave_core_simd",
         .pffft_flags = &.{ "-msimd128" },
         .target = simd_target,
     }, optimize);
-    update_artifacts.addCopyFileToSource(simd_artifact.getEmittedBin(), "media/wave_core_simd.wasm");
+    update_artifacts.addCopyFileToSource(simd_artifact.getEmittedBin(), "dist/wasm/wave_core_simd.wasm");
 
     const fallback_artifact = addWaveCoreArtifact(b, .{
         .artifact_name = "wave_core_fallback",
         .pffft_flags = &.{ "-DPFFFT_SIMD_DISABLE=1" },
         .target = fallback_target,
     }, optimize);
-    update_artifacts.addCopyFileToSource(fallback_artifact.getEmittedBin(), "media/wave_core_fallback.wasm");
+    update_artifacts.addCopyFileToSource(fallback_artifact.getEmittedBin(), "dist/wasm/wave_core_fallback.wasm");
 
     wave_core_step.dependOn(&update_artifacts.step);
 }

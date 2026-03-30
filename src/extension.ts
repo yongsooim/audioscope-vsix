@@ -1,21 +1,21 @@
 import * as vscode from 'vscode';
-import { AudioPreviewEditorProvider } from './audioPreviewEditor';
+import { WaveScopeEditorProvider } from './waveScopeEditor';
 
 export function activate(context: vscode.ExtensionContext): void {
-  context.subscriptions.push(AudioPreviewEditorProvider.register(context));
+  context.subscriptions.push(WaveScopeEditorProvider.register(context));
   void maybeOpenBundledSample(context);
 }
 
 export function deactivate(): void {}
 
-let didAttemptStartupPreview = false;
+let didAttemptStartupWaveScopeOpen = false;
 
 async function maybeOpenBundledSample(context: vscode.ExtensionContext): Promise<void> {
-  if (didAttemptStartupPreview || context.extensionMode !== vscode.ExtensionMode.Development) {
+  if (didAttemptStartupWaveScopeOpen || context.extensionMode !== vscode.ExtensionMode.Development) {
     return;
   }
 
-  didAttemptStartupPreview = true;
+  didAttemptStartupWaveScopeOpen = true;
 
   const enabled = vscode.workspace
     .getConfiguration('waveScope')
@@ -29,7 +29,7 @@ async function maybeOpenBundledSample(context: vscode.ExtensionContext): Promise
 
   try {
     await vscode.workspace.fs.stat(sampleUri);
-    await vscode.commands.executeCommand('vscode.openWith', sampleUri, AudioPreviewEditorProvider.viewType);
+    await vscode.commands.executeCommand('vscode.openWith', sampleUri, WaveScopeEditorProvider.viewType);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`Wave Scope could not open the bundled sample file: ${message}`);

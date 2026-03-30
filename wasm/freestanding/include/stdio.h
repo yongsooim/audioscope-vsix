@@ -1,7 +1,7 @@
-#ifndef WAVE_PREVIEW_FREESTANDING_STDIO_H
-#define WAVE_PREVIEW_FREESTANDING_STDIO_H
+#ifndef WAVE_SCOPE_FREESTANDING_STDIO_H
+#define WAVE_SCOPE_FREESTANDING_STDIO_H
 
-typedef struct wave_preview_file FILE;
+typedef struct wave_scope_file FILE;
 
 #define stderr ((FILE *) 0)
 #define printf(...) 0

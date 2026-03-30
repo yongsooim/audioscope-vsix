@@ -7,12 +7,12 @@ const projectRoot = path.resolve(scriptDirectory, '..');
 
 await build({
   input: {
-    audioPreview: path.join(projectRoot, 'src-webview', 'audioPreview.ts'),
+    waveScope: path.join(projectRoot, 'src-webview', 'waveScope.ts'),
     audioAnalysisWorker: path.join(projectRoot, 'src-webview', 'audioAnalysisWorker.ts'),
     interactiveWaveformWorker: path.join(projectRoot, 'src-webview', 'interactiveWaveformWorker.ts'),
   },
   output: {
-    dir: path.join(projectRoot, 'media'),
+    dir: path.join(projectRoot, 'dist', 'webview'),
     entryFileNames: '[name].js',
     format: 'esm',
     sourcemap: false,

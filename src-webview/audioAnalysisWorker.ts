@@ -27,7 +27,7 @@ const QUALITY_PRESETS = {
 };
 
 const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
-const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875];
+const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_ROW_BLOCK_SIZE = 32;
 const LOUDNESS_SUMMARY_OUTPUT_LENGTH = 4;
@@ -482,6 +482,9 @@ async function pumpVisibleLoop() {
         ready: false,
         requestPending: true,
       };
+
+      // Repaint immediately against the new viewport instead of stretching the previous raster.
+      paintSpectrogramDisplay();
 
       const completed = await ensurePlanTiles(runtimePromise ? await runtimePromise : await getRuntime(), plan, {
         onTileReady: () => {

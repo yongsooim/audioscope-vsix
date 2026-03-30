@@ -8,7 +8,7 @@ const TOP_PADDING = 10;
 const BOTTOM_PADDING = 10;
 const CENTER_LINE_ALPHA = 0.14;
 const SYMMETRIC_ENVELOPE_GAIN = 0.76;
-const SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 16;
+const SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 24;
 const RAW_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 1;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
 const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
@@ -25,7 +25,7 @@ const surfaceState = {
   width: 0,
   height: 0,
   renderScale: 2,
-  color: '#7dd3fc',
+  color: '#8ccadd',
 };
 
 let analysisState = createEmptyAnalysisState();

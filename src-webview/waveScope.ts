@@ -29,7 +29,7 @@ const VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX = 140;
 const VIEWPORT_RATIO_MIN = 0.15;
 const VIEWPORT_RATIO_MAX = 0.85;
 
-const WAVEFORM_COLOR = '#7dd3fc';
+const WAVEFORM_COLOR = '#8ccadd';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2.25;
@@ -69,10 +69,10 @@ const QUALITY_PRESETS = {
 };
 
 const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
-const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875];
+const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 
 const elements = {
-  viewport: document.getElementById('preview-viewport'),
+  viewport: document.getElementById('wave-scope-viewport'),
   wavePanel: document.getElementById('wave-panel'),
   waveToolbar: document.getElementById('wave-toolbar'),
   mediaMetadataPanel: document.getElementById('media-metadata-panel'),
@@ -199,7 +199,6 @@ const state = {
   waveformRenderVisibleSpan: 0,
   waveformSamplePlotMode: false,
   waveformRawSamplePlotMode: false,
-  spectrogramRenderRange: { start: 0, end: 0 },
   waveformAxisRenderRange: { start: 0, end: 0 },
   waveformAxisRenderWidth: 0,
   playbackFrame: 0,
@@ -232,7 +231,7 @@ if (
   typeof elements.spectrogram?.transferControlToOffscreen !== 'function'
   || typeof OffscreenCanvas !== 'function'
 ) {
-  setFatalStatus('OffscreenCanvas is required for this preview.');
+  setFatalStatus('OffscreenCanvas is required for Wave Scope.');
 } else {
   initializeKeyboardFocus();
   state.followPlayback = elements.waveFollow.checked;
@@ -1683,8 +1682,6 @@ function handleAnalysisWorkerMessage(loadToken, message) {
     state.analysis.sampleCount = body.sampleCount;
     state.analysis.minFrequency = body.minFrequency;
     state.analysis.maxFrequency = body.maxFrequency;
-    state.spectrogramRenderRange = { start: 0, end: 0 };
-
     renderSpectrogramScale();
     renderSpectrogramMeta();
     requestOverviewSpectrogram({ force: true });
@@ -1775,11 +1772,7 @@ function handleAnalysisWorkerMessage(loadToken, message) {
       viewStart: body.viewStart,
       windowSeconds: body.windowSeconds,
     };
-    state.spectrogramRenderRange = {
-      end: body.displayEnd,
-      start: body.displayStart,
-    };
-    applySpectrogramCanvasTransform();
+    resetSpectrogramCanvasTransform();
     setAnalysisStatus('Ready');
     renderSpectrogramMeta();
     return;
@@ -1841,7 +1834,7 @@ function scheduleSpectrogramRender({ force = false } = {}) {
       return;
     }
 
-    applySpectrogramCanvasTransform(displayRange);
+    resetSpectrogramCanvasTransform();
 
     const previousGeneration = state.analysis.generation;
     const configVersion = state.analysis.configVersion ?? 0;
@@ -3932,7 +3925,7 @@ function attachResizeObservers() {
     renderWaveformUi();
     void syncWaveformView({ force: waveformViewportResized });
     renderSpectrogramScale();
-    applySpectrogramCanvasTransform();
+    resetSpectrogramCanvasTransform();
     requestOverviewSpectrogram({ force: true });
     queueVisibleSpectrogramRequest({ force: true });
     scheduleSpectrogramRender({ force: true });
@@ -3992,7 +3985,6 @@ function destroySession() {
   state.waveformRenderVisibleSpan = 0;
   state.waveformSamplePlotMode = false;
   state.waveformRawSamplePlotMode = false;
-  state.spectrogramRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderRange = { start: 0, end: 0 };
   state.waveformAxisRenderWidth = 0;
   state.sourceArrayBuffer = null;
@@ -4595,33 +4587,6 @@ function applyWaveformAxisTransform(displayRange = getWaveformRange()) {
 function resetSpectrogramCanvasTransform() {
   elements.spectrogram.style.width = '100%';
   elements.spectrogram.style.transform = 'translate3d(0px, 0, 0)';
-}
-
-function applySpectrogramCanvasTransform(displayRange = getWaveformRange()) {
-  const renderRange = state.spectrogramRenderRange;
-  const viewportWidth = Math.max(1, elements.spectrogram.clientWidth || elements.spectrogram.parentElement?.clientWidth || 1);
-  const renderSpan = Math.max(0, renderRange.end - renderRange.start);
-  const displaySpan = Math.max(0, displayRange.end - displayRange.start);
-
-  if (
-    !(displayRange.end > displayRange.start)
-    || renderSpan <= 0
-    || displaySpan <= 0
-    || Math.abs(renderRange.start - displayRange.start) <= SPECTROGRAM_RANGE_EPSILON_SECONDS
-    && Math.abs(renderRange.end - displayRange.end) <= SPECTROGRAM_RANGE_EPSILON_SECONDS
-  ) {
-    resetSpectrogramCanvasTransform();
-    return;
-  }
-
-  const scaledWidth = Math.max(viewportWidth, Math.round(viewportWidth * (renderSpan / displaySpan)));
-  const secondsPerPixel = renderSpan / viewportWidth;
-  const unclampedOffset = -((displayRange.start - renderRange.start) / secondsPerPixel);
-  const minOffset = Math.min(0, viewportWidth - scaledWidth);
-  const translateX = clamp(unclampedOffset, minOffset, 0);
-
-  elements.spectrogram.style.width = `${scaledWidth}px`;
-  elements.spectrogram.style.transform = `translate3d(${translateX}px, 0, 0)`;
 }
 
 function getVisibleSpectrogramRequestMetrics(displayRange = getWaveformRange()) {
