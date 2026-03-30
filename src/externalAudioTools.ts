@@ -666,7 +666,7 @@ export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFall
         '-map',
         '0:a:0',
         '-acodec',
-        'pcm_s16le',
+        'pcm_f32le',
         '-f',
         'wav',
         '-',

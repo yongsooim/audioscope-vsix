@@ -124,7 +124,7 @@ If the binaries are not on `PATH`, configure them with:
 
 ## Notes
 
-- Wave Scope is currently read-only. It does not modify the source audio file.
+- Very long, high-sample-rate, or multichannel files can use substantial memory while Wave Scope decodes audio and prepares waveform and spectrogram analysis.
 - Loudness values currently use the same mono downmix used for waveform and spectrogram analysis. Multichannel audio renders correctly, but LUFS/LRA/peak numbers are downmix-based.
 
 ## Development
