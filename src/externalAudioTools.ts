@@ -17,7 +17,7 @@ export interface ExternalToolStatusPayload {
   guidance: string;
 }
 
-export interface AudioPreviewPayload {
+export interface WaveScopePayload {
   documentUri: string;
   externalTools: ExternalToolStatusPayload;
   fileBacked: boolean;

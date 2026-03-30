@@ -1,21 +1,21 @@
 # Wave Scope
 
-VS Code의 `custom-editor-sample` 구조를 참고해 만든 오디오 전용 커스텀 에디터 스캐폴드입니다.
+An audio-focused custom editor scaffold for VS Code, based on the structure of the `custom-editor-sample`.
 
-현재 셋업에는 아래가 포함되어 있습니다.
+The current setup includes:
 
-- `CustomReadonlyEditorProvider` 기반 오디오 미리보기 에디터
-- Zig freestanding `wave_core` 기반 단일 spectrogram/loudness compute pipeline
-- `SharedArrayBuffer` 기반 zero-copy PCM 공유와 JS waveform render worker
-- OffscreenCanvas 기반 waveform render worker
-- `libebur128` 기반 integrated loudness/LRA/peak summary panel
-- 스크롤 없는 전체화면 미리보기
-- 드래그 시크, `Shift`+드래그 루프 선택, 줌/팬, overview thumb 스크롤, 빠른 이동 버튼
-- `Space` 재생/일시정지, `←/→` 5초 이동, 더블클릭 재생/일시정지
-- `Wave Scope: Open Active Audio File in Wave Scope` 명령
-- 디버그 시작 시 번들된 샘플 WAV 자동 오픈
+- An audio custom editor built on `CustomReadonlyEditorProvider`
+- A unified spectrogram/loudness compute pipeline powered by freestanding Zig `wave_core`
+- `SharedArrayBuffer`-based zero-copy PCM sharing with a JS waveform render worker
+- An OffscreenCanvas-based waveform render worker
+- An integrated loudness/LRA/peak summary panel backed by `libebur128`
+- A fullscreen preview without scrollbars
+- Drag-to-seek, `Shift`+drag loop selection, zoom/pan, overview thumb scrolling, and quick jump buttons
+- `Space` to play/pause, `←/→` to seek 5 seconds, and double-click to play/pause
+- The `Wave Scope: Open Active Audio File in Wave Scope` command
+- Automatic opening of the bundled sample WAV when debugging starts
 
-지원 파일 패턴:
+Supported file patterns:
 
 - `.wav`
 - `.wave`
@@ -37,45 +37,46 @@ git submodule update --init --recursive
 npm run compile
 ```
 
-`npm run compile`은 `zig` 0.15+가 필요합니다. FFT 백엔드는 Bitbucket 원본 `pffft` submodule을 사용하고, 라우드니스 요약은 `libebur128` submodule을 사용합니다. 빌드는 `wasm32-freestanding` 타깃으로 `wave_core_simd.wasm`과 `wave_core_fallback.wasm`을 함께 생성합니다. 웹뷰 런타임은 SIMD 지원 여부에 따라 적절한 모듈을 고릅니다.
+`npm run compile` requires `zig` 0.15+. The FFT backend uses the original Bitbucket `pffft` submodule, and loudness summaries use the `libebur128` submodule. The build targets `wasm32-freestanding`, producing `dist/wasm/wave_core_simd.wasm` and `dist/wasm/wave_core_fallback.wasm`, while the webview bundles are emitted to `dist/webview/`. The webview runtime selects the appropriate module depending on SIMD support.
 
-현재 라우드니스 요약은 waveform/spectrogram 분석과 같은 mono downmix PCM을 재사용합니다. 스테레오/멀티채널 파일도 표시되지만, LUFS/LRA/peak 값은 채널 보존 측정이 아니라 downmix 기준입니다.
+At the moment, the loudness summary reuses the same mono downmixed PCM used for waveform and spectrogram analysis. Stereo and multichannel files are displayed correctly, but LUFS/LRA/peak values are based on the downmix rather than channel-preserving measurement.
 
-그다음 VS Code에서 이 폴더를 열고 `F5`로 Extension Development Host를 실행하면 됩니다.
-개발 모드에서는 `exampleFiles/sample-tone.wav`가 `Wave Scope`로 자동으로 열립니다.
-원하지 않으면 VS Code 설정에서 `waveScope.openSampleOnStartupInDevelopment`를 `false`로 바꾸면 됩니다.
+Then open this folder in VS Code and press `F5` to launch the Extension Development Host.
+In development mode, `exampleFiles/sample-tone.wav` opens automatically in `Wave Scope`.
+If you do not want that behavior, set `waveScope.openSampleOnStartupInDevelopment` to `false` in VS Code settings.
 
-런타임은 두 경로를 지원합니다.
+The runtime supports two paths:
 
-- `crossOriginIsolated + SharedArrayBuffer` 가능 시: SAB fast path
-- 그 외 VS Code desktop 환경: transferable fallback path
+- When `crossOriginIsolated + SharedArrayBuffer` is available: SAB fast path
+- Otherwise in VS Code desktop environments: transferable fallback path
 
-기본 등록 우선순위는 `default`라서 지원 오디오 파일을 열면 `Wave Scope`가 바로 사용됩니다. 필요하면 아래 경로로도 다시 열 수 있습니다.
+The custom editor is registered with `default` priority, so supported audio files open in `Wave Scope` automatically. You can also reopen files manually through:
 
-- Command Palette에서 `Wave Scope: Open Active Audio File in Wave Scope`
-- 에디터 탭에서 `Reopen Editor With...` 후 `Wave Scope`
+- The Command Palette: `Wave Scope: Open Active Audio File in Wave Scope`
+- The editor tab menu: `Reopen Editor With...` then `Wave Scope`
 
 ## Project Structure
 
 - `src/extension.ts`: extension activation entry
-- `src/audioPreviewEditor.ts`: custom editor provider와 webview bootstrap
-- `src-webview/audioPreview.ts`: 재생, waveform interaction, spectrogram drawing source
-- `media/audioPreview.css`: 전체화면 웹뷰 스타일
+- `src/waveScopeEditor.ts`: custom editor provider and webview bootstrap
+- `src-webview/waveScope.ts`: playback, waveform interaction, and spectrogram drawing source
+- `src-webview/waveScope.css`: fullscreen webview style source
+- `dist/webview/`: generated webview bundles
 - `wasm/wave_core.zig`: freestanding wasm export entry
-- `wasm/wave_core/`: session, waveform, loudness, spectrogram responsibility별 Zig 모듈
-- `wasm/freestanding/include`: freestanding PFFFT 빌드를 위한 최소 C/NEON 호환 헤더
-- `wasm/third_party/libebur128`: EBU R128 loudness summary 측정을 위한 `libebur128` submodule
-- `wasm/third_party/pffft`: Bitbucket 원본 `pffft` submodule
+- `wasm/wave_core/`: Zig modules split by session, waveform, loudness, and spectrogram responsibilities
+- `wasm/freestanding/include`: minimal C/NEON compatibility headers for freestanding PFFFT builds
+- `wasm/third_party/libebur128`: `libebur128` submodule used for EBU R128 loudness summaries
+- `wasm/third_party/pffft`: original Bitbucket `pffft` submodule
 - `src-webview/sharedBuffers.ts`: SAB/control slot layout helper
-- `src-webview/interactiveWaveformWorker.ts`: PCM을 직접 읽어 pyramid를 만들고 waveform만 그리는 worker source
-- `src-webview/audioAnalysisWorker.ts`: 단일 Zig/WASM spectrogram/loudness compute worker orchestration
-- `media/wave_core_simd.wasm`, `media/wave_core_fallback.wasm`: Zig freestanding wasm 산출물
-- `exampleFiles/sample-tone.wav`: 디버그용 샘플 오디오
+- `src-webview/interactiveWaveformWorker.ts`: worker source that reads PCM directly, builds the waveform pyramid, and renders waveform data only
+- `src-webview/audioAnalysisWorker.ts`: orchestration for the unified Zig/WASM spectrogram and loudness compute worker
+- `dist/wasm/wave_core_simd.wasm`, `dist/wasm/wave_core_fallback.wasm`: generated freestanding Zig wasm artifacts
+- `exampleFiles/sample-tone.wav`: sample audio used for debugging
 
 ## Acknowledgements
 
-- `scalogram` 최적화는 [`fCWT`](https://github.com/fastlib/fCWT)의 공개 구현과 문서를 참고해 `scale/frequency` 사전계산, wavelet kernel 재사용, 벡터화 친화적인 연산 구조 아이디어를 반영했습니다.
-- 이 프로젝트는 `fCWT` 코드를 직접 포함하거나 런타임 의존성으로 사용하지 않고, 현재 Zig/WASM 렌더러에 맞게 아이디어만 재구성해 적용합니다.
+- `scalogram` optimization was informed by the public implementation and documentation of [`fCWT`](https://github.com/fastlib/fCWT), especially around precomputed `scale/frequency` mappings, wavelet kernel reuse, and vectorization-friendly computation structure.
+- This project does not embed or depend on `fCWT` directly at runtime. It only adapts the underlying ideas to fit the current Zig/WASM renderer.
 
 ## Next Ideas
 

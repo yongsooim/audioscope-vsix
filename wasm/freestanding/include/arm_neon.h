@@ -1,5 +1,5 @@
-#ifndef WAVE_PREVIEW_FREESTANDING_ARM_NEON_H
-#define WAVE_PREVIEW_FREESTANDING_ARM_NEON_H
+#ifndef WAVE_SCOPE_FREESTANDING_ARM_NEON_H
+#define WAVE_SCOPE_FREESTANDING_ARM_NEON_H
 
 #if !defined(__wasm_simd128__)
 #error "This compatibility header only supports wasm simd128 builds."

@@ -12,11 +12,11 @@ const exportedFunctionNames = [
 
 const wasmCandidates = [
   {
-    url: new URL('../media/wave_core_simd.wasm', import.meta.url),
+    url: new URL('../wasm/wave_core_simd.wasm', import.meta.url),
     variant: 'wave-core-wasm-simd',
   },
   {
-    url: new URL('../media/wave_core_fallback.wasm', import.meta.url),
+    url: new URL('../wasm/wave_core_fallback.wasm', import.meta.url),
     variant: 'wave-core-wasm-fallback',
   },
 ];

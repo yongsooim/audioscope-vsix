@@ -281,18 +281,28 @@ body {
 
 .wave-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 10px 12px;
   padding: 8px 0 7px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.wave-toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .wave-toolbar-info {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
 }
 
 .wave-toolbar-pill {
@@ -342,9 +352,9 @@ body {
   align-items: center;
   gap: 8px;
   flex: 0 1 auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-start;
-  min-width: 0;
+  min-width: max-content;
 }
 
 .wave-toolbar-group {
@@ -363,7 +373,7 @@ body {
 }
 
 .wave-toolbar-group-loop {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
 }
 
 .wave-toolbar-group-zoom {
@@ -892,10 +902,18 @@ body {
   max-width: 100%;
   margin: 0 !important;
   padding: 10px var(--surface-inline-padding) 12px !important;
+  overflow-x: auto;
+  overflow-y: hidden;
   border-top: 1px solid var(--border);
   background: var(--panel);
   backdrop-filter: blur(10px);
   box-shadow: 0 -12px 24px rgba(0, 0, 0, 0.28);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.transport::-webkit-scrollbar {
+  display: none;
 }
 
 .transport-button {
@@ -1102,7 +1120,8 @@ body {
   justify-content: flex-end;
   gap: 8px;
   min-width: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: max-content;
 }
 
 .loudness-chip {
@@ -1158,8 +1177,8 @@ body {
 
 @media (max-width: 960px) {
   .wave-toolbar {
-    align-items: stretch;
-    gap: 8px 12px;
+    align-items: center;
+    gap: 8px 10px;
   }
 
   .media-metadata-panel {
@@ -1169,51 +1188,29 @@ body {
 
   .wave-toolbar-actions {
     justify-content: flex-start;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .wave-toolbar-group {
-    max-width: 100%;
+    max-width: none;
   }
 
   .wave-toolbar-group-loop {
-    flex: 1 1 100%;
-    justify-content: space-between;
+    flex: 0 0 auto;
+    justify-content: flex-start;
   }
 
   .transport {
-    grid-template-columns: auto auto auto minmax(180px, 1fr);
-    grid-template-areas:
-      "back play forward ."
-      "time slider slider slider"
-      "loudness loudness loudness loudness";
-    row-gap: 8px;
-  }
-
-  #seek-backward {
-    grid-area: back;
-  }
-
-  #play-toggle {
-    grid-area: play;
-  }
-
-  #seek-forward {
-    grid-area: forward;
-  }
-
-  #waveform-overview {
-    grid-area: slider;
+    grid-template-columns: auto auto auto auto minmax(240px, 1fr) auto auto;
+    row-gap: 0;
   }
 
   #time-readout {
-    grid-area: time;
-    text-align: left;
+    text-align: right;
   }
 
   #loudness-summary {
-    grid-area: loudness;
-    justify-content: flex-start;
+    justify-content: flex-end;
   }
 
   #analysis-status {
@@ -1237,16 +1234,16 @@ body {
   }
 
   .media-metadata-panel {
-    max-width: 100%;
+    max-width: min(100%, 220px);
   }
 
   .wave-toolbar-actions {
-    width: 100%;
+    width: auto;
   }
 
   .wave-toolbar-group {
-    width: 100%;
-    justify-content: space-between;
+    width: auto;
+    justify-content: flex-start;
   }
 
   .wave-toolbar-group-zoom,
@@ -1256,12 +1253,12 @@ body {
   }
 
   .wave-toolbar-group-loop {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .wave-loop-label {
-    width: 100%;
-    max-width: none;
+    width: auto;
+    max-width: 140px;
   }
 
   .spectrogram-panel {

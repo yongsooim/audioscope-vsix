@@ -1,15 +1,15 @@
-#ifndef WAVE_PREVIEW_FREESTANDING_STDLIB_H
-#define WAVE_PREVIEW_FREESTANDING_STDLIB_H
+#ifndef WAVE_SCOPE_FREESTANDING_STDLIB_H
+#define WAVE_SCOPE_FREESTANDING_STDLIB_H
 
 #include <stddef.h>
 
-typedef int (*wave_preview_compare_fn)(const void *left, const void *right);
+typedef int (*wave_scope_compare_fn)(const void *left, const void *right);
 
 void *malloc(size_t size);
 void *calloc(size_t count, size_t size);
 void free(void *ptr);
 
-static inline void wave_preview_swap_bytes(unsigned char *left, unsigned char *right, size_t size) {
+static inline void wave_scope_swap_bytes(unsigned char *left, unsigned char *right, size_t size) {
   for (size_t index = 0; index < size; index += 1) {
     unsigned char value = left[index];
     left[index] = right[index];
@@ -17,7 +17,7 @@ static inline void wave_preview_swap_bytes(unsigned char *left, unsigned char *r
   }
 }
 
-static inline void qsort(void *base, size_t count, size_t size, wave_preview_compare_fn compare) {
+static inline void qsort(void *base, size_t count, size_t size, wave_scope_compare_fn compare) {
   if (!base || count < 2 || size == 0 || !compare) {
     return;
   }
@@ -36,7 +36,7 @@ static inline void qsort(void *base, size_t count, size_t size, wave_preview_com
           break;
         }
 
-        wave_preview_swap_bytes(left, right, size);
+        wave_scope_swap_bytes(left, right, size);
         inner -= gap;
       }
     }

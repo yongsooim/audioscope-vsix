@@ -6,11 +6,11 @@
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yongsooim/wave-preview.git"
+    "url": "https://github.com/yongsooim/wave-scope-vsix.git"
   },
-  "homepage": "https://github.com/yongsooim/wave-preview#readme",
+  "homepage": "https://github.com/yongsooim/wave-scope-vsix#readme",
   "bugs": {
-    "url": "https://github.com/yongsooim/wave-preview/issues"
+    "url": "https://github.com/yongsooim/wave-scope-vsix/issues"
   },
   "license": "MIT",
   "icon": "images/icon.png",
@@ -24,7 +24,8 @@
   ],
   "files": [
     "out/**/*.js",
-    "media/**",
+    "dist/**",
+    "src-webview/**/*.css",
     "images/icon.png",
     "README.md",
     "LICENSE",
@@ -76,14 +77,14 @@
     },
     "commands": [
       {
-        "command": "waveScope.openActiveAudioPreview",
+        "command": "waveScope.openActiveFileInWaveScope",
         "title": "Open Active Audio File in Wave Scope",
         "category": "Wave Scope"
       }
     ],
     "customEditors": [
       {
-        "viewType": "waveScope.audioPreview",
+        "viewType": "waveScope.editor",
         "displayName": "Wave Scope",
         "selector": [
           {

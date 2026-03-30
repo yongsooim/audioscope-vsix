@@ -2,6 +2,6 @@ node_modules
 out
 .vscode-test
 .DS_Store
-media/*.js
+dist
 .zig-cache
 zig-out
