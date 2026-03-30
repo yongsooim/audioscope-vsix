@@ -1,13 +1,16 @@
 import { AUDIO_TRANSPORT_PROCESSOR_NAME } from './audioTransportShared';
+import SignalsmithStretch from './vendor/SignalsmithStretch.mjs';
 
 const DEFAULT_SAMPLE_RATE = 48000;
+const DEFAULT_PLAYBACK_RATE = 1;
+const STRETCH_TIME_UPDATE_INTERVAL_SECONDS = 1 / 30;
 
 export type PlaybackLoopRange = {
   end: number;
   start: number;
 };
 
-type TransportKind = 'audio-worklet-copy' | 'unavailable';
+type TransportKind = 'audio-worklet-copy' | 'audio-worklet-stretch' | 'unavailable';
 
 export interface PlaybackSession {
   channelBuffers: ArrayBuffer[];
@@ -26,7 +29,24 @@ interface PlaybackSnapshotState {
 
 interface AudioTransportOptions {
   onStateChange?: () => void;
+  stretchModuleUrl?: string;
   workletModuleUrl?: string;
+}
+
+export interface AudioTransport {
+  dispose(): Promise<void>;
+  getCurrentTime(): number;
+  getDuration(): number;
+  getLastFallbackReason(): string | null;
+  getPlaybackRate(): number;
+  getTransportKind(): TransportKind;
+  isPlaying(): boolean;
+  load(source: PlaybackSource): Promise<void>;
+  pause(): void;
+  play(): Promise<void>;
+  seek(timeSeconds: number): void;
+  setLoop(loopRangeOrNull: PlaybackLoopRange | null): void;
+  setPlaybackRate(rate: number): void;
 }
 
 interface PlaybackSourceObject {
@@ -41,6 +61,28 @@ interface NormalizedPlaybackSource {
 }
 
 type PlaybackSource = AudioBuffer | PlaybackSession | PlaybackSourceObject;
+
+interface StretchSchedule {
+  active?: boolean;
+  input?: number;
+  loopEnd?: number;
+  loopStart?: number;
+  output?: number;
+  rate?: number;
+}
+
+interface StretchNode extends AudioWorkletNode {
+  inputTime: number;
+  addBuffers(buffers: Float32Array[]): Promise<number>;
+  latency(): Promise<number>;
+  schedule(schedule: StretchSchedule, adjustPrevious?: boolean): Promise<unknown>;
+  setUpdateInterval(seconds: number, callback?: (seconds: number) => void): Promise<unknown>;
+}
+
+interface SignalsmithStretchFactory {
+  (audioContext: AudioContext, options?: AudioWorkletNodeOptions): Promise<StretchNode>;
+  moduleUrl?: string;
+}
 
 interface WorkletControlMessage {
   body?: {
@@ -74,11 +116,11 @@ interface WorkletEndedMessage {
 
 type WorkletMessage = WorkletEndedMessage | WorkletStateMessage | WorkletControlMessage;
 
-export function createAudioTransport(options: AudioTransportOptions = {}): AudioWorkletTransport {
-  return new AudioWorkletTransport(options);
+export function createAudioTransport(options: AudioTransportOptions = {}): AudioTransport {
+  return new HybridAudioTransport(options);
 }
 
-class AudioWorkletTransport {
+class AudioWorkletCopyTransport {
   private audioContext: AudioContext | null;
   private ended: boolean;
   private lastFallbackReason: string | null;
@@ -239,8 +281,16 @@ class AudioWorkletTransport {
     return this.lastFallbackReason;
   }
 
+  getPlaybackRate(): number {
+    return DEFAULT_PLAYBACK_RATE;
+  }
+
   isPlaying(): boolean {
     return this.playing || this.snapshotState?.playing === true;
+  }
+
+  setPlaybackRate(_rate: number): void {
+    // The copied-buffer transport always runs at native speed.
   }
 
   async dispose() {
@@ -622,6 +672,650 @@ class AudioWorkletTransport {
   }
 }
 
+class HybridAudioTransport implements AudioTransport {
+  private readonly copyTransport: AudioWorkletCopyTransport;
+  private readonly stretchTransport: StretchAudioTransport;
+  private readonly onStateChange: (() => void) | null;
+  private playbackRate: number;
+
+  constructor(options: AudioTransportOptions = {}) {
+    this.onStateChange = typeof options.onStateChange === 'function'
+      ? options.onStateChange
+      : null;
+    this.playbackRate = DEFAULT_PLAYBACK_RATE;
+
+    const childOptions: AudioTransportOptions = {
+      ...options,
+      onStateChange: () => {
+        this.notifyStateChange();
+      },
+    };
+
+    this.copyTransport = new AudioWorkletCopyTransport(childOptions);
+    this.stretchTransport = new StretchAudioTransport(childOptions);
+  }
+
+  async load(source: PlaybackSource): Promise<void> {
+    await this.copyTransport.load(source);
+    await this.stretchTransport.load(source);
+    this.stretchTransport.setPlaybackRate(this.playbackRate);
+    this.syncBackendsToCurrentPosition();
+    this.notifyStateChange();
+  }
+
+  async play(): Promise<void> {
+    const activeTransport = this.getSelectedTransport();
+    const inactiveTransport = this.getInactiveTransport();
+    const currentTime = this.getCurrentTime();
+
+    inactiveTransport.pause();
+    inactiveTransport.seek(currentTime);
+    await activeTransport.play();
+    this.notifyStateChange();
+  }
+
+  pause(): void {
+    const currentTime = this.getCurrentTime();
+
+    this.copyTransport.pause();
+    this.stretchTransport.pause();
+    this.copyTransport.seek(currentTime);
+    this.stretchTransport.seek(currentTime);
+    this.notifyStateChange();
+  }
+
+  seek(timeSeconds: number): void {
+    const nextTime = Number.isFinite(timeSeconds) ? timeSeconds : 0;
+
+    this.copyTransport.seek(nextTime);
+    this.stretchTransport.seek(nextTime);
+    this.notifyStateChange();
+  }
+
+  setLoop(loopRangeOrNull: PlaybackLoopRange | null): void {
+    this.copyTransport.setLoop(loopRangeOrNull);
+    this.stretchTransport.setLoop(loopRangeOrNull);
+    this.notifyStateChange();
+  }
+
+  setPlaybackRate(rate: number): void {
+    const nextRate = normalizePlaybackRate(rate);
+
+    if (Math.abs(nextRate - this.playbackRate) <= 1e-6) {
+      return;
+    }
+
+    const wasPlaying = this.isPlaying();
+    const currentTime = this.getCurrentTime();
+    this.playbackRate = nextRate;
+    this.stretchTransport.setPlaybackRate(nextRate);
+    this.copyTransport.seek(currentTime);
+    this.stretchTransport.seek(currentTime);
+
+    if (wasPlaying) {
+      void this.play().catch(() => {
+        this.notifyStateChange();
+      });
+      return;
+    }
+
+    this.notifyStateChange();
+  }
+
+  getPlaybackRate(): number {
+    return this.playbackRate;
+  }
+
+  getCurrentTime(): number {
+    return this.getActiveTransport().getCurrentTime();
+  }
+
+  getDuration(): number {
+    return this.getSelectedTransport().getDuration();
+  }
+
+  getTransportKind(): TransportKind {
+    return this.getSelectedTransport().getTransportKind();
+  }
+
+  getLastFallbackReason(): string | null {
+    return this.getSelectedTransport().getLastFallbackReason();
+  }
+
+  isPlaying(): boolean {
+    return this.copyTransport.isPlaying() || this.stretchTransport.isPlaying();
+  }
+
+  async dispose(): Promise<void> {
+    await Promise.all([
+      this.copyTransport.dispose(),
+      this.stretchTransport.dispose(),
+    ]);
+    this.notifyStateChange();
+  }
+
+  private getSelectedTransport(): AudioTransport {
+    return this.playbackRate === DEFAULT_PLAYBACK_RATE
+      ? this.copyTransport
+      : this.stretchTransport;
+  }
+
+  private getInactiveTransport(): AudioTransport {
+    return this.playbackRate === DEFAULT_PLAYBACK_RATE
+      ? this.stretchTransport
+      : this.copyTransport;
+  }
+
+  private getActiveTransport(): AudioTransport {
+    if (this.stretchTransport.isPlaying()) {
+      return this.stretchTransport;
+    }
+
+    if (this.copyTransport.isPlaying()) {
+      return this.copyTransport;
+    }
+
+    return this.getSelectedTransport();
+  }
+
+  private syncBackendsToCurrentPosition(): void {
+    const currentTime = this.getSelectedTransport().getCurrentTime();
+    this.copyTransport.seek(currentTime);
+    this.stretchTransport.seek(currentTime);
+  }
+
+  private notifyStateChange(): void {
+    this.onStateChange?.();
+  }
+}
+
+class StretchAudioTransport implements AudioTransport {
+  private audioContext: AudioContext | null;
+  private ended: boolean;
+  private inputTimeSeconds: number;
+  private lastFallbackReason: string | null;
+  private loopRange: PlaybackLoopRange | null;
+  private onStateChange: (() => void) | null;
+  private outputLatencySeconds: number;
+  private pausedAtSeconds: number;
+  private playbackRate: number;
+  private playbackSession: PlaybackSession | null;
+  private playing: boolean;
+  private stretchModuleUrl: string;
+  private stretchNode: StretchNode | null;
+  private transportKind: TransportKind;
+
+  constructor(options: AudioTransportOptions = {}) {
+    this.audioContext = null;
+    this.ended = false;
+    this.inputTimeSeconds = 0;
+    this.lastFallbackReason = null;
+    this.loopRange = null;
+    this.onStateChange = typeof options.onStateChange === 'function'
+      ? options.onStateChange
+      : null;
+    this.outputLatencySeconds = 0;
+    this.pausedAtSeconds = 0;
+    this.playbackRate = DEFAULT_PLAYBACK_RATE;
+    this.playbackSession = null;
+    this.playing = false;
+    this.stretchModuleUrl = typeof options.stretchModuleUrl === 'string'
+      ? options.stretchModuleUrl
+      : '';
+    this.stretchNode = null;
+    this.transportKind = 'unavailable';
+  }
+
+  async load(source: PlaybackSource): Promise<void> {
+    const normalizedSource = normalizePlaybackSource(source, '');
+
+    this.disposeStretchNode();
+    this.playbackSession = normalizedSource.playbackSession;
+    this.pausedAtSeconds = 0;
+    this.inputTimeSeconds = 0;
+    this.loopRange = normalizeLoopRange(this.loopRange, this.getDuration());
+    this.outputLatencySeconds = 0;
+    this.playing = false;
+    this.ended = false;
+    this.lastFallbackReason = this.getStretchUnavailableReason();
+    this.transportKind = this.lastFallbackReason ? 'unavailable' : 'audio-worklet-stretch';
+    this.notifyStateChange();
+  }
+
+  async play(): Promise<void> {
+    if (!this.playbackSession) {
+      return;
+    }
+
+    if (this.transportKind === 'unavailable') {
+      throw new Error(this.lastFallbackReason || 'Pitch-preserving playback is unavailable.');
+    }
+
+    try {
+      const context = await this.ensureAudioContext();
+
+      if (context.state !== 'running') {
+        await context.resume();
+      }
+
+      const startOffset = this.getPlaybackStartOffset();
+      await this.ensureStretchNode();
+      this.pausedAtSeconds = startOffset;
+      this.inputTimeSeconds = startOffset;
+      this.playing = true;
+      this.ended = false;
+      await this.pushStretchSchedule({
+        active: true,
+        input: startOffset,
+      });
+      this.notifyStateChange();
+    } catch (error) {
+      this.markUnavailable(error);
+      throw new Error(this.lastFallbackReason || 'Pitch-preserving playback is unavailable.');
+    }
+  }
+
+  pause(): void {
+    if (!this.playbackSession) {
+      return;
+    }
+
+    const currentTime = this.getCurrentTime();
+    this.pausedAtSeconds = currentTime;
+    this.inputTimeSeconds = currentTime;
+    this.playing = false;
+    this.ended = false;
+    void this.pushStretchSchedule({
+      active: false,
+      input: currentTime,
+    });
+    this.notifyStateChange();
+  }
+
+  seek(timeSeconds: number): void {
+    if (!this.playbackSession || !Number.isFinite(timeSeconds)) {
+      return;
+    }
+
+    const nextTime = this.normalizePausedTime(timeSeconds);
+    this.pausedAtSeconds = nextTime;
+    this.inputTimeSeconds = nextTime;
+    this.ended = false;
+    void this.pushStretchSchedule({
+      active: this.playing,
+      input: nextTime,
+    });
+    this.notifyStateChange();
+  }
+
+  setLoop(loopRangeOrNull: PlaybackLoopRange | null): void {
+    const nextLoopRange = normalizeLoopRange(loopRangeOrNull, this.getDuration());
+    const loopChanged = !areLoopRangesEqual(this.loopRange, nextLoopRange);
+
+    if (!loopChanged) {
+      return;
+    }
+
+    const currentTime = this.getCurrentTime();
+    this.loopRange = nextLoopRange;
+    this.ended = false;
+    this.pausedAtSeconds = this.normalizePausedTime(currentTime);
+    this.inputTimeSeconds = this.pausedAtSeconds;
+    void this.pushStretchSchedule({
+      active: this.playing,
+      input: this.pausedAtSeconds,
+    });
+    this.notifyStateChange();
+  }
+
+  setPlaybackRate(rate: number): void {
+    const nextRate = normalizePlaybackRate(rate);
+
+    if (Math.abs(nextRate - this.playbackRate) <= 1e-6) {
+      return;
+    }
+
+    const currentTime = this.getCurrentTime();
+    this.playbackRate = nextRate;
+    this.pausedAtSeconds = currentTime;
+    this.inputTimeSeconds = currentTime;
+    void this.pushStretchSchedule({
+      active: this.playing,
+      input: currentTime,
+      rate: nextRate,
+    });
+    this.notifyStateChange();
+  }
+
+  getPlaybackRate(): number {
+    return this.playbackRate;
+  }
+
+  getCurrentTime(): number {
+    const duration = this.getDuration();
+
+    if (!(duration > 0)) {
+      return 0;
+    }
+
+    if (this.playing && !this.ended) {
+      return this.normalizeObservedTime(this.inputTimeSeconds);
+    }
+
+    return this.normalizePausedTime(this.pausedAtSeconds);
+  }
+
+  getDuration(): number {
+    return this.playbackSession?.durationSeconds ?? 0;
+  }
+
+  getTransportKind(): TransportKind {
+    return this.transportKind;
+  }
+
+  getLastFallbackReason(): string | null {
+    return this.lastFallbackReason;
+  }
+
+  isPlaying(): boolean {
+    return this.playing;
+  }
+
+  async dispose(): Promise<void> {
+    this.disposeStretchNode();
+
+    this.playbackSession = null;
+    this.pausedAtSeconds = 0;
+    this.inputTimeSeconds = 0;
+    this.loopRange = null;
+    this.outputLatencySeconds = 0;
+    this.playing = false;
+    this.ended = false;
+    this.transportKind = 'unavailable';
+    this.lastFallbackReason = null;
+
+    if (this.audioContext) {
+      const audioContext = this.audioContext;
+      this.audioContext = null;
+      await audioContext.close().catch(() => {});
+    }
+
+    this.notifyStateChange();
+  }
+
+  private async ensureAudioContext(): Promise<AudioContext> {
+    if (this.audioContext) {
+      return this.audioContext;
+    }
+
+    const AudioContextConstructor = window.AudioContext ?? window.webkitAudioContext;
+
+    if (!AudioContextConstructor) {
+      throw new Error('Web Audio API is unavailable in this webview.');
+    }
+
+    this.audioContext = new AudioContextConstructor();
+    return this.audioContext;
+  }
+
+  private async ensureStretchNode(): Promise<StretchNode> {
+    if (this.stretchNode) {
+      return this.stretchNode;
+    }
+
+    const availabilityError = this.getStretchUnavailableReason();
+
+    if (availabilityError) {
+      throw new Error(availabilityError);
+    }
+
+    const context = await this.ensureAudioContext();
+    const outputChannelCount = Math.max(1, Math.trunc(this.playbackSession?.numberOfChannels || 1));
+    const stretchFactory = SignalsmithStretch as SignalsmithStretchFactory;
+
+    if (this.stretchModuleUrl) {
+      stretchFactory.moduleUrl = this.stretchModuleUrl;
+    }
+
+    const node = await stretchFactory(context, {
+      channelCount: outputChannelCount,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers',
+      // Signalsmith's worklet expects an input bus to exist even when we only
+      // feed it sample buffers via addBuffers().
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [outputChannelCount],
+    }) as StretchNode;
+
+    node.onprocessorerror = () => {
+      this.markUnavailable(new Error('Signalsmith Stretch processor failed.'));
+    };
+
+    const channelViews = this.playbackSession?.channelBuffers.map((buffer) => new Float32Array(buffer)) ?? [];
+    await node.addBuffers(channelViews);
+    await node.setUpdateInterval(STRETCH_TIME_UPDATE_INTERVAL_SECONDS, (seconds) => {
+      this.handleStretchTimeUpdate(seconds);
+    });
+    this.outputLatencySeconds = Math.max(0, Number(await node.latency()) || 0);
+    node.connect(context.destination);
+
+    this.stretchNode = node;
+    this.transportKind = 'audio-worklet-stretch';
+    this.lastFallbackReason = null;
+    return node;
+  }
+
+  private disposeStretchNode(): void {
+    if (!this.stretchNode) {
+      return;
+    }
+
+    const node = this.stretchNode;
+    this.stretchNode = null;
+    node.onprocessorerror = null;
+
+    try {
+      node.disconnect();
+    } catch {
+      // Disconnect may fail if the node is already detached.
+    }
+  }
+
+  private getStretchUnavailableReason(): string | null {
+    if (!this.playbackSession) {
+      return 'Decoded playback session is unavailable.';
+    }
+
+    if (!Array.isArray(this.playbackSession.channelBuffers) || this.playbackSession.channelBuffers.length === 0) {
+      return 'Decoded playback buffers are unavailable.';
+    }
+
+    if (!(window.AudioContext || window.webkitAudioContext)) {
+      return 'Web Audio API is unavailable in this webview.';
+    }
+
+    if (typeof AudioWorkletNode !== 'function') {
+      return 'AudioWorkletNode is unavailable in this webview.';
+    }
+
+    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+    const audioContextPrototype = AudioContextConstructor?.prototype ?? null;
+
+    if (!audioContextPrototype || !('audioWorklet' in audioContextPrototype)) {
+      return 'AudioWorklet is unavailable in this webview.';
+    }
+
+    if (typeof SignalsmithStretch !== 'function') {
+      return 'Signalsmith Stretch runtime is unavailable.';
+    }
+
+    return null;
+  }
+
+  private async pushStretchSchedule(overrides: StretchSchedule): Promise<void> {
+    if (!this.stretchNode) {
+      return;
+    }
+
+    try {
+      const outputTime = this.getStretchScheduleTime();
+      const loopRange = this.loopRange && this.loopRange.end > this.loopRange.start
+        ? this.loopRange
+        : null;
+
+      await this.stretchNode.schedule({
+        active: this.playing,
+        input: this.getCurrentTime(),
+        loopEnd: loopRange?.end ?? 0,
+        loopStart: loopRange?.start ?? 0,
+        output: outputTime,
+        rate: this.playbackRate,
+        ...overrides,
+      });
+    } catch (error) {
+      this.markUnavailable(error);
+    }
+  }
+
+  private getStretchScheduleTime(): number {
+    const contextTime = getProjectedContextTime(this.audioContext);
+    return contextTime + Math.max(0, this.outputLatencySeconds);
+  }
+
+  private handleStretchTimeUpdate(seconds: number): void {
+    const duration = this.getDuration();
+
+    if (!(duration > 0) || !Number.isFinite(seconds)) {
+      return;
+    }
+
+    this.inputTimeSeconds = this.normalizeObservedTime(seconds);
+
+    if (!this.playing) {
+      return;
+    }
+
+    if (this.loopRange && this.loopRange.end > this.loopRange.start) {
+      this.notifyStateChange();
+      return;
+    }
+
+    if (this.inputTimeSeconds >= this.getPlayableEndTime()) {
+      this.playing = false;
+      this.ended = true;
+      this.pausedAtSeconds = this.getEndedPauseTime();
+      this.inputTimeSeconds = this.pausedAtSeconds;
+    }
+
+    this.notifyStateChange();
+  }
+
+  private normalizeObservedTime(timeSeconds: number): number {
+    if (!Number.isFinite(timeSeconds)) {
+      return this.normalizePausedTime(this.pausedAtSeconds);
+    }
+
+    if (this.loopRange && this.loopRange.end > this.loopRange.start) {
+      const loopSpan = this.loopRange.end - this.loopRange.start;
+
+      if (!(loopSpan > 0)) {
+        return this.loopRange.start;
+      }
+
+      return this.loopRange.start + positiveModulo(timeSeconds - this.loopRange.start, loopSpan);
+    }
+
+    return clamp(timeSeconds, 0, this.getDuration());
+  }
+
+  private getPlaybackStartOffset(): number {
+    const duration = this.getDuration();
+
+    if (!(duration > 0)) {
+      return 0;
+    }
+
+    if (this.loopRange && this.loopRange.end > this.loopRange.start) {
+      const loopStart = this.loopRange.start;
+      const loopEnd = this.getLoopPlayableEnd();
+      const pausedAt = this.normalizePausedTime(this.pausedAtSeconds);
+
+      if (pausedAt < loopStart || pausedAt >= loopEnd) {
+        return loopStart;
+      }
+
+      return pausedAt;
+    }
+
+    const playbackEnd = this.getPlayableEndTime();
+    const pausedAt = clamp(this.pausedAtSeconds, 0, duration);
+    return pausedAt >= playbackEnd ? 0 : pausedAt;
+  }
+
+  private normalizePausedTime(timeSeconds: number): number {
+    const duration = this.getDuration();
+
+    if (!(duration > 0)) {
+      return 0;
+    }
+
+    const clampedTime = clamp(timeSeconds, 0, duration);
+
+    if (this.loopRange && this.loopRange.end > this.loopRange.start) {
+      return clamp(clampedTime, this.loopRange.start, this.loopRange.end);
+    }
+
+    return clampedTime;
+  }
+
+  private getPlayableEndTime(): number {
+    const duration = this.getDuration();
+
+    if (!(duration > 0)) {
+      return 0;
+    }
+
+    const sampleRate = this.playbackSession?.sourceSampleRate || DEFAULT_SAMPLE_RATE;
+    const epsilon = Math.min(1 / sampleRate, duration / 2);
+    return Math.max(0, duration - epsilon);
+  }
+
+  private getLoopPlayableEnd(): number {
+    if (!(this.loopRange?.end > this.loopRange?.start)) {
+      return this.getPlayableEndTime();
+    }
+
+    const sampleRate = this.playbackSession?.sourceSampleRate || DEFAULT_SAMPLE_RATE;
+    const epsilon = Math.min(1 / sampleRate, (this.loopRange.end - this.loopRange.start) / 2);
+    return Math.max(this.loopRange.start, this.loopRange.end - epsilon);
+  }
+
+  private getEndedPauseTime(): number {
+    if (this.loopRange && this.loopRange.end > this.loopRange.start) {
+      return this.loopRange.start;
+    }
+
+    return this.getDuration();
+  }
+
+  private markUnavailable(reason: unknown): void {
+    const currentTime = this.getCurrentTime();
+    this.transportKind = 'unavailable';
+    this.lastFallbackReason = formatTransportFailureReason(reason);
+    this.playing = false;
+    this.ended = false;
+    this.pausedAtSeconds = this.normalizePausedTime(currentTime);
+    this.inputTimeSeconds = this.pausedAtSeconds;
+    this.disposeStretchNode();
+    this.notifyStateChange();
+  }
+
+  private notifyStateChange(): void {
+    this.onStateChange?.();
+  }
+}
+
 function normalizePlaybackSource(source: PlaybackSource, defaultWorkletModuleUrl: string): NormalizedPlaybackSource {
   const sourceOptions = isPlaybackSourceObject(source) ? source : null;
   const audioBuffer = source instanceof AudioBuffer
@@ -793,4 +1487,12 @@ function areLoopRangesEqual(left: PlaybackLoopRange | null, right: PlaybackLoopR
 
   return Math.abs(left.start - right.start) <= 1e-6
     && Math.abs(left.end - right.end) <= 1e-6;
+}
+
+function normalizePlaybackRate(rate: number): number {
+  if (!Number.isFinite(rate) || rate <= 0) {
+    return DEFAULT_PLAYBACK_RATE;
+  }
+
+  return clamp(rate, 0.25, 4);
 }

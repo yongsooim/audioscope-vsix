@@ -167,6 +167,24 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
         }
         return;
       }
+
+      if (message?.type === 'openExternal') {
+        const url = typeof message.body?.url === 'string' ? message.body.url.trim() : '';
+
+        if (!url) {
+          return;
+        }
+
+        try {
+          const uri = vscode.Uri.parse(url);
+
+          if (uri.scheme === 'https' || uri.scheme === 'http') {
+            await vscode.env.openExternal(uri);
+          }
+        } catch {
+          // Ignore malformed external URLs from the webview.
+        }
+      }
     });
   }
 
@@ -203,6 +221,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     const workerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'audioAnalysisWorker.js'));
     const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'interactiveWaveformWorker.js'));
     const audioTransportProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'audioTransportProcessor.js'));
+    const stretchProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'src-webview', 'vendor', 'SignalsmithStretch.mjs'));
 
     return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -216,7 +235,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     <link rel="stylesheet" href="${styleUri}" />
     <title>Wave Scope</title>
   </head>
-  <body data-worker-src="${workerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}">
+  <body data-worker-src="${workerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}">
     <main class="app-shell">
       <section id="wave-scope-viewport" class="viewport" aria-label="Wave Scope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">
@@ -334,6 +353,17 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
         <button id="seek-backward" class="transport-button" type="button" disabled>-5s</button>
         <button id="play-toggle" class="play-toggle" type="button" disabled>Play</button>
         <button id="seek-forward" class="transport-button" type="button" disabled>+5s</button>
+        <label class="transport-rate" for="playback-rate-select">
+          <span class="transport-rate-label">Speed</span>
+          <select id="playback-rate-select" class="transport-rate-select" aria-label="Playback speed" disabled>
+            <option value="0.5">0.5x</option>
+            <option value="0.75">0.75x</option>
+            <option value="1" selected>1x</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2">2x</option>
+          </select>
+        </label>
         <div id="time-readout" class="time-readout">0:00 / --:--</div>
         <div id="waveform-overview" class="timeline-shell">
           <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>

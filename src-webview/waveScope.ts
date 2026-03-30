@@ -8,6 +8,7 @@ const vscode = acquireVsCodeApi();
 const analysisWorkerScriptUri = document.body.dataset.workerSrc;
 const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc;
 const audioTransportProcessorScriptUri = document.body.dataset.audioTransportProcessorSrc;
+const stretchProcessorScriptUri = document.body.dataset.stretchProcessorSrc;
 const DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
 
 const SPECTROGRAM_MIN_FREQUENCY = 20;
@@ -24,6 +25,7 @@ const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 12;
 const VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX = 140;
 const VIEWPORT_RATIO_MIN = 0.15;
 const VIEWPORT_RATIO_MAX = 0.85;
+const FFMPEG_DOWNLOAD_URL = 'https://ffmpeg.org/download.html';
 
 const WAVEFORM_COLOR = '#8ccadd';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
@@ -135,6 +137,7 @@ const elements = {
   seekBackward: requireElement<HTMLButtonElement>('seek-backward'),
   playToggle: requireElement<HTMLButtonElement>('play-toggle'),
   seekForward: requireElement<HTMLButtonElement>('seek-forward'),
+  playbackRateSelect: requireElement<HTMLSelectElement>('playback-rate-select'),
   timeline: requireElement<HTMLInputElement>('timeline'),
   timelineHoverTooltip: requireElement<HTMLElement>('timeline-hover-tooltip'),
   timeReadout: requireElement<HTMLElement>('time-readout'),
@@ -160,6 +163,7 @@ const state = {
   playbackSourceKind: 'native',
   playbackTransportKind: 'unavailable',
   playbackTransportError: null,
+  playbackRate: 1,
   analysisSourceKind: 'native',
   decodeFallbackLoadToken: 0,
   decodeFallbackPromise: null,
@@ -411,6 +415,16 @@ function normalizeSpectrogramOverlapRatio(value) {
   return SPECTROGRAM_OVERLAP_OPTIONS.includes(numericValue) ? numericValue : 0.75;
 }
 
+function normalizePlaybackRateSelection(value) {
+  const numericValue = Number(value);
+
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return 1;
+  }
+
+  return numericValue;
+}
+
 function getEffectiveSpectrogramRenderConfig(config = state.spectrogramRenderConfig) {
   const analysisType = normalizeSpectrogramAnalysisType(config?.analysisType);
   const fftSize = normalizeSpectrogramFftSize(config?.fftSize);
@@ -585,9 +599,15 @@ function formatMetadataDecodeSourceLabel() {
 }
 
 function formatPlaybackTransportLabel() {
-  return state.playbackTransportKind === 'audio-worklet-copy'
-    ? 'AudioWorklet (copied buffers)'
-    : 'Playback unavailable';
+  if (state.playbackTransportKind === 'audio-worklet-copy') {
+    return 'AudioWorklet (copied buffers)';
+  }
+
+  if (state.playbackTransportKind === 'audio-worklet-stretch') {
+    return 'AudioWorklet + Signalsmith Stretch';
+  }
+
+  return 'Playback unavailable';
 }
 
 function formatMetadataSummarySegments(summary) {
@@ -640,8 +660,45 @@ function appendMetadataDetailSection(container, title) {
   return section;
 }
 
-function appendMetadataDetailRow(container, label, value) {
-  if (!value) {
+function createMetadataExternalLink(label, url) {
+  const link = document.createElement('a');
+  link.className = 'media-metadata-link';
+  link.href = url;
+  link.rel = 'noopener noreferrer';
+  link.target = '_blank';
+  link.textContent = label;
+  link.dataset.externalUrl = url;
+  return link;
+}
+
+function getMissingToolInstallLinks(toolName) {
+  if (!state.externalTools.fileBacked) {
+    return [];
+  }
+
+  if (toolName === 'ffmpeg' && state.externalTools.ffmpegAvailable) {
+    return [];
+  }
+
+  if (toolName === 'ffprobe' && state.externalTools.ffprobeAvailable) {
+    return [];
+  }
+
+  return [
+    {
+      label: 'Install',
+      url: FFMPEG_DOWNLOAD_URL,
+    },
+  ];
+}
+
+function appendMetadataDetailRow(container, label, value, links = []) {
+  const hasTextValue = typeof value === 'string'
+    ? value.trim().length > 0
+    : Boolean(value);
+  const normalizedLinks = Array.isArray(links) ? links.filter((link) => link?.label && link?.url) : [];
+
+  if (!hasTextValue && normalizedLinks.length === 0) {
     return;
   }
 
@@ -654,7 +711,24 @@ function appendMetadataDetailRow(container, label, value) {
 
   const valueElement = document.createElement('span');
   valueElement.className = 'media-metadata-row-value';
-  valueElement.textContent = value;
+
+  if (hasTextValue) {
+    const valueText = document.createElement('span');
+    valueText.className = 'media-metadata-row-value-text';
+    valueText.textContent = typeof value === 'string' ? value : String(value);
+    valueElement.append(valueText);
+  }
+
+  normalizedLinks.forEach((link, index) => {
+    if (hasTextValue || index > 0) {
+      const separator = document.createElement('span');
+      separator.className = 'media-metadata-link-separator';
+      separator.textContent = '•';
+      valueElement.append(separator);
+    }
+
+    valueElement.append(createMetadataExternalLink(link.label, link.url));
+  });
 
   row.append(labelElement, valueElement);
   container.append(row);
@@ -795,6 +869,7 @@ function renderMediaMetadata() {
       state.externalTools.ffmpegVersion,
       state.externalTools.ffmpegCommand,
     ),
+    getMissingToolInstallLinks('ffmpeg'),
   );
   appendMetadataDetailRow(
     toolSection,
@@ -804,6 +879,7 @@ function renderMediaMetadata() {
       state.externalTools.ffprobeVersion,
       state.externalTools.ffprobeCommand,
     ),
+    getMissingToolInstallLinks('ffprobe'),
   );
   appendMetadataDetailRow(
     toolSection,
@@ -981,11 +1057,13 @@ function createPlaybackTransport(loadToken) {
 
       syncTransport();
     },
+    stretchModuleUrl: stretchProcessorScriptUri,
     workletModuleUrl: audioTransportProcessorScriptUri,
   });
 
   state.playbackTransportKind = transport.getTransportKind?.() ?? 'unavailable';
   state.playbackTransportError = transport.getLastFallbackReason?.() ?? null;
+  transport.setPlaybackRate(state.playbackRate);
   return transport;
 }
 
@@ -2257,7 +2335,10 @@ function isTimeWithinLoopRange(loopRange, timeSeconds) {
 
 function hasPlaybackTransport() {
   return Boolean(state.audioTransport)
-    && state.playbackTransportKind === 'audio-worklet-copy'
+    && (
+      state.playbackTransportKind === 'audio-worklet-copy'
+      || state.playbackTransportKind === 'audio-worklet-stretch'
+    )
     && getEffectiveDuration() > 0;
 }
 
@@ -3515,6 +3596,33 @@ function attachUiEvents() {
 
     setMediaMetadataDetailOpen(false);
   });
+  elements.mediaMetadataDetail?.addEventListener('click', (event) => {
+    const target = event.target;
+
+    if (!(target instanceof Element)) {
+      return;
+    }
+
+    const link = target.closest('[data-external-url]');
+
+    if (!(link instanceof HTMLAnchorElement)) {
+      return;
+    }
+
+    const url = link.dataset.externalUrl;
+
+    if (!url) {
+      return;
+    }
+
+    event.preventDefault();
+    vscode.postMessage({
+      type: 'openExternal',
+      body: {
+        url,
+      },
+    });
+  });
   elements.waveToolbar?.addEventListener('scroll', () => {
     updateMediaMetadataDetailPosition();
   }, { passive: true });
@@ -3575,6 +3683,13 @@ function attachUiEvents() {
   });
   elements.seekForward.addEventListener('click', () => {
     seekBy(5);
+  });
+  elements.playbackRateSelect.addEventListener('change', () => {
+    const nextRate = normalizePlaybackRateSelection(elements.playbackRateSelect.value);
+    state.playbackRate = nextRate;
+    state.audioTransport?.setPlaybackRate(nextRate);
+    renderMediaMetadata();
+    syncTransport();
   });
   elements.timeline.addEventListener('input', (event) => {
     if (!hasPlaybackTransport()) {
@@ -3931,6 +4046,7 @@ function seekBy(deltaSeconds) {
 
 function syncTransport() {
   const duration = getEffectiveDuration();
+  const hasSession = Boolean(state.audioTransport) && Number.isFinite(duration) && duration > 0;
   const isPlayable = hasPlaybackTransport() && Number.isFinite(duration) && duration > 0;
   const currentTime = isPlayable ? getCurrentPlaybackTime() : 0;
   const displayRange = isSmoothFollowPlaybackActive()
@@ -3942,6 +4058,8 @@ function syncTransport() {
   elements.playToggle.textContent = isPlaybackActive() ? 'Pause' : 'Play';
   elements.seekBackward.disabled = !isPlayable;
   elements.seekForward.disabled = !isPlayable;
+  elements.playbackRateSelect.disabled = !hasSession;
+  elements.playbackRateSelect.value = String(state.playbackRate);
   elements.timeline.disabled = !isPlayable;
   elements.timeline.value = String(progress);
   elements.timeline.style.setProperty('--seek-progress', `${Math.round(progress * 100)}%`);

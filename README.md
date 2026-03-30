@@ -4,6 +4,8 @@
 
 Wave Scope is a custom read-only audio viewer for VS Code. Open a supported audio file and inspect timing, frequency content, playback position, loop ranges, metadata, and loudness without leaving the editor.
 
+> For richer metadata and decode fallback on local files, install the `ffmpeg` CLI tools including `ffprobe`: [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
+
 | Inspect | Navigate | Analyze |
 | --- | --- | --- |
 | Waveform and spectrogram side by side | Seek, zoom, pan, follow playback, and loop sections | Metadata, LUFS/LRA, sample peak, and true peak summary |
@@ -37,7 +39,7 @@ Wave Scope is a custom read-only audio viewer for VS Code. Open a supported audi
 ## Requirements
 
 - VS Code `1.100.0` or later
-- Optional: `ffmpeg` and `ffprobe` for richer metadata and decode fallback on local filesystem files
+- Optional but recommended: `ffmpeg` and `ffprobe` for richer metadata and decode fallback on local filesystem files
 
 ## Getting Started
 

@@ -28,6 +28,7 @@
     "out/waveScopeEditor.js",
     "dist/**",
     "src-webview/**/*.css",
+    "src-webview/vendor/**/*.mjs",
     "images/icon.png",
     "README.md",
     "LICENSE",
