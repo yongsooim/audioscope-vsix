@@ -6,7 +6,8 @@ import {
 
 const MIN_FREQUENCY = 20;
 const MAX_FREQUENCY = 20000;
-const ROW_BUCKET_SIZE = 32;
+const ROW_BUCKET_SIZE = 16;
+const VISIBLE_ROW_OVERSAMPLE = 1.35;
 
 const QUALITY_PRESETS = {
   balanced: {
@@ -731,8 +732,8 @@ function paintSpectrogramDisplay() {
 
   if (analysisState.visible.plan) {
     paintLayer(context, analysisState.visible.plan, displayRange, {
-      smoothing: false,
-      smoothingQuality: 'low',
+      smoothing: true,
+      smoothingQuality: 'medium',
     });
   }
 }
@@ -847,7 +848,10 @@ function createRequestPlan(request) {
   const fftSize = analysisType === 'scalogram' ? 0 : normalizeFftSize(request?.fftSize);
   const overlapRatio = analysisType === 'scalogram' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
-  const rowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier), rowBucketSize);
+  const rowOversample = requestKind === 'visible' && analysisType !== 'scalogram'
+    ? VISIBLE_ROW_OVERSAMPLE
+    : 1;
+  const rowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),

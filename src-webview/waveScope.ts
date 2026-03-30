@@ -179,6 +179,9 @@ const state = {
   loopHandleDrag: null,
   loopRange: null,
   pendingSeekTime: 0,
+  pendingSeekActive: false,
+  playbackResumeAnchorTime: 0,
+  playbackResumeStartedAt: 0,
   followPlayback: true,
   transportMode: RUNTIME_TRANSPORT_MODE,
   spectrogramRenderConfig: {
@@ -920,6 +923,8 @@ async function loadAudioFile(payload) {
   audio.preload = 'auto';
   state.audio = audio;
   state.pendingSeekTime = 0;
+  state.pendingSeekActive = false;
+  clearPlaybackResumeSmoothing();
   state.waveformViewRange = { start: 0, end: 0 };
 
   bindAudioEvents(audio, loadToken, payload);
@@ -940,6 +945,7 @@ function bindAudioEvents(audio, loadToken, payload) {
 
     if (audio.paused === false && Number.isFinite(audio.currentTime)) {
       state.pendingSeekTime = audio.currentTime;
+      state.pendingSeekActive = false;
     }
 
     syncTransport();
@@ -950,8 +956,10 @@ function bindAudioEvents(audio, loadToken, payload) {
       return;
     }
 
+    clearPlaybackResumeSmoothing();
     if (Number.isFinite(audio.currentTime)) {
       state.pendingSeekTime = audio.currentTime;
+      state.pendingSeekActive = false;
     }
 
     syncTransport();
@@ -962,6 +970,7 @@ function bindAudioEvents(audio, loadToken, payload) {
       return;
     }
 
+    syncPendingSeekFromAudio();
     syncTransport();
   };
 
@@ -991,9 +1000,11 @@ function bindAudioEvents(audio, loadToken, payload) {
       return;
     }
 
+    startPlaybackResumeSmoothing();
     startPlaybackLoop();
     if (Number.isFinite(audio.currentTime)) {
       state.pendingSeekTime = audio.currentTime;
+      state.pendingSeekActive = false;
     }
     syncTransport();
   });
@@ -1002,6 +1013,8 @@ function bindAudioEvents(audio, loadToken, payload) {
     if (loadToken !== state.loadToken) {
       return;
     }
+
+    clearPlaybackResumeSmoothing();
 
     if (state.loopRange && state.loopRange.end > state.loopRange.start) {
       void restartLoopPlayback(audio, state.loopRange.start);
@@ -2329,14 +2342,47 @@ function getSeekableEndTime(duration = getEffectiveDuration()) {
   return Math.max(0, duration - Math.min(SEEK_END_EPSILON_SECONDS, duration / 2));
 }
 
+function clearPlaybackResumeSmoothing() {
+  state.playbackResumeAnchorTime = 0;
+  state.playbackResumeStartedAt = 0;
+}
+
+function armPlaybackResumeSmoothing(anchorTime) {
+  state.playbackResumeAnchorTime = anchorTime;
+  state.playbackResumeStartedAt = -1;
+}
+
+function startPlaybackResumeSmoothing() {
+  if (state.playbackResumeStartedAt < 0) {
+    state.playbackResumeStartedAt = performance.now();
+  }
+}
+
+function syncPendingSeekFromAudio() {
+  const currentTime = state.audio?.currentTime;
+
+  if (!Number.isFinite(currentTime)) {
+    return;
+  }
+
+  if (
+    !state.pendingSeekActive
+    || Math.abs(currentTime - state.pendingSeekTime) <= SEEK_COMMIT_TOLERANCE_SECONDS
+  ) {
+    state.pendingSeekTime = currentTime;
+    state.pendingSeekActive = false;
+  }
+}
+
 function getPreferredPlaybackTime() {
   const duration = getEffectiveDuration();
   const seekableEndTime = getSeekableEndTime(duration);
   const audioTime = state.audio?.currentTime;
   const isPlaying = state.audio?.paused === false;
+  const hasPendingSeek = state.pendingSeekActive && Number.isFinite(state.pendingSeekTime);
   const baseTime = isPlaying && Number.isFinite(audioTime)
     ? audioTime
-    : Number.isFinite(state.pendingSeekTime)
+    : hasPendingSeek
       ? state.pendingSeekTime
       : Number.isFinite(audioTime)
         ? audioTime
@@ -2374,8 +2420,10 @@ function setPlaybackPosition(timeSeconds, { sync = true } = {}) {
 
   const nextTime = clamp(timeSeconds, 0, getSeekableEndTime(duration));
   state.pendingSeekTime = nextTime;
+  state.pendingSeekActive = true;
 
   if (Number.isFinite(state.audio.currentTime) && Math.abs(state.audio.currentTime - nextTime) <= 1e-4) {
+    state.pendingSeekActive = false;
     if (sync) {
       syncTransport();
     }
@@ -2387,6 +2435,8 @@ function setPlaybackPosition(timeSeconds, { sync = true } = {}) {
   } catch {
     // Keep pendingSeekTime so the next playback start still honors the user's seek.
   }
+
+  syncPendingSeekFromAudio();
 
   if (sync) {
     syncTransport();
@@ -2443,6 +2493,7 @@ async function ensurePlaybackPositionCommitted(targetTime) {
 
 async function restartLoopPlayback(audio, loopStartTime) {
   state.pendingSeekTime = loopStartTime;
+  state.pendingSeekActive = true;
 
   try {
     audio.currentTime = loopStartTime;
@@ -3301,6 +3352,7 @@ function releaseSelectionDrag(event, targetElement, cancelled = false) {
     ) {
       state.audio.currentTime = nextSelection.start;
       state.pendingSeekTime = nextSelection.start;
+      state.pendingSeekActive = false;
       syncTransport();
     }
     renderWaveformUi();
@@ -4009,6 +4061,8 @@ function destroySession() {
   state.loopHandleDrag = null;
   state.loopRange = null;
   state.pendingSeekTime = 0;
+  state.pendingSeekActive = false;
+  clearPlaybackResumeSmoothing();
   state.analysisStartedForLoadToken = 0;
   state.analysisQueuedForLoadToken = 0;
   state.sessionVersion = 0;
@@ -4087,12 +4141,20 @@ async function togglePlayback() {
 
   if (state.audio.paused) {
     try {
+      syncPendingSeekFromAudio();
       const targetTime = getPreferredPlaybackTime();
-      setPlaybackPosition(targetTime, { sync: false });
-      await ensurePlaybackPositionCommitted(targetTime);
+      armPlaybackResumeSmoothing(targetTime);
+
+      // Plain pause/resume should continue immediately without forcing a redundant
+      // seek commit wait when there is no outstanding user-driven seek to honor.
+      if (state.pendingSeekActive && !isPlaybackTimeCommitted(targetTime)) {
+        setPlaybackPosition(targetTime, { sync: false });
+        await ensurePlaybackPositionCommitted(targetTime);
+      }
 
       await state.audio.play();
     } catch (error) {
+      clearPlaybackResumeSmoothing();
       const message = error instanceof Error ? error.message : String(error);
       setAnalysisStatus(`Playback unavailable: ${message}`, true);
     }
@@ -4123,11 +4185,34 @@ function syncTransport() {
     shouldWrapLoop(state.loopRange, state.audio.currentTime)
   ) {
     state.pendingSeekTime = state.loopRange.start;
+    state.pendingSeekActive = true;
     state.audio.currentTime = state.loopRange.start;
+    syncPendingSeekFromAudio();
   }
 
   const liveCurrentTime = Number.isFinite(state.audio?.currentTime) ? state.audio.currentTime : 0;
-  const preferredCurrentTime = state.audio?.paused === false ? liveCurrentTime : getPreferredPlaybackTime();
+  startPlaybackResumeSmoothing();
+
+  let playbackDisplayTime = liveCurrentTime;
+
+  if (state.audio?.paused === false && state.playbackResumeStartedAt > 0) {
+    const resumeElapsedSeconds = Math.max(0, (performance.now() - state.playbackResumeStartedAt) / 1000);
+    const syntheticTime = state.playbackResumeAnchorTime + Math.min(0.12, resumeElapsedSeconds);
+    playbackDisplayTime = clamp(
+      Math.max(liveCurrentTime, syntheticTime),
+      0,
+      duration || 0,
+    );
+
+    if (
+      liveCurrentTime + SEEK_COMMIT_TOLERANCE_SECONDS >= syntheticTime
+      || resumeElapsedSeconds >= 0.12
+    ) {
+      clearPlaybackResumeSmoothing();
+    }
+  }
+
+  const preferredCurrentTime = state.audio?.paused === false ? playbackDisplayTime : getPreferredPlaybackTime();
   const currentTime = clamp(preferredCurrentTime, 0, duration || 0);
   const progress = isPlayable && duration > 0 ? (currentTime / duration) : 0;
 
