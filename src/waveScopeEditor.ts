@@ -267,7 +267,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-loop">
                 <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Drag to set loop</div>
-                <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" hidden>Clear</button>
+                <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" aria-hidden="true" tabindex="-1" disabled>Clear</button>
               </div>
             </div>
           </div>

@@ -2,7 +2,7 @@
   "name": "wave-scope",
   "displayName": "Wave Scope",
   "description": "Audio waveform and spectrogram editor for VS Code with playback, zoom, and loop controls.",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
@@ -29,7 +29,7 @@
     "dist/**",
     "src-webview/**/*.css",
     "src-webview/vendor/**/*.mjs",
-    "images/icon.png",
+    "images/*.png",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"

@@ -2475,6 +2475,7 @@ function renderWaveformUi() {
   const span = Math.max(0, range.end - range.start);
   const zoomFactor = duration > 0 && span > 0 ? duration / span : 1;
   const loopLabelRange = state.selectionDraft ?? state.loopRange;
+  const hasCommittedLoopRange = Boolean(state.loopRange);
 
   elements.waveZoomReset.textContent = 'Reset';
   if (elements.waveZoomChip) {
@@ -2495,7 +2496,9 @@ function renderWaveformUi() {
   elements.waveLoopLabel.textContent = loopLabelRange
     ? `Loop ${formatAxisLabel(loopLabelRange.start)} - ${formatAxisLabel(loopLabelRange.end)}`
     : 'Drag to set loop';
-  elements.waveClearLoop.hidden = !state.loopRange;
+  elements.waveClearLoop.disabled = !hasCommittedLoopRange;
+  elements.waveClearLoop.tabIndex = hasCommittedLoopRange ? 0 : -1;
+  elements.waveClearLoop.setAttribute('aria-hidden', hasCommittedLoopRange ? 'false' : 'true');
 
   renderWaveformAxis();
   applyWaveformOverviewThumb();

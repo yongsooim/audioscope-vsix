@@ -360,7 +360,8 @@ body {
 .wave-loop-label {
   flex: 0 1 auto;
   color: rgba(110, 168, 255, 0.96);
-  max-width: min(210px, 22vw);
+  width: 156px;
+  max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -371,7 +372,10 @@ body {
 }
 
 .wave-toolbar-pill-zoom {
+  justify-content: center;
+  width: 84px;
   color: rgba(239, 246, 255, 0.94);
+  text-align: center;
 }
 
 .wave-toolbar-actions {
@@ -401,10 +405,12 @@ body {
 
 .wave-toolbar-group-loop {
   flex: 0 0 auto;
+  min-width: 220px;
 }
 
 .wave-toolbar-group-zoom {
   flex: 0 0 auto;
+  min-width: 206px;
 }
 
 .wave-toolbar-group-follow {
@@ -524,6 +530,11 @@ body {
   border-color: rgba(148, 163, 184, 0.14);
   color: rgba(203, 213, 225, 0.84);
   background: linear-gradient(180deg, rgba(15, 23, 42, 0.82) 0%, rgba(9, 14, 25, 0.82) 100%);
+}
+
+.wave-tool-button-quiet[aria-hidden="true"] {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .waveform-viewport {

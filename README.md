@@ -1,30 +1,32 @@
 # Wave Scope
 
-<p align="center">Inspect audio files in VS Code with synchronized waveform, spectrogram, playback, and loudness views.</p>
+<p align="center">
+  <img src="./images/icon.png" width="128" alt="Wave Scope icon">
+</p>
 
-Wave Scope is a custom read-only audio viewer for VS Code. Open a supported audio file and inspect timing, frequency content, playback position, loop ranges, metadata, and loudness without leaving the editor.
+<p align="center">
+  <strong>Inspect audio files in VS Code with synchronized waveform, spectrogram, playback, and loudness views.</strong>
+</p>
 
- For metadata and decode fallback, install the `ffmpeg` CLI first.
+<p align="center">
+  Open a supported audio file and explore timing, frequency content, loop ranges, metadata, and loudness without leaving the editor.
+</p>
 
- macOS
- ```bash
- brew install ffmpeg
- ```
+<p align="center">
+  <img src="./images/wave-scope-full.png" alt="Wave Scope waveform and spectrogram screenshot">
+</p>
 
- Windows
- ```powershell
- winget install --id Gyan.FFmpeg --exact
- ```
+## Overview
 
- Other platforms: [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
+Wave Scope is a custom read-only audio viewer for VS Code. It is built for quick inspection and analysis rather than editing, so you can stay inside your workspace while reviewing audio assets, recordings, stems, or exports.
 
-| Inspect | Navigate | Analyze |
+| See | Control | Review |
 | --- | --- | --- |
 | Waveform and spectrogram side by side | Seek, zoom, pan, follow playback, and loop sections | Metadata, LUFS/LRA, sample peak, and true peak summary |
 
 ## Highlights
 
-- Open common audio formats directly in a dedicated VS Code view
+- Open common audio formats in a dedicated VS Code view
 - View waveform and spectrogram together in a fullscreen-first, resizable layout
 - Click to seek, drag to create loop ranges, and refine loop points with direct handles
 - Use follow mode, overview scrolling, and zoom controls for long recordings
@@ -32,9 +34,32 @@ Wave Scope is a custom read-only audio viewer for VS Code. Open a supported audi
 - Inspect integrated loudness, loudness range, sample peak, and true peak at a glance
 - Use optional `ffmpeg` and `ffprobe` integration for richer metadata and decode fallback on local files
 
+## Quick Start
+
+1. Install the extension.
+2. Open a supported audio file in VS Code.
+3. If VS Code selects `Wave Scope`, the file opens directly in the custom view.
+4. If it opens somewhere else, use `Reopen Editor With...` or run `Wave Scope: Open Active Audio File in Wave Scope` from the Command Palette.
+
+> [!NOTE]
+> VS Code's built-in `Media Preview` currently takes precedence for `.mp3`, `.wav`, `.ogg`, and `.oga`, so those formats may not open in `Wave Scope` automatically on first install.
+
+To make Wave Scope the default editor for those formats, use `Reopen Editor With...` and choose `Set as Default`, or add this to your VS Code settings:
+
+```json
+{
+  "workbench.editorAssociations": {
+    "*.mp3": "waveScope.editor",
+    "*.wav": "waveScope.editor",
+    "*.ogg": "waveScope.editor",
+    "*.oga": "waveScope.editor"
+  }
+}
+```
+
 ## Supported Formats
 
-`Wave Scope` registers as the default editor for these file types (with ffmpeg decoder):
+Wave Scope contributes a custom editor for:
 
 - `.wav`
 - `.wave`
@@ -48,22 +73,10 @@ Wave Scope is a custom read-only audio viewer for VS Code. Open a supported audi
 - `.aif`
 - `.aiff`
 
-## Requirements
-
-- VS Code `1.100.0` or later
-- Optional but recommended: `ffmpeg` CLI tools including `ffprobe` for richer metadata and decode fallback on local filesystem files
-
-## Getting Started
-
-1. Install the extension.
-2. Open a supported audio file in VS Code.
-3. The file opens in `Wave Scope` automatically.
-4. To open manually, run `Wave Scope: Open Active Audio File in Wave Scope` from the Command Palette or use `Reopen Editor With...`.
-
-## Interaction
+## Controls
 
 - `Space`: play or pause
-- `←` / `→`: seek backward or forward by 5 seconds
+- `Left Arrow` / `Right Arrow`: seek backward or forward by 5 seconds
 - `-` / `=`: zoom out or zoom in
 - Click on the waveform or spectrogram: seek to that point
 - Drag on the waveform or spectrogram: create a loop range
@@ -80,14 +93,27 @@ Wave Scope works out of the box for formats the runtime can decode natively. Ins
 
 Quick install examples:
 
-- macOS (Homebrew): [`brew install ffmpeg`](https://formulae.brew.sh/formula/ffmpeg)
-- Windows (winget): [`winget install --id Gyan.FFmpeg --exact`](https://github.com/microsoft/winget-pkgs/tree/master/manifests/g/Gyan/FFmpeg)
-- Other platforms: use your package manager of choice from [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
+```bash
+# macOS (Homebrew)
+brew install ffmpeg
+```
+
+```powershell
+# Windows (winget)
+winget install --id Gyan.FFmpeg --exact
+```
+
+Other platforms: [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 
 If the binaries are not on `PATH`, configure them with:
 
 - `waveScope.ffmpegPath`
 - `waveScope.ffprobePath`
+
+## Requirements
+
+- VS Code `1.100.0` or later
+- Optional but recommended: `ffmpeg` CLI tools including `ffprobe`
 
 ## Settings
 
