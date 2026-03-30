@@ -139,7 +139,6 @@ function createEmptyLayerState(kind) {
 function createEmptyAnalysisState() {
   return {
     initialized: false,
-    transportMode: 'shared',
     attachedSessionVersion: -1,
     sampleRate: 0,
     sampleCount: 0,
@@ -235,18 +234,13 @@ function resizeCanvas(options) {
 
 function attachAudioSession(runtime, options) {
   const module = runtime.module;
-  const transportMode = options?.transportMode === 'transfer' ? 'transfer' : 'shared';
   const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
   const duration = Number(options?.duration);
   const sampleCount = Number(options?.sampleCount);
   const quality = normalizeQualityPreset(options?.quality);
 
-  if (transportMode === 'shared' && !options?.pcmSab) {
-    throw new Error('Shared PCM buffer is missing.');
-  }
-
-  if (transportMode === 'transfer' && !options?.samplesBuffer) {
+  if (!options?.samplesBuffer) {
     throw new Error('Transferable PCM buffer is missing.');
   }
 
@@ -269,15 +263,12 @@ function attachAudioSession(runtime, options) {
       throw new Error('Wasm PCM allocation failed.');
     }
 
-    const pcmSource = transportMode === 'shared'
-      ? new Float32Array(options.pcmSab)
-      : new Float32Array(options.samplesBuffer);
+    const pcmSource = new Float32Array(options.samplesBuffer);
     const pcmTarget = getHeapF32View(module, pcmPointer, sampleCount);
     pcmTarget.set(pcmSource);
   }
 
   analysisState.initialized = true;
-  analysisState.transportMode = transportMode;
   analysisState.attachedSessionVersion = sessionVersion;
   analysisState.sampleRate = sampleRate;
   analysisState.sampleCount = sampleCount;

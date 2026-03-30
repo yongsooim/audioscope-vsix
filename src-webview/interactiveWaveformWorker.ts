@@ -94,7 +94,6 @@ function createEmptyAnalysisState() {
   return {
     initialized: false,
     waveformBuilt: false,
-    transportMode: 'shared',
     attachedSessionVersion: -1,
     sampleRate: 0,
     sampleCount: 0,
@@ -169,17 +168,12 @@ function clearCanvas() {
 }
 
 function attachAudioSession(options) {
-  const transportMode = options?.transportMode === 'transfer' ? 'transfer' : 'shared';
   const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
   const duration = Number(options?.duration);
   const sampleCount = Number(options?.sampleCount);
 
-  if (transportMode === 'shared' && !options?.pcmSab) {
-    throw new Error('Shared PCM buffer is missing.');
-  }
-
-  if (transportMode === 'transfer' && !options?.samplesBuffer) {
+  if (!options?.samplesBuffer) {
     throw new Error('Transferable PCM buffer is missing.');
   }
 
@@ -190,9 +184,7 @@ function attachAudioSession(options) {
   const isNewAudioSession = sessionVersion !== analysisState.attachedSessionVersion;
 
   if (isNewAudioSession) {
-    const samples = transportMode === 'shared'
-      ? new Float32Array(options.pcmSab)
-      : new Float32Array(options.samplesBuffer);
+    const samples = new Float32Array(options.samplesBuffer);
 
     analysisState.waveformData = {
       samples,
@@ -204,7 +196,6 @@ function attachAudioSession(options) {
   }
 
   analysisState.initialized = true;
-  analysisState.transportMode = transportMode;
   analysisState.attachedSessionVersion = sessionVersion;
   analysisState.sampleRate = sampleRate;
   analysisState.sampleCount = sampleCount;

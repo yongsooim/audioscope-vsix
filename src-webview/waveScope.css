@@ -130,10 +130,10 @@ body {
 }
 
 .media-metadata-detail {
-  position: absolute;
-  top: 100%;
+  position: fixed;
+  top: 0;
   left: 0;
-  z-index: 12;
+  z-index: 24;
   display: grid;
   gap: 10px;
   width: min(280px, calc(100vw - (var(--surface-inline-padding) * 2)));

@@ -202,6 +202,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'src-webview', 'waveScope.css'));
     const workerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'audioAnalysisWorker.js'));
     const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'interactiveWaveformWorker.js'));
+    const audioTransportProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'audioTransportProcessor.js'));
 
     return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -215,7 +216,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     <link rel="stylesheet" href="${styleUri}" />
     <title>Wave Scope</title>
   </head>
-  <body data-worker-src="${workerUri}" data-waveform-worker-src="${waveformWorkerUri}">
+  <body data-worker-src="${workerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}">
     <main class="app-shell">
       <section id="wave-scope-viewport" class="viewport" aria-label="Wave Scope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">
@@ -246,7 +247,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
                 </label>
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-loop">
-                <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Loop not set</div>
+                <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Drag to set loop</div>
                 <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" hidden>Clear</button>
               </div>
             </div>
@@ -337,7 +338,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
         <div id="waveform-overview" class="timeline-shell">
           <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>
           <div id="timeline-hover-tooltip" class="timeline-hover-tooltip" aria-hidden="true"></div>
-          <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.001" value="0" disabled />
+          <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.00001" value="0" disabled />
         </div>
         <div id="loudness-summary" class="loudness-summary" data-state="idle" aria-label="Loudness summary" aria-live="polite" hidden>
           <div class="loudness-chip">

@@ -10,6 +10,7 @@ await build({
     waveScope: path.join(projectRoot, 'src-webview', 'waveScope.ts'),
     audioAnalysisWorker: path.join(projectRoot, 'src-webview', 'audioAnalysisWorker.ts'),
     interactiveWaveformWorker: path.join(projectRoot, 'src-webview', 'interactiveWaveformWorker.ts'),
+    audioTransportProcessor: path.join(projectRoot, 'src-webview', 'audioTransportProcessor.ts'),
   },
   output: {
     dir: path.join(projectRoot, 'dist', 'webview'),
