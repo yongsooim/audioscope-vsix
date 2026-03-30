@@ -318,6 +318,14 @@ pub fn clampf64(value: f64, min_value: f64, max_value: f64) f64 {
     return @min(max_value, @max(min_value, value));
 }
 
+pub fn isFiniteF32(value: f32) bool {
+    return std.math.isFinite(value);
+}
+
+pub fn isFiniteF64(value: f64) bool {
+    return std.math.isFinite(value);
+}
+
 pub fn castSummaryValue(value: f64) f32 {
     if (!std.math.isFinite(value)) {
         return if (value < 0.0) -std.math.inf(f32) else std.math.inf(f32);
@@ -427,12 +435,19 @@ pub fn frequencyForScalogramRow(row: i32, rows: i32, min_frequency: f32, max_fre
 }
 
 pub fn reduceMinMax(values: []const f32, comptime clamp_samples: bool) RangeResult {
-    var local_min: f32 = 1.0;
-    var local_max: f32 = -1.0;
-    var index: usize = 0;
+    if (values.len == 0) {
+        return .{ .min = 1.0, .max = -1.0 };
+    }
+
+    var local_min = if (clamp_samples)
+        clampf32(values[0], -1.0, 1.0)
+    else
+        values[0];
+    var local_max = local_min;
+    var index: usize = 1;
 
     if (comptime simd_enabled) {
-        if (values.len >= 4) {
+        if (values.len - index >= 4) {
             var min_vec: Vec4f = @splat(local_min);
             var max_vec: Vec4f = @splat(local_max);
 
@@ -458,4 +473,16 @@ pub fn reduceMinMax(values: []const f32, comptime clamp_samples: bool) RangeResu
     }
 
     return .{ .min = local_min, .max = local_max };
+}
+
+test "reduceMinMax preserves unclamped extrema" {
+    const result = reduceMinMax(&.{ 1.25, -1.4, 0.5 }, false);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.4), result.min, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.25), result.max, 0.0001);
+}
+
+test "reduceMinMax clamps samples when requested" {
+    const result = reduceMinMax(&.{ 1.25, -1.4, 0.5 }, true);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), result.min, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), result.max, 0.0001);
 }
