@@ -20,6 +20,8 @@ pub const morlet_support_sigma: f32 = 3.0;
 pub const morlet_max_support_samples: i32 = 4096;
 pub const morlet_target_steps: i32 = 96;
 pub const scalogram_row_block_size: i32 = 32;
+pub const log10_of_two: f32 = 0.3010299956639812;
+pub const log10_of_e: f32 = 0.4342944819032518;
 
 pub const RangeResult = struct {
     min: f32,
@@ -334,6 +336,22 @@ pub fn linearToDecibels(value: f64) f32 {
     }
 
     return @as(f32, @floatCast(20.0 * (@log(value) / @log(@as(f64, 10.0)))));
+}
+
+pub fn approxLog10Positive(value: f32) f32 {
+    if (value <= 0.0) return -std.math.inf(f32);
+
+    const bits: u32 = @bitCast(value);
+    const exponent = @as(i32, @intCast((bits >> 23) & 0xff)) - 127;
+    const mantissa_bits: u32 = (bits & 0x7fffff) | 0x3f800000;
+    const mantissa: f32 = @bitCast(mantissa_bits);
+    const y = (mantissa - 1.0) / (mantissa + 1.0);
+    const y2 = y * y;
+    const y3 = y * y2;
+    const y5 = y3 * y2;
+    const y7 = y5 * y2;
+    const ln_mantissa = 2.0 * (y + (y3 / 3.0) + (y5 / 5.0) + (y7 / 7.0));
+    return (@as(f32, @floatFromInt(exponent)) * log10_of_two) + (ln_mantissa * log10_of_e);
 }
 
 pub fn clampi32(value: i32, min_value: i32, max_value: i32) i32 {
