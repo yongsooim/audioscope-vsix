@@ -17,15 +17,15 @@ const outputHostPath = process.argv[3];
 const virtualInputPath = process.argv[4];
 const toolArgs = JSON.parse(process.argv[5]);
 
-globalThis.__waveScopeModule = {
+globalThis.__audioscopeModule = {
   arguments: toolArgs,
   preRun: [() => {
     const data = fs.readFileSync(inputHostPath);
-    globalThis.__waveScopeModule.FS_writeFile(virtualInputPath, data);
+    globalThis.__audioscopeModule.FS_writeFile(virtualInputPath, data);
   }],
   postRun: outputHostPath ? [() => {
     try {
-      const data = globalThis.__waveScopeModule.FS_readFile('/output.wav');
+      const data = globalThis.__audioscopeModule.FS_readFile('/output.wav');
       fs.writeFileSync(outputHostPath, Buffer.from(data));
     } catch {
       // Preserve the tool's original stderr/exit code when output was not produced.
@@ -126,8 +126,8 @@ function formatEmbeddedVersion(toolName: EmbeddedToolName): string {
   const revision = manifest?.ffmpegRevision?.slice(0, 7);
 
   return revision
-    ? `embedded wasm (${toolName} @ ${revision})`
-    : 'embedded wasm';
+    ? `wasm (${toolName} @ ${revision})`
+    : 'wasm';
 }
 
 export function getEmbeddedExecutableStatusSync(toolName: EmbeddedToolName): EmbeddedExecutableStatus {
@@ -138,14 +138,14 @@ export function getEmbeddedExecutableStatusSync(toolName: EmbeddedToolName): Emb
   return {
     available,
     backend: 'bundled',
-    command: `embedded ${toolName}.wasm`,
+    command: `${toolName}.wasm`,
     path: available ? scriptPath : null,
     version: available ? formatEmbeddedVersion(toolName) : null,
   };
 }
 
 async function prepareResourceHandle(resource: vscode.Uri): Promise<PreparedResourceHandle> {
-  const tempDirectoryPath = await fsp.mkdtemp(path.join(os.tmpdir(), 'wave-scope-embedded-'));
+  const tempDirectoryPath = await fsp.mkdtemp(path.join(os.tmpdir(), 'audioscope-embedded-'));
 
   if (resource.scheme === 'file') {
     return {
@@ -254,7 +254,7 @@ export async function runEmbeddedFfprobe(resource: vscode.Uri, timeout: number):
   const toolStatus = getEmbeddedExecutableStatusSync('ffprobe');
 
   if (!toolStatus.available || !toolStatus.path) {
-    throw new Error('Embedded ffprobe.wasm is unavailable.');
+    throw new Error('ffprobe.wasm is unavailable.');
   }
 
   const resourceHandle = await prepareResourceHandle(resource);
@@ -298,7 +298,7 @@ export async function runEmbeddedFfmpegDecodeToWav(
   const toolStatus = getEmbeddedExecutableStatusSync('ffmpeg');
 
   if (!toolStatus.available || !toolStatus.path) {
-    throw new Error('Embedded ffmpeg.wasm is unavailable.');
+    throw new Error('ffmpeg.wasm is unavailable.');
   }
 
   const emitDebugTimelineEvent = (label: string, detail?: string): void => {
@@ -358,7 +358,7 @@ export async function runEmbeddedFfmpegDecodeToPcm(
   onDebugTimelineEvent?: (event: DebugTimelineEventPayload) => void | Promise<void>,
 ): Promise<EmbeddedPcmDecodePayload> {
   if (!hasDirectDecodeModule()) {
-    throw new Error('Embedded direct FFmpeg decode module is unavailable.');
+    throw new Error('Direct FFmpeg decode module is unavailable.');
   }
 
   return enqueueDirectDecodeTask(async () => {
@@ -387,7 +387,7 @@ export async function runEmbeddedFfmpegDecodeToPcm(
           module,
           module._wave_get_last_error_ptr(),
           module._wave_get_last_error_length(),
-        ) || 'Embedded direct FFmpeg decode failed.');
+        ) || 'Direct FFmpeg decode failed.');
       }
 
       const channelCount = Math.max(0, module._wave_get_output_channel_count());

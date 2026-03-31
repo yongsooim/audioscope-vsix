@@ -25,10 +25,10 @@ const SPECTROGRAM_ROW_BUCKET_SIZE = 32;
 const DEFAULT_VIEWPORT_SPLIT_RATIO = 0.5;
 const VIEWPORT_SPLIT_STEP = 0.05;
 const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 12;
-const VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX = 140;
-const VIEWPORT_RATIO_MIN = 0.15;
-const VIEWPORT_RATIO_MAX = 0.85;
-const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'Embedded FFmpeg WASM tools are unavailable. Rebuild or reinstall Wave Scope to restore metadata and decode fallback.';
+const VIEWPORT_RATIO_MIN = 0;
+const VIEWPORT_RATIO_MAX = 1;
+const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. Rebuild or reinstall audioscope to restore metadata and decoding.';
+const LOUDNESS_METHOD_LABEL = 'Gated loudness';
 
 const WAVEFORM_COLOR = '#8ccadd';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
@@ -42,11 +42,11 @@ const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.25;
 const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.18;
 const LOOP_SELECTION_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
-const LOOP_HANDLE_WIDTH_PX = 12;
+const LOOP_HANDLE_WIDTH_PX = 8;
 const LOOP_WRAP_EPSILON_SECONDS = 1 / 120;
 const WAVEFORM_TOP_PADDING_PX = 10;
 const WAVEFORM_BOTTOM_PADDING_PX = 10;
-const WAVEFORM_AMPLITUDE_HEIGHT_RATIO = 0.38;
+const WAVEFORM_AMPLITUDE_HEIGHT_RATIO = 0.45;
 const WAVEFORM_SAMPLE_DETAIL_MAX_SAMPLES_PER_RENDER_PIXEL = 1;
 
 const QUALITY_PRESETS = {
@@ -71,7 +71,7 @@ function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
 
   if (!(element instanceof HTMLElement)) {
-    throw new Error(`Wave Scope is missing required element #${id}.`);
+    throw new Error(`audioscope is missing required element #${id}.`);
   }
 
   return element as T;
@@ -99,7 +99,7 @@ interface DebugTimelineEvent {
 const DEBUG_TIMELINE_MAX_EVENTS = 96;
 
 const elements = {
-  viewport: requireElement<HTMLElement>('wave-scope-viewport'),
+  viewport: requireElement<HTMLElement>('audioscope-viewport'),
   wavePanel: requireElement<HTMLElement>('wave-panel'),
   waveToolbar: requireElement<HTMLElement>('wave-toolbar'),
   mediaMetadataPanel: requireElement<HTMLElement>('media-metadata-panel'),
@@ -178,6 +178,8 @@ const state = {
   playbackSourceKind: 'native',
   playbackTransportKind: 'unavailable',
   playbackTransportError: null,
+  playbackLatencyCompensationApplied: false,
+  playbackLatencyEstimateSeconds: 0,
   playbackRate: 1,
   analysisSourceKind: 'native',
   decodeFallbackLoadToken: 0,
@@ -211,7 +213,7 @@ const state = {
   selectionDraft: null,
   loopHandleDrag: null,
   loopRange: null,
-  followPlayback: true,
+  followPlayback: false,
   spectrogramRenderConfig: {
     analysisType: 'spectrogram',
     fftSize: 4096,
@@ -411,7 +413,7 @@ if (
   typeof elements.spectrogram.transferControlToOffscreen !== 'function'
   || typeof OffscreenCanvas !== 'function'
 ) {
-  setFatalStatus('OffscreenCanvas is required for Wave Scope.');
+  setFatalStatus('OffscreenCanvas is required for audioscope.');
 } else {
   initializeKeyboardFocus();
   state.followPlayback = elements.waveFollow.checked;
@@ -510,7 +512,7 @@ window.addEventListener('message', (event) => {
     }
 
     state.externalTools = normalizeExternalToolStatus(message.body?.toolStatus ?? state.externalTools);
-    rejectDecodeFallbackRequest(loadToken, message.body?.message || state.externalTools.guidance || 'ffmpeg decode fallback failed.');
+    rejectDecodeFallbackRequest(loadToken, message.body?.message || state.externalTools.guidance || 'ffmpeg decode failed.');
     renderMediaMetadata();
     addDebugTimelineEvent('webview.decodeFallback.error', state.decodeFallbackError.message, 'webview', loadToken);
     return;
@@ -594,10 +596,10 @@ function createExternalToolStatusState() {
     canDecodeFallback: false,
     canReadMetadata: false,
     ffmpegAvailable: false,
-    ffmpegCommand: 'embedded ffmpeg.wasm',
+    ffmpegCommand: 'ffmpeg.wasm',
     ffmpegVersion: null,
     ffprobeAvailable: false,
-    ffprobeCommand: 'embedded ffprobe.wasm',
+    ffprobeCommand: 'ffprobe.wasm',
     ffprobeVersion: null,
     fileBacked: false,
     guidance: EMBEDDED_MEDIA_TOOLS_GUIDANCE,
@@ -727,6 +729,23 @@ function formatLoudnessValue(status, value, unit) {
   return `${normalizeLoudnessDisplayValue(value).toFixed(1)} ${unit}`;
 }
 
+function formatLoudnessSourceLabel(loudness) {
+  return loudness?.status === 'ready'
+    ? `${loudness.source} • ${loudness.channelMode}`
+    : null;
+}
+
+function formatLoudnessSummaryTitle(loudness) {
+  if (loudness?.message) {
+    return loudness.message;
+  }
+
+  return [
+    LOUDNESS_METHOD_LABEL,
+    formatLoudnessSourceLabel(loudness),
+  ].filter(Boolean).join('\n');
+}
+
 function getActiveDecodeSourceKind() {
   return state.playbackSourceKind === 'ffmpeg-fallback' || state.analysisSourceKind === 'ffmpeg-fallback'
     ? 'ffmpeg-fallback'
@@ -735,13 +754,13 @@ function getActiveDecodeSourceKind() {
 
 function formatMetadataDecodeSourceLabel() {
   return getActiveDecodeSourceKind() === 'ffmpeg-fallback'
-    ? 'ffmpeg fallback'
+    ? 'ffmpeg decode'
     : 'native browser decode';
 }
 
 function formatPlaybackTransportLabel() {
   if (state.playbackTransportKind === 'audio-worklet-copy') {
-    return 'AudioWorklet (copied buffers)';
+    return 'AudioWorklet';
   }
 
   if (state.playbackTransportKind === 'audio-worklet-stretch') {
@@ -749,6 +768,29 @@ function formatPlaybackTransportLabel() {
   }
 
   return 'Playback unavailable';
+}
+
+function updatePlaybackLatencyCompensationState(transport = state.audioTransport) {
+  const info = transport?.getLatencyCompensationInfo?.() ?? { applied: false, estimatedSeconds: 0 };
+  state.playbackLatencyCompensationApplied = Boolean(info.applied);
+  state.playbackLatencyEstimateSeconds = Number.isFinite(info.estimatedSeconds)
+    ? Math.max(0, Number(info.estimatedSeconds))
+    : 0;
+}
+
+function formatPlaybackLatencyEstimate() {
+  if (!(state.playbackLatencyEstimateSeconds > 0)) {
+    return null;
+  }
+
+  const milliseconds = Math.max(1, Math.round(state.playbackLatencyEstimateSeconds * 1000));
+  return `${milliseconds} ms estimated`;
+}
+
+function formatPlaybackLatencyCompensationNote() {
+  return state.playbackLatencyCompensationApplied
+    ? 'Playback cursor compensated.'
+    : null;
 }
 
 function formatMetadataSummarySegments(summary) {
@@ -973,17 +1015,20 @@ function renderMediaMetadata() {
 
   const loudnessSection = appendMetadataDetailSection(detailRoot, 'Loudness');
   const loudness = state.loudness ?? createLoudnessSummaryState('idle');
-  appendMetadataDetailRow(loudnessSection, 'Source', loudness.status === 'ready' ? `${loudness.source} • ${loudness.channelMode}` : null);
+  appendMetadataDetailRow(loudnessSection, 'Method', LOUDNESS_METHOD_LABEL);
   appendMetadataDetailRow(loudnessSection, 'Integrated', formatLoudnessValue(loudness.status, loudness.integratedLufs, 'LUFS'));
   appendMetadataDetailRow(loudnessSection, 'Range', formatLoudnessValue(loudness.status, loudness.loudnessRangeLu, 'LU'));
   appendMetadataDetailRow(loudnessSection, 'Sample Peak', formatLoudnessValue(loudness.status, loudness.samplePeakDbfs, 'dBFS'));
   appendMetadataDetailRow(loudnessSection, 'True Peak', formatLoudnessValue(loudness.status, loudness.truePeakDbtp, 'dBTP'));
   appendMetadataDetailRow(loudnessSection, 'Note', loudness.status === 'error' ? loudness.message : null);
+  appendMetadataDetailRow(loudnessSection, 'Source', formatLoudnessSourceLabel(loudness));
 
   const toolSection = appendMetadataDetailSection(detailRoot, 'Tools');
   appendMetadataDetailRow(toolSection, 'Decode', formatMetadataDecodeSourceLabel());
   appendMetadataDetailRow(toolSection, 'Playback', playbackTransportLabel);
   appendMetadataDetailRow(toolSection, 'Playback Status', playbackTransportError);
+  appendMetadataDetailRow(toolSection, 'Playback Latency', formatPlaybackLatencyEstimate());
+  appendMetadataDetailRow(toolSection, 'Latency Compensation', formatPlaybackLatencyCompensationNote());
   appendMetadataDetailRow(toolSection, 'Probe', detail?.probeSource === 'ffprobe' ? 'ffprobe' : 'Unavailable');
   appendMetadataDetailRow(
     toolSection,
@@ -1003,10 +1048,15 @@ function renderMediaMetadata() {
       state.externalTools.ffprobeCommand,
     ),
   );
+  const toolStatusMessage = state.decodeFallbackError?.message
+    || detail?.guidance
+    || metadata.message
+    || state.externalTools.guidance
+    || null;
   appendMetadataDetailRow(
     toolSection,
     'Status',
-    state.decodeFallbackError?.message || detail?.guidance || metadata.message || state.externalTools.guidance || null,
+    toolStatusMessage === 'Using audioscope media tools.' ? null : toolStatusMessage,
   );
 
   syncMediaMetadataDetailVisibility();
@@ -1076,12 +1126,7 @@ function renderLoudnessSummary() {
 
   const loudness = state.loudness ?? createLoudnessSummaryState('idle');
   elements.loudnessSummary.dataset.state = loudness.status;
-  elements.loudnessSummary.title = loudness.message
-    || (
-      loudness.status === 'ready'
-        ? `${loudness.source} • ${loudness.channelMode}`
-        : ''
-    );
+  elements.loudnessSummary.title = formatLoudnessSummaryTitle(loudness);
   elements.loudnessIntegrated.textContent = formatLoudnessValue(loudness.status, loudness.integratedLufs, 'LUFS');
   elements.loudnessRange.textContent = formatLoudnessValue(loudness.status, loudness.loudnessRangeLu, 'LU');
   elements.loudnessSamplePeak.textContent = formatLoudnessValue(loudness.status, loudness.samplePeakDbfs, 'dBFS');
@@ -1176,13 +1221,19 @@ function createPlaybackTransport(loadToken) {
 
       const nextPlaybackTransportKind = transport.getTransportKind?.() ?? state.playbackTransportKind;
       const nextPlaybackTransportError = transport.getLastFallbackReason?.() ?? null;
+      const previousLatencyApplied = state.playbackLatencyCompensationApplied;
+      const previousLatencyEstimateSeconds = state.playbackLatencyEstimateSeconds;
       const transportKindChanged = nextPlaybackTransportKind !== state.playbackTransportKind;
       const transportErrorChanged =
         nextPlaybackTransportError !== state.playbackTransportError;
       state.playbackTransportKind = nextPlaybackTransportKind;
       state.playbackTransportError = nextPlaybackTransportError;
+      updatePlaybackLatencyCompensationState(transport);
+      const latencyChanged =
+        previousLatencyApplied !== state.playbackLatencyCompensationApplied
+        || Math.abs(previousLatencyEstimateSeconds - state.playbackLatencyEstimateSeconds) > 0.0005;
 
-      if (transportKindChanged || transportErrorChanged) {
+      if (transportKindChanged || transportErrorChanged || latencyChanged) {
         renderMediaMetadata();
       }
 
@@ -1194,6 +1245,7 @@ function createPlaybackTransport(loadToken) {
 
   state.playbackTransportKind = transport.getTransportKind?.() ?? 'unavailable';
   state.playbackTransportError = transport.getLastFallbackReason?.() ?? null;
+  updatePlaybackLatencyCompensationState(transport);
   transport.setPlaybackRate(state.playbackRate);
   return transport;
 }
@@ -1301,7 +1353,7 @@ function acceptDecodeFallbackResult(loadToken, body) {
     const frameCount = Math.max(0, Math.trunc(Number(body?.frameCount) || 0));
 
     if (channelBuffers.length === 0 || sampleRate <= 0 || frameCount <= 0) {
-      rejectDecodeFallbackRequest(loadToken, 'ffmpeg fallback did not return decoded PCM channel buffers.');
+      rejectDecodeFallbackRequest(loadToken, 'ffmpeg decode did not return decoded PCM channel buffers.');
       return;
     }
 
@@ -1318,7 +1370,7 @@ function acceptDecodeFallbackResult(loadToken, body) {
     const audioBuffer = body?.audioBuffer;
 
     if (!(audioBuffer instanceof ArrayBuffer)) {
-      rejectDecodeFallbackRequest(loadToken, 'ffmpeg fallback did not return audio bytes.');
+      rejectDecodeFallbackRequest(loadToken, 'ffmpeg decode did not return audio bytes.');
       return;
     }
 
@@ -1469,7 +1521,7 @@ function disposeDecodeWorker() {
 
 function requestDecodeFallback(loadToken, payload, reason, sourceBytes = null) {
   if (loadToken !== state.loadToken) {
-    return Promise.reject(new Error('Decode fallback request is stale.'));
+    return Promise.reject(new Error('Decode request is stale.'));
   }
 
   if (state.decodeFallbackResult && state.decodeFallbackLoadToken === loadToken) {
@@ -1591,7 +1643,7 @@ async function loadDecodedAudioSource(loadToken, payload) {
         return;
       }
 
-      setAnalysisStatus('Requesting ffmpeg decode fallback…');
+      setAnalysisStatus('Requesting ffmpeg decode…');
       const fallback = await requestDecodeFallback(loadToken, payload, 'analysis-decode-error', audioData);
 
       if (loadToken !== state.loadToken) {
@@ -1649,7 +1701,7 @@ async function loadDecodedAudioSource(loadToken, payload) {
       && (state.externalTools.canDecodeFallback || !state.externalTools.resolved)
     ) {
       try {
-        setAnalysisStatus('Requesting ffmpeg decode fallback…');
+        setAnalysisStatus('Requesting ffmpeg decode…');
         const fallback = await requestDecodeFallback(loadToken, payload, 'fetch-error');
 
         if (loadToken !== state.loadToken) {
@@ -2814,6 +2866,7 @@ function renderWaveformUi() {
   const zoomFactor = duration > 0 && span > 0 ? duration / span : 1;
   const loopLabelRange = state.selectionDraft ?? state.loopRange;
   const hasCommittedLoopRange = Boolean(state.loopRange);
+  const loopGroup = elements.waveLoopLabel.parentElement;
 
   elements.waveZoomReset.textContent = 'Reset';
   if (elements.waveZoomChip) {
@@ -2831,12 +2884,15 @@ function renderWaveformUi() {
   if (elements.waveToolbarInfo) {
     elements.waveToolbarInfo.title = hintText;
   }
+  if (loopGroup instanceof HTMLElement) {
+    loopGroup.hidden = false;
+  }
   elements.waveLoopLabel.textContent = loopLabelRange
     ? `Loop ${formatAxisLabel(loopLabelRange.start)} - ${formatAxisLabel(loopLabelRange.end)}`
     : 'Drag to set loop';
   elements.waveClearLoop.disabled = !hasCommittedLoopRange;
-  elements.waveClearLoop.tabIndex = hasCommittedLoopRange ? 0 : -1;
-  elements.waveClearLoop.setAttribute('aria-hidden', hasCommittedLoopRange ? 'false' : 'true');
+  elements.waveClearLoop.tabIndex = 0;
+  elements.waveClearLoop.setAttribute('aria-hidden', 'false');
 
   renderWaveformAxis();
   applyWaveformOverviewThumb();
@@ -2906,7 +2962,10 @@ function renderWaveformAxis(options: WaveformAxisRenderOptions = {}) {
     label.className = 'waveform-axis-label';
     label.textContent = formatAxisLabel(tick);
 
-    tickElement.append(mark, label);
+    const bottomMark = document.createElement('div');
+    bottomMark.className = 'waveform-axis-mark';
+
+    tickElement.append(mark, label, bottomMark);
     axisContent.append(tickElement);
   });
 
@@ -3480,6 +3539,28 @@ function hideSpectrogramHoverTooltip() {
   hideSurfaceHoverTooltip(elements.spectrogramHoverTooltip);
 }
 
+function updateLoopHandleHoverTooltip(event, targetElement) {
+  if (targetElement === elements.waveformHitTarget) {
+    updateWaveformHoverTooltip(event);
+    return;
+  }
+
+  if (targetElement === elements.spectrogramHitTarget) {
+    updateSpectrogramHoverTooltip(event);
+  }
+}
+
+function hideLoopHandleHoverTooltip(targetElement) {
+  if (targetElement === elements.waveformHitTarget) {
+    hideWaveformHoverTooltip();
+    return;
+  }
+
+  if (targetElement === elements.spectrogramHitTarget) {
+    hideSpectrogramHoverTooltip();
+  }
+}
+
 function seekWaveformTo(timeSeconds) {
   setPlaybackPosition(timeSeconds);
 }
@@ -3637,11 +3718,20 @@ function bindLoopHandle(handleElement, edge, targetElement) {
   handleElement.addEventListener('pointerdown', (event) => {
     startLoopHandleDrag(event, edge, handleElement, targetElement);
   });
-  handleElement.addEventListener('pointermove', moveLoopHandleDrag);
+  handleElement.addEventListener('pointermove', (event) => {
+    updateLoopHandleHoverTooltip(event, targetElement);
+    moveLoopHandleDrag(event);
+  });
+  handleElement.addEventListener('pointerleave', () => {
+    if (state.loopHandleDrag?.handleElement !== handleElement) {
+      hideLoopHandleHoverTooltip(targetElement);
+    }
+  });
   handleElement.addEventListener('pointerup', (event) => {
     releaseLoopHandleDrag(event);
   });
   handleElement.addEventListener('pointercancel', (event) => {
+    hideLoopHandleHoverTooltip(targetElement);
     releaseLoopHandleDrag(event, true);
   });
 }
@@ -3671,22 +3761,10 @@ function getViewportSplitterSize() {
   );
 }
 
-function getWavePanelMinimumHeight() {
-  const waveformViewportMinHeight = getNumericStyleSize(elements.waveformViewport, 'minHeight', 168);
-
-  return Math.max(
-    waveformViewportMinHeight,
-    (elements.waveToolbar?.offsetHeight || 0)
-      + (elements.waveformAxis?.offsetHeight || 0)
-      + waveformViewportMinHeight,
-  );
-}
-
-function getSpectrogramPanelMinimumHeight() {
-  return Math.max(
-    VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX,
-    getNumericStyleSize(elements.spectrogramStage, 'minHeight', VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX),
-  );
+function getWavePanelChromeHeight() {
+  const toolbarHeight = Math.max(0, elements.waveToolbar?.offsetHeight || 0);
+  const axisHeight = Math.max(0, elements.waveformAxis?.offsetHeight || 0);
+  return toolbarHeight + axisHeight;
 }
 
 function resolveViewportPanelHeights(availableHeight, ratio = state.viewportSplitRatio) {
@@ -3697,23 +3775,7 @@ function resolveViewportPanelHeights(availableHeight, ratio = state.viewportSpli
   }
 
   const desiredWaveHeight = safeAvailableHeight * normalizeViewportSplitRatio(ratio);
-  const minimumWaveHeight = Math.min(getWavePanelMinimumHeight(), safeAvailableHeight);
-  const minimumSpectrogramHeight = Math.min(getSpectrogramPanelMinimumHeight(), safeAvailableHeight);
-
-  if ((minimumWaveHeight + minimumSpectrogramHeight) >= safeAvailableHeight) {
-    const waveHeight = Math.round(clamp(desiredWaveHeight, 0, safeAvailableHeight));
-
-    return {
-      waveHeight,
-      spectrogramHeight: Math.max(0, safeAvailableHeight - waveHeight),
-    };
-  }
-
-  const waveHeight = Math.round(clamp(
-    desiredWaveHeight,
-    minimumWaveHeight,
-    safeAvailableHeight - minimumSpectrogramHeight,
-  ));
+  const waveHeight = Math.round(clamp(desiredWaveHeight, 0, safeAvailableHeight));
 
   return {
     waveHeight,
@@ -3744,15 +3806,21 @@ function applyViewportSplit(force = false) {
   }
 
   const splitterSize = getViewportSplitterSize();
-  const availableHeight = Math.max(0, elements.viewport.clientHeight - splitterSize);
+  const wavePanelChromeHeight = getWavePanelChromeHeight();
+  const availableHeight = Math.max(0, elements.viewport.clientHeight - splitterSize - wavePanelChromeHeight);
 
   if (availableHeight <= 0) {
+    const nextTemplate = `${wavePanelChromeHeight}px ${splitterSize}px 0px`;
+
+    if (force || elements.viewport.style.gridTemplateRows !== nextTemplate) {
+      elements.viewport.style.gridTemplateRows = nextTemplate;
+    }
     updateViewportSplitterAccessibility(0, 0);
     return;
   }
 
   const { waveHeight, spectrogramHeight } = resolveViewportPanelHeights(availableHeight);
-  const nextTemplate = `${waveHeight}px ${splitterSize}px ${spectrogramHeight}px`;
+  const nextTemplate = `${wavePanelChromeHeight + waveHeight}px ${splitterSize}px ${spectrogramHeight}px`;
 
   if (!force && elements.viewport.style.gridTemplateRows === nextTemplate) {
     updateViewportSplitterAccessibility(waveHeight, availableHeight);
@@ -3780,14 +3848,19 @@ function updateViewportSplitRatioFromClientY(clientY) {
   }
 
   const splitterSize = getViewportSplitterSize();
+  const wavePanelChromeHeight = getWavePanelChromeHeight();
   const viewportRect = elements.viewport.getBoundingClientRect();
-  const availableHeight = Math.max(0, viewportRect.height - splitterSize);
+  const availableHeight = Math.max(0, viewportRect.height - splitterSize - wavePanelChromeHeight);
 
   if (availableHeight <= 0) {
     return;
   }
 
-  const proposedWaveHeight = clamp(clientY - viewportRect.top - (splitterSize / 2), 0, availableHeight);
+  const proposedWaveHeight = clamp(
+    clientY - viewportRect.top - wavePanelChromeHeight - (splitterSize / 2),
+    0,
+    availableHeight,
+  );
   const { waveHeight } = resolveViewportPanelHeights(availableHeight, proposedWaveHeight / availableHeight);
   setViewportSplitRatio(waveHeight / availableHeight, true);
 }
@@ -4250,7 +4323,7 @@ function destroySession() {
     state.sourceFetchController = null;
   }
 
-  state.rejectDecodeFallback?.(new Error('Decode fallback request was cancelled.'));
+  state.rejectDecodeFallback?.(new Error('Decode request was cancelled.'));
 
   disposeAnalysisWorker();
   disposeWaveformRenderer();
@@ -4278,6 +4351,8 @@ function destroySession() {
   state.playbackSourceKind = 'native';
   state.playbackTransportKind = 'unavailable';
   state.playbackTransportError = null;
+  state.playbackLatencyCompensationApplied = false;
+  state.playbackLatencyEstimateSeconds = 0;
   state.analysisSourceKind = 'native';
   state.decodeFallbackLoadToken = 0;
   state.decodeFallbackPromise = null;

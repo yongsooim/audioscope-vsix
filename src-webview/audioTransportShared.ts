@@ -1,1 +1,1 @@
-export const AUDIO_TRANSPORT_PROCESSOR_NAME = 'wave-scope-audio-transport';
+export const AUDIO_TRANSPORT_PROCESSOR_NAME = 'audioscope-audio-transport';

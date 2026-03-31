@@ -224,8 +224,8 @@ int main(int argc, char **argv) {
                 }
                 resampled_data = next_buffer;
                 resampled_capacity = required_bytes;
-            }
-
+            
+}
             {
                 uint8_t *output_planes[] = { resampled_data, NULL };
                 int converted_samples = swr_convert(

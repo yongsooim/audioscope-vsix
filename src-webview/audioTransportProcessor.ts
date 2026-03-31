@@ -33,7 +33,7 @@ interface ProcessorCtorOptions {
   processorOptions?: ProcessorOptionsPayload;
 }
 
-class WaveScopeAudioTransportProcessor extends AudioWorkletProcessor {
+class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
   private channelData: Float32Array[];
   private durationSeconds: number;
   private ended: boolean;
@@ -300,4 +300,4 @@ function positiveModulo(value: number, divisor: number): number {
   return ((value % divisor) + divisor) % divisor;
 }
 
-registerProcessor(AUDIO_TRANSPORT_PROCESSOR_NAME, WaveScopeAudioTransportProcessor);
+registerProcessor(AUDIO_TRANSPORT_PROCESSOR_NAME, AudioscopeAudioTransportProcessor);

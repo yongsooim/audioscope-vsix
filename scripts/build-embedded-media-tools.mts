@@ -509,7 +509,7 @@ async function buildDirectModule(spec: ToolSpec, buildDir: string, emscripten: E
       '-s',
       'EXPORT_ALL=1',
       '-s',
-      'EXPORT_NAME=createWaveScopeFFDecodeModule',
+      'EXPORT_NAME=createAudioscopeFFDecodeModule',
       '-s',
       'EXPORTED_RUNTIME_METHODS=["FS","ccall","UTF8ToString"]',
       '-s',
@@ -604,11 +604,11 @@ async function patchGeneratedLauncher(filePath: string): Promise<void> {
   const patched = source
     .replace(
       "var Module = typeof Module != 'undefined' ? Module : {};",
-      "var Module = globalThis.__waveScopeModule || (typeof Module != 'undefined' ? Module : {});",
+      "var Module = globalThis.__audioscopeModule || (typeof Module != 'undefined' ? Module : {});",
     )
     .replace(
       'var Module=typeof Module!="undefined"?Module:{};',
-      'var Module=globalThis.__waveScopeModule||(typeof Module!="undefined"?Module:{});',
+      'var Module=globalThis.__audioscopeModule||(typeof Module!="undefined"?Module:{});',
     )
     .replace(
       'var FS_createDataFile = (...args) => FS.createDataFile(...args);',

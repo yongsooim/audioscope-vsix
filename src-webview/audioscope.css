@@ -123,12 +123,6 @@ body {
   color: rgba(254, 215, 170, 0.84);
 }
 
-.media-metadata-panel[data-source-kind="ffmpeg-fallback"] .media-metadata-summary::after {
-  content: "  •  ffmpeg fallback";
-  color: rgba(125, 211, 252, 0.74);
-  font-weight: 700;
-}
-
 .media-metadata-detail {
   position: fixed;
   top: 0;
@@ -298,10 +292,11 @@ body {
 
 .wave-panel {
   display: grid;
-  grid-template-rows: auto minmax(168px, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   margin: 0 !important;
   padding: 0 var(--surface-inline-padding) !important;
   min-height: 0;
+  overflow: hidden;
   background: linear-gradient(180deg, #0a1220 0%, #060b15 100%);
   box-shadow: inset 0 -1px 0 rgba(116, 143, 189, 0.12);
 }
@@ -357,10 +352,11 @@ body {
   font-weight: 700;
 }
 
-.wave-loop-label {
-  flex: 0 1 auto;
+.wave-toolbar-group-loop #wave-loop-label {
+  flex: 1 1 120px;
+  min-width: 0;
   color: rgba(110, 168, 255, 0.96);
-  width: 156px;
+  width: 120px;
   max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -369,6 +365,11 @@ body {
 .wave-toolbar-pill-loop {
   border-color: rgba(96, 165, 250, 0.2);
   background: linear-gradient(180deg, rgba(11, 20, 40, 0.94) 0%, rgba(8, 14, 28, 0.9) 100%);
+  cursor: default;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 .wave-toolbar-pill-zoom {
@@ -376,6 +377,11 @@ body {
   width: 84px;
   color: rgba(239, 246, 255, 0.94);
   text-align: center;
+  cursor: default;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 .wave-toolbar-actions {
@@ -405,7 +411,14 @@ body {
 
 .wave-toolbar-group-loop {
   flex: 0 0 auto;
-  min-width: 220px;
+  min-width: 198px;
+  gap: 5px;
+  padding: 4px 5px;
+}
+
+.wave-toolbar-group-loop #wave-clear-loop {
+  margin-left: auto;
+  flex: 0 0 auto;
 }
 
 .wave-toolbar-group-zoom {
@@ -415,6 +428,11 @@ body {
 
 .wave-toolbar-group-follow {
   flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .wave-tool-button {
@@ -442,6 +460,16 @@ body {
   transform: translateY(1px);
 }
 
+.wave-tool-button:disabled,
+.wave-tool-button:disabled:hover,
+.wave-tool-button:disabled:focus-visible {
+  border-color: rgba(148, 163, 184, 0.14);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.82) 0%, rgba(9, 14, 25, 0.82) 100%);
+  color: rgba(148, 163, 184, 0.72);
+  cursor: default;
+  transform: none;
+}
+
 .wave-tool-button-wide {
   min-width: 48px;
 }
@@ -466,17 +494,21 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 28px;
-  padding: 4px 10px 4px 9px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgba(12, 18, 32, 0.9) 0%, rgba(7, 12, 23, 0.84) 100%);
+  min-height: 36px;
+  padding: 4px 13px 4px 14px;
+  border: 1px solid rgba(116, 143, 189, 0.22);
+  border-radius: 14px;
+  background: rgba(6, 10, 21, 0.4);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 10px 24px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(8px);
   color: rgba(191, 219, 254, 0.78);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0.01em;
-  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease, box-shadow 140ms ease;
 }
 
 .wave-follow-toggle-track {
@@ -503,7 +535,7 @@ body {
 
 .wave-follow-toggle-input:checked + .wave-follow-toggle-button {
   border-color: rgba(96, 165, 250, 0.28);
-  background: linear-gradient(180deg, rgba(13, 28, 54, 0.98) 0%, rgba(9, 21, 41, 0.96) 100%);
+  background: linear-gradient(180deg, rgba(13, 28, 54, 0.74) 0%, rgba(9, 21, 41, 0.68) 100%);
   color: rgba(239, 246, 255, 0.96);
 }
 
@@ -519,6 +551,9 @@ body {
 .wave-follow-toggle-input:focus-visible + .wave-follow-toggle-button,
 .wave-follow-toggle-input:hover + .wave-follow-toggle-button {
   border-color: rgba(147, 197, 253, 0.34);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 10px 24px rgba(0, 0, 0, 0.12);
 }
 
 .wave-follow-toggle-text {
@@ -532,16 +567,11 @@ body {
   background: linear-gradient(180deg, rgba(15, 23, 42, 0.82) 0%, rgba(9, 14, 25, 0.82) 100%);
 }
 
-.wave-tool-button-quiet[aria-hidden="true"] {
-  visibility: hidden;
-  pointer-events: none;
-}
-
 .waveform-viewport {
   position: relative;
   margin: 0;
   padding: 0;
-  min-height: 168px;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--wave-surface-border);
   border-left: 0;
@@ -643,7 +673,7 @@ body {
   inset-block: 0;
   left: 0;
   display: none;
-  width: 12px;
+  width: 8px;
   cursor: ew-resize;
   z-index: 4;
 }
@@ -656,8 +686,8 @@ body {
   width: 2px;
   transform: translateX(-50%);
   border-radius: 999px;
-  background: rgba(255, 223, 154, 0.96);
-  box-shadow: 0 0 10px rgba(251, 191, 36, 0.32);
+  background: rgba(255, 223, 154, 0.8);
+  box-shadow: 0 0 2px rgba(251, 191, 36, 0.32);
 }
 
 .spectrogram-loop-handle {
@@ -666,10 +696,11 @@ body {
 
 .waveform-axis {
   position: relative;
-  height: 30px;
+  height: 34px;
   margin: 0;
   overflow: hidden;
   border-top: 1px solid rgba(116, 143, 189, 0.12);
+  border-bottom: 1px solid rgba(116, 143, 189, 0.12);
 }
 
 .waveform-axis-content {
@@ -684,19 +715,27 @@ body {
 .waveform-axis-tick {
   position: absolute;
   top: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .waveform-axis-mark {
   width: 1px;
-  height: 7px;
+  height: 6px;
+  flex: 0 0 auto;
   background: rgba(130, 151, 187, 0.82);
 }
 
 .waveform-axis-label {
-  margin-top: 4px;
+  margin: 0;
   color: rgba(175, 193, 223, 0.92);
   font-size: 10px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -708,6 +747,7 @@ body {
   max-width: 100%;
   margin: 0 !important;
   min-height: 0;
+  overflow: hidden;
   padding: 0 var(--surface-inline-padding) !important;
   background: linear-gradient(180deg, #090f1c 0%, #050912 100%);
 }
@@ -1355,9 +1395,9 @@ body {
     flex-wrap: nowrap;
   }
 
-  .wave-loop-label {
+  .wave-toolbar-group-loop #wave-loop-label {
     width: auto;
-    max-width: 140px;
+    max-width: 112px;
   }
 
   .spectrogram-panel {

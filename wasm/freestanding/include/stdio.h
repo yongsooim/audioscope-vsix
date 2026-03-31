@@ -1,7 +1,7 @@
 #ifndef WAVE_SCOPE_FREESTANDING_STDIO_H
 #define WAVE_SCOPE_FREESTANDING_STDIO_H
 
-typedef struct wave_scope_file FILE;
+typedef struct audioscope_file FILE;
 
 #define stderr ((FILE *) 0)
 #define printf(...) 0

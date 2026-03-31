@@ -1,11 +1,11 @@
 # Third-Party Notices
 
-Wave Scope distributes WebAssembly binaries that are built from the following
+audioscope distributes WebAssembly binaries that are built from the following
 third-party components.
 
 ## FFmpeg
 
-Wave Scope distributes embedded FFmpeg WebAssembly binaries built from FFmpeg.
+audioscope distributes embedded FFmpeg WebAssembly binaries built from FFmpeg.
 The FFmpeg source is included as the `wasm/third_party/ffmpeg` submodule.
 
 Copyright (c) the FFmpeg developers
@@ -19,7 +19,7 @@ license text is available in the FFmpeg source tree under:
 
 ## Signalsmith Stretch Web
 
-Wave Scope vendors `src-webview/vendor/SignalsmithStretch.mjs` from
+audioscope vendors `src-webview/vendor/SignalsmithStretch.mjs` from
 `signalsmith-stretch` by Geraint Luff.
 
 Copyright (c) Geraint Luff

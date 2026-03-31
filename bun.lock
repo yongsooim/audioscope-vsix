@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "wave-scope",
+      "name": "audioscope",
       "devDependencies": {
         "@types/node": "^22.15.3",
         "@types/vscode": "^1.100.0",
