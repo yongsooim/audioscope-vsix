@@ -1,26 +1,26 @@
 import * as vscode from 'vscode';
 import { noteExtensionActivated } from './debugTimeline';
-import { WaveScopeEditorProvider } from './waveScopeEditor';
+import { AudioscopeEditorProvider } from './audioscopeEditor';
 
 export function activate(context: vscode.ExtensionContext): void {
   noteExtensionActivated();
-  context.subscriptions.push(WaveScopeEditorProvider.register(context));
+  context.subscriptions.push(AudioscopeEditorProvider.register(context));
   void maybeOpenBundledSample(context);
 }
 
 export function deactivate(): void {}
 
-let didAttemptStartupWaveScopeOpen = false;
+let didAttemptStartupAudioscopeOpen = false;
 
 async function maybeOpenBundledSample(context: vscode.ExtensionContext): Promise<void> {
-  if (didAttemptStartupWaveScopeOpen || context.extensionMode !== vscode.ExtensionMode.Development) {
+  if (didAttemptStartupAudioscopeOpen || context.extensionMode !== vscode.ExtensionMode.Development) {
     return;
   }
 
-  didAttemptStartupWaveScopeOpen = true;
+  didAttemptStartupAudioscopeOpen = true;
 
   const enabled = vscode.workspace
-    .getConfiguration('waveScope')
+    .getConfiguration('audioscope')
     .get<boolean>('openSampleOnStartupInDevelopment', true);
 
   if (!enabled) {
@@ -31,9 +31,9 @@ async function maybeOpenBundledSample(context: vscode.ExtensionContext): Promise
 
   try {
     await vscode.workspace.fs.stat(sampleUri);
-    await vscode.commands.executeCommand('vscode.openWith', sampleUri, WaveScopeEditorProvider.viewType);
+    await vscode.commands.executeCommand('vscode.openWith', sampleUri, AudioscopeEditorProvider.viewType);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`Wave Scope could not open the bundled sample file: ${message}`);
+    console.warn(`audioscope could not open the bundled sample file: ${message}`);
   }
 }

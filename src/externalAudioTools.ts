@@ -22,7 +22,7 @@ export interface ExternalToolStatusPayload {
   guidance: string;
 }
 
-export interface WaveScopePayload {
+export interface AudioscopePayload {
   debugTimelineSeed?: DebugTimelineEventPayload[];
   documentUri: string;
   externalTools: ExternalToolStatusPayload;
@@ -157,9 +157,9 @@ interface FfprobeJsonPayload {
   streams?: FfprobeStreamSection[];
 }
 
-const EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE = 'Embedded FFmpeg WASM tools are unavailable. Rebuild or reinstall Wave Scope to restore metadata and decode fallback.';
-const EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE = 'Embedded ffmpeg.wasm is unavailable. Rebuild or reinstall Wave Scope to restore decode fallback.';
-const EMBEDDED_FFPROBE_UNAVAILABLE_GUIDANCE = 'Embedded ffprobe.wasm is unavailable. Rebuild or reinstall Wave Scope to restore metadata.';
+const EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE = 'audioscope media tools are unavailable. Rebuild or reinstall audioscope to restore metadata and decoding.';
+const EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE = 'ffmpeg.wasm is unavailable. Rebuild or reinstall audioscope to restore decoding.';
+const EMBEDDED_FFPROBE_UNAVAILABLE_GUIDANCE = 'ffprobe.wasm is unavailable. Rebuild or reinstall audioscope to restore metadata.';
 
 interface ResolvedToolSelection {
   ffmpeg: EmbeddedExecutableStatus;
@@ -199,7 +199,7 @@ function buildExternalToolGuidance(tools: ResolvedToolSelection): string {
     return EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE;
   }
 
-  return 'Using embedded FFmpeg WASM tools.';
+  return 'Using audioscope media tools.';
 }
 
 function createToolStatusPayload(resolved: boolean, selection: ResolvedToolSelection): ExternalToolStatusPayload {
@@ -508,7 +508,7 @@ export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenRes
   if (!toolStatus.fileBacked) {
     return {
       kind: 'unsupported-resource',
-      message: 'Wave Scope can probe arbitrary files only from the local filesystem unless embedded FFmpeg WASM tools are built.',
+      message: 'audioscope can probe arbitrary files only from the local filesystem in this build.',
       toolStatus,
     };
   }

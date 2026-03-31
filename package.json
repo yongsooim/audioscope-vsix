@@ -1,6 +1,6 @@
 {
-  "name": "wave-scope",
-  "displayName": "Wave Scope",
+  "name": "audioscope",
+  "displayName": "audioscope",
   "description": "Audio waveform and spectrogram editor for VS Code with playback, zoom, and loop controls.",
   "version": "1.0.0",
   "publisher": "yongsooim",
@@ -25,7 +25,7 @@
   "files": [
     "out/extension.js",
     "out/externalAudioTools.js",
-    "out/waveScopeEditor.js",
+    "out/audioscopeEditor.js",
     "dist/**",
     "src-webview/**/*.css",
     "src-webview/vendor/**/*.mjs",
@@ -46,14 +46,14 @@
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
-      "title": "Wave Scope",
+      "title": "audioscope",
       "properties": {
-        "waveScope.openSampleOnStartupInDevelopment": {
+        "audioscope.openSampleOnStartupInDevelopment": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically open the bundled sample audio file in Wave Scope when the extension runs in development mode."
+          "description": "Automatically open the bundled sample audio file in audioscope when the extension runs in development mode."
         },
-        "waveScope.spectrogramQuality": {
+        "audioscope.spectrogramQuality": {
           "type": "string",
           "enum": [
             "balanced",
@@ -62,21 +62,21 @@
           ],
           "default": "high",
           "scope": "resource",
-          "description": "Controls spectrogram analysis quality for Wave Scope. Higher presets request denser time/frequency detail."
+          "description": "Controls spectrogram analysis quality for audioscope. Higher presets request denser time/frequency detail."
         }
       }
     },
     "commands": [
       {
-        "command": "waveScope.openActiveFileInWaveScope",
-        "title": "Open Active Audio File in Wave Scope",
-        "category": "Wave Scope"
+        "command": "audioscope.openActiveFileInAudioscope",
+        "title": "Open Active Audio File in audioscope",
+        "category": "audioscope"
       }
     ],
     "customEditors": [
       {
-        "viewType": "waveScope.editor",
-        "displayName": "Wave Scope",
+        "viewType": "audioscope.editor",
+        "displayName": "audioscope",
         "selector": [
           {
             "filenamePattern": "*.wav"

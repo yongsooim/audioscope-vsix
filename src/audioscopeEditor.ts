@@ -6,7 +6,7 @@ import {
   getExternalToolStatus,
   getMediaMetadata,
   probeAudioOpen,
-  type WaveScopePayload,
+  type AudioscopePayload,
 } from './externalAudioTools';
 import {
   createHostDebugTimelineEvent,
@@ -28,15 +28,15 @@ const KNOWN_AUDIO_EXTENSIONS = new Set([
   'aiff',
 ]);
 
-class WaveScopeDocument implements vscode.CustomDocument {
+class AudioscopeDocument implements vscode.CustomDocument {
   private readonly onDidDisposeEmitter = new vscode.EventEmitter<void>();
 
   public readonly onDidDispose = this.onDidDisposeEmitter.event;
 
   private constructor(public readonly uri: vscode.Uri) {}
 
-  public static async create(uri: vscode.Uri): Promise<WaveScopeDocument> {
-    return new WaveScopeDocument(uri);
+  public static async create(uri: vscode.Uri): Promise<AudioscopeDocument> {
+    return new AudioscopeDocument(uri);
   }
 
   public dispose(): void {
@@ -45,20 +45,20 @@ class WaveScopeDocument implements vscode.CustomDocument {
   }
 }
 
-export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvider<WaveScopeDocument> {
-  public static readonly viewType = 'waveScope.editor';
+export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProvider<AudioscopeDocument> {
+  public static readonly viewType = 'audioscope.editor';
 
   public static register(context: vscode.ExtensionContext): vscode.Disposable {
-    const provider = new WaveScopeEditorProvider(context);
+    const provider = new AudioscopeEditorProvider(context);
 
     return vscode.Disposable.from(
-      vscode.window.registerCustomEditorProvider(WaveScopeEditorProvider.viewType, provider, {
+      vscode.window.registerCustomEditorProvider(AudioscopeEditorProvider.viewType, provider, {
         webviewOptions: {
           retainContextWhenHidden: true,
         },
         supportsMultipleEditorsPerDocument: true,
       }),
-      vscode.commands.registerCommand('waveScope.openActiveFileInWaveScope', async (resource?: vscode.Uri) => {
+      vscode.commands.registerCommand('audioscope.openActiveFileInAudioscope', async (resource?: vscode.Uri) => {
         const target = resource ?? getActiveResource();
 
         if (!target) {
@@ -66,11 +66,11 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
           return;
         }
 
-        if (!(await canOpenInWaveScope(target))) {
+        if (!(await canOpenInAudioscope(target))) {
           return;
         }
 
-        await vscode.commands.executeCommand('vscode.openWith', target, WaveScopeEditorProvider.viewType);
+        await vscode.commands.executeCommand('vscode.openWith', target, AudioscopeEditorProvider.viewType);
       }),
     );
   }
@@ -83,12 +83,12 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     uri: vscode.Uri,
     _openContext: vscode.CustomDocumentOpenContext,
     _token: vscode.CancellationToken,
-  ): Promise<WaveScopeDocument> {
-    return WaveScopeDocument.create(uri);
+  ): Promise<AudioscopeDocument> {
+    return AudioscopeDocument.create(uri);
   }
 
   public async resolveCustomEditor(
-    document: WaveScopeDocument,
+    document: AudioscopeDocument,
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken,
   ): Promise<void> {
@@ -275,7 +275,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     });
   }
 
-  private async buildPayload(document: WaveScopeDocument, webview: vscode.Webview): Promise<WaveScopePayload> {
+  private async buildPayload(document: AudioscopeDocument, webview: vscode.Webview): Promise<AudioscopePayload> {
     const debugTimelineSeed: DebugTimelineEventPayload[] = [];
     let fileSize: number | null = null;
 
@@ -290,7 +290,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     }
 
     const spectrogramQuality = vscode.workspace
-      .getConfiguration('waveScope', document.uri)
+      .getConfiguration('audioscope', document.uri)
       .get<'balanced' | 'high' | 'max'>('spectrogramQuality', 'high');
     const externalTools = createInitialExternalToolStatus(document.uri);
 
@@ -312,8 +312,8 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
   }
 
   private getHtmlForWebview(webview: vscode.Webview): string {
-    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'waveScope.js'));
-    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'src-webview', 'waveScope.css'));
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'audioscope.js'));
+    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'src-webview', 'audioscope.css'));
     const workerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'audioAnalysisWorker.js'));
     const decodeWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'embeddedDecodeWorker.js'));
     const decodeBrowserModuleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_browser_module.js'));
@@ -332,11 +332,11 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="${styleUri}" />
-    <title>Wave Scope</title>
+    <title>audioscope</title>
   </head>
   <body data-worker-src="${workerUri}" data-decode-module-src="${decodeBrowserModuleUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}">
     <main class="app-shell">
-      <section id="wave-scope-viewport" class="viewport" aria-label="Wave Scope waveform and spectrogram">
+      <section id="audioscope-viewport" class="viewport" aria-label="audioscope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">
           <div id="wave-toolbar" class="wave-toolbar">
             <div id="wave-toolbar-info" class="wave-toolbar-info">
@@ -355,18 +355,18 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-follow">
                 <label class="wave-follow-toggle">
-                  <input id="wave-follow" class="wave-follow-toggle-input" type="checkbox" checked />
+                  <input id="wave-follow" class="wave-follow-toggle-input" type="checkbox" />
                   <span class="wave-follow-toggle-button">
+                    <span class="wave-follow-toggle-text">Follow</span>
                     <span class="wave-follow-toggle-track" aria-hidden="true">
                       <span class="wave-follow-toggle-thumb"></span>
                     </span>
-                    <span class="wave-follow-toggle-text">Follow</span>
                   </span>
                 </label>
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-loop">
                 <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Drag to set loop</div>
-                <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" aria-hidden="true" tabindex="-1" disabled>Clear</button>
+                <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" aria-hidden="false" disabled>Clear</button>
               </div>
             </div>
           </div>
@@ -487,10 +487,10 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
             <span id="loudness-true-peak" class="loudness-chip-value">--</span>
           </div>
         </div>
-        <div id="analysis-status" class="analysis-status">Preparing Wave Scope…</div>
+        <div id="analysis-status" class="analysis-status">Preparing audioscope…</div>
       </footer>
       <div id="status" class="status-overlay" hidden></div>
-      <aside id="debug-timeline-panel" class="debug-timeline-panel" aria-label="Wave Scope debug timeline" data-collapsed="false">
+      <aside id="debug-timeline-panel" class="debug-timeline-panel" aria-label="audioscope debug timeline" data-collapsed="false">
         <div class="debug-timeline-header">
           <div id="debug-timeline-summary" class="debug-timeline-summary">Timeline pending…</div>
           <button id="debug-timeline-toggle" class="debug-timeline-toggle" type="button" aria-expanded="true">Hide</button>
@@ -505,7 +505,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
   }
 }
 
-async function canOpenInWaveScope(target: vscode.Uri): Promise<boolean> {
+async function canOpenInAudioscope(target: vscode.Uri): Promise<boolean> {
   const fileExtension = path.posix.extname(target.path).replace(/^\./, '').toLowerCase();
 
   if (KNOWN_AUDIO_EXTENSIONS.has(fileExtension)) {
@@ -528,7 +528,7 @@ async function canOpenInWaveScope(target: vscode.Uri): Promise<boolean> {
     return false;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    void vscode.window.showErrorMessage(`Wave Scope could not inspect this file: ${message}`);
+    void vscode.window.showErrorMessage(`audioscope could not inspect this file: ${message}`);
     return false;
   }
 }

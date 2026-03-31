@@ -1,7 +1,7 @@
-# Wave Scope
+# audioscope
 
 <p align="center">
-  <img src="./images/icon.png" width="128" alt="Wave Scope icon">
+  <img src="./images/icon.png" width="128" alt="audioscope icon">
 </p>
 
 <p align="center">
@@ -13,12 +13,12 @@
 </p>
 
 <p align="center">
-  <img src="./images/wave-scope-full.png" alt="Wave Scope waveform and spectrogram screenshot">
+  <img src="./images/audioscope-full.png" alt="audioscope waveform and spectrogram screenshot">
 </p>
 
 ## Overview
 
-Wave Scope is a custom read-only audio viewer for VS Code. It is built for quick inspection and analysis rather than editing, so you can stay inside your workspace while reviewing audio assets, recordings, stems, or exports.
+audioscope is a custom read-only audio viewer for VS Code. It is built for quick inspection and analysis rather than editing, so you can stay inside your workspace while reviewing audio assets, recordings, stems, or exports.
 
 | See | Control | Review |
 | --- | --- | --- |
@@ -38,28 +38,28 @@ Wave Scope is a custom read-only audio viewer for VS Code. It is built for quick
 
 1. Install the extension.
 2. Open a supported audio file in VS Code.
-3. If VS Code selects `Wave Scope`, the file opens directly in the custom view.
-4. If it opens somewhere else, use `Reopen Editor With...` or run `Wave Scope: Open Active Audio File in Wave Scope` from the Command Palette.
+3. If VS Code selects `audioscope`, the file opens directly in the custom view.
+4. If it opens somewhere else, use `Reopen Editor With...` or run `audioscope: Open Active Audio File in audioscope` from the Command Palette.
 
 > [!NOTE]
-> VS Code's built-in `Media Preview` currently takes precedence for `.mp3`, `.wav`, `.ogg`, and `.oga`, so those formats may not open in `Wave Scope` automatically on first install.
+> VS Code's built-in `Media Preview` currently takes precedence for `.mp3`, `.wav`, `.ogg`, and `.oga`, so those formats may not open in `audioscope` automatically on first install.
 
-To make Wave Scope the default editor for those formats, use `Reopen Editor With...` and choose `Set as Default`, or add this to your VS Code settings:
+To make audioscope the default editor for those formats, use `Reopen Editor With...` and choose `Set as Default`, or add this to your VS Code settings:
 
 ```json
 {
   "workbench.editorAssociations": {
-    "*.mp3": "waveScope.editor",
-    "*.wav": "waveScope.editor",
-    "*.ogg": "waveScope.editor",
-    "*.oga": "waveScope.editor"
+    "*.mp3": "audioscope.editor",
+    "*.wav": "audioscope.editor",
+    "*.ogg": "audioscope.editor",
+    "*.oga": "audioscope.editor"
   }
 }
 ```
 
 ## Supported Formats
 
-Wave Scope contributes a custom editor for:
+audioscope contributes a custom editor for:
 
 - `.wav`
 - `.wave`
@@ -86,13 +86,13 @@ Wave Scope contributes a custom editor for:
 
 ## Embedded ffmpeg Tools
 
-Wave Scope now bundles embedded FFmpeg WebAssembly tools for:
+audioscope now bundles embedded FFmpeg WebAssembly tools for:
 
 - richer metadata via embedded `ffprobe`
 - decode fallback for files the runtime cannot open directly
 - probing files even when the webview cannot decode them natively
 
-Wave Scope no longer depends on a system `ffmpeg` or `ffprobe` install at runtime.
+audioscope no longer depends on a system `ffmpeg` or `ffprobe` install at runtime.
 
 ## Requirements
 
@@ -101,12 +101,12 @@ Wave Scope no longer depends on a system `ffmpeg` or `ffprobe` install at runtim
 
 ## Settings
 
-- `waveScope.spectrogramQuality`: choose `balanced`, `high`, or `max`
-- `waveScope.openSampleOnStartupInDevelopment`: open the bundled sample file automatically in development mode
+- `audioscope.spectrogramQuality`: choose `balanced`, `high`, or `max`
+- `audioscope.openSampleOnStartupInDevelopment`: open the bundled sample file automatically in development mode
 
 ## Notes
 
-- Very long, high-sample-rate, or multichannel files can use substantial memory while Wave Scope decodes audio and prepares waveform and spectrogram analysis.
+- Very long, high-sample-rate, or multichannel files can use substantial memory while audioscope decodes audio and prepares waveform and spectrogram analysis.
 - Loudness values currently use the same mono downmix used for waveform and spectrogram analysis. Multichannel audio renders correctly, but LUFS/LRA/peak numbers are downmix-based.
 
 ## Development
@@ -125,9 +125,9 @@ bun run compile
 
 Open this folder in VS Code and press `F5` to launch the Extension Development Host.
 
-In development mode, `exampleFiles/sample-tone.wav` opens automatically in `Wave Scope`. To disable that behavior, set `waveScope.openSampleOnStartupInDevelopment` to `false`.
+In development mode, `exampleFiles/sample-tone.wav` opens automatically in `audioscope`. To disable that behavior, set `audioscope.openSampleOnStartupInDevelopment` to `false`.
 
 ## Acknowledgements
 
 - Scalogram optimization was informed by the public implementation and documentation of [`fCWT`](https://github.com/fastlib/fCWT), especially around precomputed scale-to-frequency mappings, wavelet kernel reuse, and vectorization-friendly computation structure.
-- Wave Scope does not embed or depend on `fCWT` directly at runtime.
+- audioscope does not embed or depend on `fCWT` directly at runtime.

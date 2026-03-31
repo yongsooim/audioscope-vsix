@@ -38,6 +38,7 @@ export interface AudioTransport {
   getCurrentTime(): number;
   getDuration(): number;
   getLastFallbackReason(): string | null;
+  getLatencyCompensationInfo(): { applied: boolean; estimatedSeconds: number };
   getPlaybackRate(): number;
   getTransportKind(): TransportKind;
   isPlaying(): boolean;
@@ -67,7 +68,7 @@ interface StretchSchedule {
   input?: number;
   loopEnd?: number;
   loopStart?: number;
-  output?: number;
+  outputTime?: number;
   rate?: number;
 }
 
@@ -279,6 +280,14 @@ class AudioWorkletCopyTransport {
 
   getLastFallbackReason(): string | null {
     return this.lastFallbackReason;
+  }
+
+  getLatencyCompensationInfo(): { applied: boolean; estimatedSeconds: number } {
+    const estimatedSeconds = getEstimatedOutputLatencySeconds(this.audioContext);
+    return {
+      applied: hasOutputTimestampContextTime(this.audioContext) || estimatedSeconds > 0,
+      estimatedSeconds,
+    };
   }
 
   getPlaybackRate(): number {
@@ -782,6 +791,10 @@ class HybridAudioTransport implements AudioTransport {
     return this.getSelectedTransport().getLastFallbackReason();
   }
 
+  getLatencyCompensationInfo(): { applied: boolean; estimatedSeconds: number } {
+    return this.getSelectedTransport().getLatencyCompensationInfo();
+  }
+
   isPlaying(): boolean {
     return this.copyTransport.isPlaying() || this.stretchTransport.isPlaying();
   }
@@ -999,7 +1012,9 @@ class StretchAudioTransport implements AudioTransport {
     }
 
     if (this.playing && !this.ended) {
-      return this.normalizeObservedTime(this.inputTimeSeconds);
+      const estimatedOutputLatencySeconds = getEstimatedOutputLatencySeconds(this.audioContext);
+      const compensatedTime = this.inputTimeSeconds - (estimatedOutputLatencySeconds * this.playbackRate);
+      return this.normalizeObservedTime(compensatedTime);
     }
 
     return this.normalizePausedTime(this.pausedAtSeconds);
@@ -1015,6 +1030,14 @@ class StretchAudioTransport implements AudioTransport {
 
   getLastFallbackReason(): string | null {
     return this.lastFallbackReason;
+  }
+
+  getLatencyCompensationInfo(): { applied: boolean; estimatedSeconds: number } {
+    const estimatedSeconds = getEstimatedOutputLatencySeconds(this.audioContext);
+    return {
+      applied: hasOutputTimestampContextTime(this.audioContext) || estimatedSeconds > 0,
+      estimatedSeconds,
+    };
   }
 
   isPlaying(): boolean {
@@ -1169,7 +1192,7 @@ class StretchAudioTransport implements AudioTransport {
         input: this.getCurrentTime(),
         loopEnd: loopRange?.end ?? 0,
         loopStart: loopRange?.start ?? 0,
-        output: outputTime,
+        outputTime,
         rate: this.playbackRate,
         ...overrides,
       });
@@ -1401,8 +1424,19 @@ function isPlaybackSourceObject(value: PlaybackSource): value is PlaybackSourceO
 }
 
 function getProjectedContextTime(audioContext: AudioContext | null): number {
+  const outputTimestampContextTime = getOutputTimestampContextTime(audioContext);
+
+  if (outputTimestampContextTime !== null) {
+    return outputTimestampContextTime;
+  }
+
+  const estimatedOutputLatencySeconds = getEstimatedOutputLatencySeconds(audioContext);
+  return (Number(audioContext?.currentTime) || 0) + estimatedOutputLatencySeconds;
+}
+
+function getOutputTimestampContextTime(audioContext: AudioContext | null): number | null {
   if (!audioContext) {
-    return 0;
+    return null;
   }
 
   if (typeof audioContext.getOutputTimestamp === 'function') {
@@ -1414,7 +1448,27 @@ function getProjectedContextTime(audioContext: AudioContext | null): number {
     }
   }
 
-  return Number(audioContext.currentTime) || 0;
+  return null;
+}
+
+function hasOutputTimestampContextTime(audioContext: AudioContext | null): boolean {
+  return getOutputTimestampContextTime(audioContext) !== null;
+}
+
+function getEstimatedOutputLatencySeconds(audioContext: AudioContext | null): number {
+  if (!audioContext) {
+    return 0;
+  }
+
+  const outputLatency = Number((audioContext as AudioContext & { outputLatency?: number }).outputLatency);
+  const baseLatency = Number(audioContext.baseLatency);
+  const candidates = [outputLatency, baseLatency].filter((value) => Number.isFinite(value) && value > 0);
+
+  if (candidates.length === 0) {
+    return 0;
+  }
+
+  return Math.max(...candidates);
 }
 
 function formatTransportFailureReason(reason: unknown): string {
