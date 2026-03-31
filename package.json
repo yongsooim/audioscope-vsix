@@ -63,18 +63,6 @@
           "default": "high",
           "scope": "resource",
           "description": "Controls spectrogram analysis quality for Wave Scope. Higher presets request denser time/frequency detail."
-        },
-        "waveScope.ffmpegPath": {
-          "type": "string",
-          "default": "",
-          "scope": "machine",
-          "description": "Optional path or command name for the ffmpeg executable. Leave empty to resolve ffmpeg from PATH."
-        },
-        "waveScope.ffprobePath": {
-          "type": "string",
-          "default": "",
-          "scope": "machine",
-          "description": "Optional path or command name for the ffprobe executable. Leave empty to resolve ffprobe from PATH."
         }
       }
     },

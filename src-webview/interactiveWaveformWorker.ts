@@ -403,6 +403,7 @@ async function renderWaveform(request) {
   surfaceState.renderScale = renderScale;
   surfaceState.color = color;
   resizeSurface();
+  ensureBackBuffer();
 
   const slice = ensureWaveformSliceCapacity(columnCount * 2);
   extractInteractiveWaveformSlice(
