@@ -1,8 +1,16 @@
 import { execFile, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import type { DebugTimelineEventPayload } from './debugTimeline';
+import {
+  getEmbeddedExecutableStatusSync,
+  runEmbeddedFfmpegDecodeToPcm,
+  runEmbeddedFfmpegDecodeToWav,
+  runEmbeddedFfprobe,
+} from './embeddedMediaTools';
 
 export interface ExternalToolStatusPayload {
+  resolved: boolean;
   canDecodeFallback: boolean;
   canReadMetadata: boolean;
   ffmpegAvailable: boolean;
@@ -18,6 +26,7 @@ export interface ExternalToolStatusPayload {
 }
 
 export interface WaveScopePayload {
+  debugTimelineSeed?: DebugTimelineEventPayload[];
   documentUri: string;
   externalTools: ExternalToolStatusPayload;
   fileBacked: boolean;
@@ -81,11 +90,26 @@ export interface MediaMetadataPayload {
   toolStatus: ExternalToolStatusPayload;
 }
 
-export interface DecodeFallbackPayload {
-  audioBuffer: ArrayBuffer;
-  byteLength: number;
-  mimeType: string;
-  source: 'ffmpeg';
+export type DecodeFallbackPayload =
+  | {
+      audioBuffer: ArrayBuffer;
+      byteLength: number;
+      kind: 'wav';
+      mimeType: string;
+      source: 'ffmpeg';
+    }
+  | {
+      byteLength: number;
+      channelBuffers: ArrayBuffer[];
+      frameCount: number;
+      kind: 'pcm';
+      numberOfChannels: number;
+      sampleRate: number;
+      source: 'ffmpeg';
+    };
+
+interface DecodeWithFfmpegOptions {
+  onDebugTimelineEvent?: (event: DebugTimelineEventPayload) => void | Promise<void>;
 }
 
 export type ProbeOpenResult =
@@ -144,10 +168,22 @@ interface ExecutableStatus {
 }
 
 const FFMPEG_CLI_INSTALL_GUIDANCE = 'Install ffmpeg CLI first: brew install ffmpeg or winget install --id Gyan.FFmpeg --exact.';
+const EXTERNAL_TOOL_PENDING_GUIDANCE = 'Checking installed ffmpeg CLI tools...';
 
 interface ResolvedExternalTools {
   ffmpeg: ExecutableStatus;
   ffprobe: ExecutableStatus;
+}
+
+interface SelectedExecutableStatus extends ExecutableStatus {
+  backend: 'bundled' | 'external';
+}
+
+interface ResolvedToolSelection {
+  ffmpeg: SelectedExecutableStatus;
+  ffprobe: SelectedExecutableStatus;
+  localFileBacked: boolean;
+  resourceReadable: boolean;
 }
 
 const EXTERNAL_TOOL_TIMEOUT_MS = 15_000;
@@ -166,6 +202,11 @@ function getCliFilePath(resource: vscode.Uri): string | null {
   return resource.scheme === 'file' ? resource.fsPath : null;
 }
 
+function getConfiguredExecutableValue(resource: vscode.Uri, settingKey: 'ffmpegPath' | 'ffprobePath'): string {
+  const config = vscode.workspace.getConfiguration('waveScope', resource);
+  return normalizeConfiguredExecutable(config.get<string>(settingKey, ''));
+}
+
 function toToolCacheKey(resource: vscode.Uri): string {
   const config = vscode.workspace.getConfiguration('waveScope', resource);
   const ffmpegCommand = normalizeConfiguredExecutable(config.get<string>('ffmpegPath', ''));
@@ -175,9 +216,7 @@ function toToolCacheKey(resource: vscode.Uri): string {
 }
 
 function getConfiguredCommand(resource: vscode.Uri, settingKey: 'ffmpegPath' | 'ffprobePath', fallbackCommand: string): string {
-  const config = vscode.workspace.getConfiguration('waveScope', resource);
-  const configured = normalizeConfiguredExecutable(config.get<string>(settingKey, ''));
-  return configured || fallbackCommand;
+  return getConfiguredExecutableValue(resource, settingKey) || fallbackCommand;
 }
 
 function getExecErrorMessage(error: unknown): string {
@@ -300,13 +339,13 @@ async function resolveExternalTools(resource: vscode.Uri): Promise<ResolvedExter
   return resolutionPromise;
 }
 
-function buildExternalToolGuidance(fileBacked: boolean, tools: ResolvedExternalTools): string {
+function buildExternalToolGuidance(fileBacked: boolean, tools: ResolvedToolSelection): string {
   if (!fileBacked) {
     return 'External ffmpeg tools are only available for local filesystem files.';
   }
 
   if (!tools.ffprobe.available && !tools.ffmpeg.available) {
-    return `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata and decode fallback for local files.`;
+    return `${FFMPEG_CLI_INSTALL_GUIDANCE} Embedded FFmpeg WASM tools were not built. This enables metadata and decode fallback for local files.`;
   }
 
   if (!tools.ffprobe.available) {
@@ -317,27 +356,140 @@ function buildExternalToolGuidance(fileBacked: boolean, tools: ResolvedExternalT
     return `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables decode fallback.`;
   }
 
+  if (tools.ffmpeg.backend === 'bundled' && tools.ffprobe.backend === 'bundled') {
+    return 'Using embedded FFmpeg WASM tools.';
+  }
+
+  if (tools.ffmpeg.backend === 'bundled' || tools.ffprobe.backend === 'bundled') {
+    return 'Using bundled and external FFmpeg tools.';
+  }
+
   return 'Using installed ffmpeg CLI tools.';
 }
 
-export async function getExternalToolStatus(resource: vscode.Uri): Promise<ExternalToolStatusPayload> {
-  const tools = await resolveExternalTools(resource);
-  const fileBacked = Boolean(getCliFilePath(resource));
+function createExternalStatus(command: string, tool: ExecutableStatus): SelectedExecutableStatus {
+  return {
+    ...tool,
+    backend: 'external',
+    command,
+  };
+}
+
+function createToolStatusPayload(resolved: boolean, selection: ResolvedToolSelection): ExternalToolStatusPayload {
+  const canDecodeFallback = (
+    selection.ffmpeg.backend === 'bundled'
+      ? selection.resourceReadable
+      : selection.localFileBacked
+  ) && selection.ffmpeg.available;
+  const canReadMetadata = (
+    selection.ffprobe.backend === 'bundled'
+      ? selection.resourceReadable
+      : selection.localFileBacked
+  ) && selection.ffprobe.available;
 
   return {
-    canDecodeFallback: fileBacked && tools.ffmpeg.available,
-    canReadMetadata: fileBacked && tools.ffprobe.available,
-    ffmpegAvailable: tools.ffmpeg.available,
-    ffmpegCommand: tools.ffmpeg.command,
-    ffmpegPath: tools.ffmpeg.path,
-    ffmpegVersion: tools.ffmpeg.version,
-    ffprobeAvailable: tools.ffprobe.available,
-    ffprobeCommand: tools.ffprobe.command,
-    ffprobePath: tools.ffprobe.path,
-    ffprobeVersion: tools.ffprobe.version,
-    fileBacked,
-    guidance: buildExternalToolGuidance(fileBacked, tools),
+    resolved,
+    canDecodeFallback,
+    canReadMetadata,
+    ffmpegAvailable: selection.ffmpeg.available,
+    ffmpegCommand: selection.ffmpeg.command,
+    ffmpegPath: selection.ffmpeg.path,
+    ffmpegVersion: selection.ffmpeg.version,
+    ffprobeAvailable: selection.ffprobe.available,
+    ffprobeCommand: selection.ffprobe.command,
+    ffprobePath: selection.ffprobe.path,
+    ffprobeVersion: selection.ffprobe.version,
+    fileBacked: selection.resourceReadable,
+    guidance: buildExternalToolGuidance(selection.resourceReadable, selection),
   };
+}
+
+async function resolvePreferredTools(resource: vscode.Uri): Promise<ResolvedToolSelection> {
+  const configuredFfmpeg = getConfiguredExecutableValue(resource, 'ffmpegPath');
+  const configuredFfprobe = getConfiguredExecutableValue(resource, 'ffprobePath');
+  const bundledFfmpeg = getEmbeddedExecutableStatusSync('ffmpeg');
+  const bundledFfprobe = getEmbeddedExecutableStatusSync('ffprobe');
+  const useBundledFfmpeg = configuredFfmpeg.length === 0 && bundledFfmpeg.available;
+  const useBundledFfprobe = configuredFfprobe.length === 0 && bundledFfprobe.available;
+  const fileBacked = Boolean(getCliFilePath(resource));
+  let externalTools: ResolvedExternalTools | null = null;
+
+  if (!useBundledFfmpeg || !useBundledFfprobe) {
+    externalTools = await resolveExternalTools(resource);
+  }
+
+  return {
+    ffmpeg: useBundledFfmpeg
+      ? bundledFfmpeg
+      : createExternalStatus(
+          getConfiguredCommand(resource, 'ffmpegPath', 'ffmpeg'),
+          externalTools?.ffmpeg ?? {
+            available: false,
+            command: getConfiguredCommand(resource, 'ffmpegPath', 'ffmpeg'),
+            path: null,
+            version: null,
+          },
+        ),
+    ffprobe: useBundledFfprobe
+      ? bundledFfprobe
+      : createExternalStatus(
+          getConfiguredCommand(resource, 'ffprobePath', 'ffprobe'),
+          externalTools?.ffprobe ?? {
+            available: false,
+            command: getConfiguredCommand(resource, 'ffprobePath', 'ffprobe'),
+            path: null,
+            version: null,
+          },
+        ),
+    localFileBacked: fileBacked,
+    resourceReadable: fileBacked || useBundledFfmpeg || useBundledFfprobe,
+  };
+}
+
+export function createInitialExternalToolStatus(resource: vscode.Uri): ExternalToolStatusPayload {
+  const configuredFfmpeg = getConfiguredExecutableValue(resource, 'ffmpegPath');
+  const configuredFfprobe = getConfiguredExecutableValue(resource, 'ffprobePath');
+  const bundledFfmpeg = getEmbeddedExecutableStatusSync('ffmpeg');
+  const bundledFfprobe = getEmbeddedExecutableStatusSync('ffprobe');
+  const useBundledFfmpeg = configuredFfmpeg.length === 0 && bundledFfmpeg.available;
+  const useBundledFfprobe = configuredFfprobe.length === 0 && bundledFfprobe.available;
+  const selection: ResolvedToolSelection = {
+    ffmpeg: useBundledFfmpeg
+      ? bundledFfmpeg
+      : {
+          available: false,
+          backend: 'external',
+          command: getConfiguredCommand(resource, 'ffmpegPath', 'ffmpeg'),
+          path: null,
+          version: null,
+        },
+    ffprobe: useBundledFfprobe
+      ? bundledFfprobe
+      : {
+          available: false,
+          backend: 'external',
+          command: getConfiguredCommand(resource, 'ffprobePath', 'ffprobe'),
+          path: null,
+          version: null,
+        },
+    localFileBacked: Boolean(getCliFilePath(resource)),
+    resourceReadable: Boolean(getCliFilePath(resource)) || useBundledFfmpeg || useBundledFfprobe,
+  };
+  const resolved = (useBundledFfmpeg && useBundledFfprobe) || !Boolean(getCliFilePath(resource));
+
+  if (resolved) {
+    return createToolStatusPayload(true, selection);
+  }
+
+  const pendingStatus = createToolStatusPayload(false, selection);
+  return {
+    ...pendingStatus,
+    guidance: EXTERNAL_TOOL_PENDING_GUIDANCE,
+  };
+}
+
+export async function getExternalToolStatus(resource: vscode.Uri): Promise<ExternalToolStatusPayload> {
+  return createToolStatusPayload(true, await resolvePreferredTools(resource));
 }
 
 function parseNumberValue(value: unknown): number | null {
@@ -556,32 +708,38 @@ async function runFfprobe(
   resource: vscode.Uri,
   signal?: AbortSignal,
 ): Promise<{ metadata: MediaMetadataPayload; rawPayload: FfprobeJsonPayload; toolStatus: ExternalToolStatusPayload }> {
-  const toolStatus = await getExternalToolStatus(resource);
-  const filePath = getCliFilePath(resource);
+  const preferredTools = await resolvePreferredTools(resource);
+  const toolStatus = createToolStatusPayload(true, preferredTools);
 
-  if (!toolStatus.fileBacked || !filePath) {
-    throw new Error('Metadata is only available for local filesystem files.');
+  if (!toolStatus.fileBacked) {
+    throw new Error('Metadata is only available for local filesystem files unless embedded FFmpeg WASM tools are built.');
   }
 
   if (!toolStatus.ffprobeAvailable) {
     throw new Error('Install ffmpeg CLI to view metadata.');
   }
 
-  const { stdout } = await execFileAsync(
-    toolStatus.ffprobeCommand,
-    [
-      '-v',
-      'error',
-      '-print_format',
-      'json',
-      '-show_format',
-      '-show_streams',
-      '-show_chapters',
-      filePath,
-    ],
-    EXTERNAL_TOOL_TIMEOUT_MS,
-    signal,
-  );
+  if (!toolStatus.canReadMetadata) {
+    throw new Error('Metadata is only available for local filesystem files unless embedded ffprobe.wasm is available.');
+  }
+
+  const stdout = preferredTools.ffprobe.backend === 'bundled'
+    ? await runEmbeddedFfprobe(resource, EXTERNAL_TOOL_TIMEOUT_MS)
+    : (await execFileAsync(
+        toolStatus.ffprobeCommand,
+        [
+          '-v',
+          'error',
+          '-print_format',
+          'json',
+          '-show_format',
+          '-show_streams',
+          '-show_chapters',
+          getCliFilePath(resource) ?? '',
+        ],
+        EXTERNAL_TOOL_TIMEOUT_MS,
+        signal,
+      )).stdout;
 
   let parsed: FfprobeJsonPayload;
 
@@ -605,12 +763,11 @@ export async function getMediaMetadata(resource: vscode.Uri): Promise<MediaMetad
 
 export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenResult> {
   const toolStatus = await getExternalToolStatus(resource);
-  const filePath = getCliFilePath(resource);
 
-  if (!filePath) {
+  if (!toolStatus.fileBacked) {
     return {
       kind: 'unsupported-resource',
-      message: 'Wave Scope can probe arbitrary files only from the local filesystem.',
+      message: 'Wave Scope can probe arbitrary files only from the local filesystem unless embedded FFmpeg WASM tools are built.',
       toolStatus,
     };
   }
@@ -640,19 +797,68 @@ export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenRes
   };
 }
 
-export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFallbackPayload> {
-  const toolStatus = await getExternalToolStatus(resource);
-  const filePath = getCliFilePath(resource);
+export async function decodeWithFfmpeg(
+  resource: vscode.Uri,
+  options: DecodeWithFfmpegOptions = {},
+): Promise<DecodeFallbackPayload> {
+  const preferredTools = await resolvePreferredTools(resource);
+  const toolStatus = createToolStatusPayload(true, preferredTools);
+  const emitDebugTimelineEvent = (label: string, detail?: string): void => {
+    void options.onDebugTimelineEvent?.({
+      detail,
+      label,
+      source: 'host',
+      timeMs: Date.now(),
+    });
+  };
 
-  if (!toolStatus.fileBacked || !filePath) {
-    throw new Error('ffmpeg decode fallback is only available for local filesystem files.');
+  if (!toolStatus.fileBacked) {
+    throw new Error('ffmpeg decode fallback is only available for local filesystem files unless embedded FFmpeg WASM tools are built.');
   }
 
   if (!toolStatus.ffmpegAvailable) {
     throw new Error('Install ffmpeg CLI to decode this audio file.');
   }
 
+  if (!toolStatus.canDecodeFallback) {
+    throw new Error('ffmpeg decode fallback is only available for local filesystem files unless embedded ffmpeg.wasm is available.');
+  }
+
+  if (preferredTools.ffmpeg.backend === 'bundled') {
+    try {
+      const result = await runEmbeddedFfmpegDecodeToPcm(
+        resource,
+        options.onDebugTimelineEvent,
+      );
+
+      return {
+        ...result,
+        kind: 'pcm',
+      };
+    } catch (error) {
+      emitDebugTimelineEvent('host.decodeFallback.ffmpeg.embedded.module.fallback', getExecErrorMessage(error));
+      const result = await runEmbeddedFfmpegDecodeToWav(
+        resource,
+        FFMPEG_DECODE_TIMEOUT_MS,
+        options.onDebugTimelineEvent,
+      );
+
+      return {
+        ...result,
+        kind: 'wav',
+        source: 'ffmpeg',
+      };
+    }
+  }
+
+  const filePath = getCliFilePath(resource);
+
+  if (!filePath) {
+    throw new Error('ffmpeg decode fallback is only available for local filesystem files.');
+  }
+
   return new Promise((resolve, reject) => {
+    emitDebugTimelineEvent('host.decodeFallback.ffmpeg.spawn.start', toolStatus.ffmpegCommand);
     const ffmpegProcess = spawn(
       toolStatus.ffmpegCommand,
       [
@@ -676,15 +882,22 @@ export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFall
         windowsHide: true,
       },
     );
+    emitDebugTimelineEvent('host.decodeFallback.ffmpeg.spawned', `pid=${ffmpegProcess.pid ?? 'n/a'}`);
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
+    let firstStdoutChunkObserved = false;
     const timeoutId = setTimeout(() => {
+      emitDebugTimelineEvent('host.decodeFallback.ffmpeg.timeout');
       ffmpegProcess.kill();
       reject(new Error('ffmpeg decode fallback timed out.'));
     }, FFMPEG_DECODE_TIMEOUT_MS);
 
     ffmpegProcess.stdout.on('data', (chunk: Buffer) => {
+      if (!firstStdoutChunkObserved) {
+        firstStdoutChunkObserved = true;
+        emitDebugTimelineEvent('host.decodeFallback.ffmpeg.stdout.first', `bytes=${chunk.byteLength}`);
+      }
       stdoutChunks.push(chunk);
     });
 
@@ -694,11 +907,16 @@ export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFall
 
     ffmpegProcess.once('error', (error) => {
       clearTimeout(timeoutId);
+      emitDebugTimelineEvent('host.decodeFallback.ffmpeg.error', getExecErrorMessage(error));
       reject(new Error(`Failed to launch ffmpeg: ${getExecErrorMessage(error)}`));
     });
 
     ffmpegProcess.once('close', (exitCode) => {
       clearTimeout(timeoutId);
+      emitDebugTimelineEvent(
+        'host.decodeFallback.ffmpeg.close',
+        `code=${exitCode ?? 'null'} stdoutChunks=${stdoutChunks.length} stderrBytes=${Buffer.concat(stderrChunks).byteLength}`,
+      );
 
       if (exitCode !== 0) {
         const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
@@ -706,7 +924,9 @@ export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFall
         return;
       }
 
+      emitDebugTimelineEvent('host.decodeFallback.ffmpeg.buffer.concat.start', `chunks=${stdoutChunks.length}`);
       const wavBuffer = Buffer.concat(stdoutChunks);
+      emitDebugTimelineEvent('host.decodeFallback.ffmpeg.buffer.concat.done', `bytes=${wavBuffer.byteLength}`);
       const arrayBuffer = wavBuffer.buffer.slice(
         wavBuffer.byteOffset,
         wavBuffer.byteOffset + wavBuffer.byteLength,
@@ -715,6 +935,7 @@ export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFall
       resolve({
         audioBuffer: arrayBuffer,
         byteLength: wavBuffer.byteLength,
+        kind: 'wav',
         mimeType: 'audio/wav',
         source: 'ffmpeg',
       });

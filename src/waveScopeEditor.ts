@@ -1,12 +1,18 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
+  createInitialExternalToolStatus,
   decodeWithFfmpeg,
   getExternalToolStatus,
   getMediaMetadata,
   probeAudioOpen,
   type WaveScopePayload,
 } from './externalAudioTools';
+import {
+  createHostDebugTimelineEvent,
+  getExtensionActivatedAtMs,
+  type DebugTimelineEventPayload,
+} from './debugTimeline';
 
 const KNOWN_AUDIO_EXTENSIONS = new Set([
   'wav',
@@ -86,6 +92,8 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken,
   ): Promise<void> {
+    const resolveStartedAtMs = Date.now();
+    let externalToolStatusPromise: Promise<Awaited<ReturnType<typeof getExternalToolStatus>>> | null = null;
     const documentRoot = document.uri.with({
       path: path.posix.dirname(document.uri.path),
       query: '',
@@ -98,29 +106,88 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     };
     webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
-    const postAudioPayload = async (): Promise<void> => {
+    const sendDebugTimelineEventRecord = async (event: DebugTimelineEventPayload, loadToken?: number): Promise<void> => {
+      await webviewPanel.webview.postMessage({
+        type: 'debugTimelineEvent',
+        body: {
+          event: {
+            ...event,
+            loadToken: loadToken ?? event.loadToken,
+          },
+        },
+      });
+    };
+    const sendDebugTimelineEvent = async (label: string, loadToken?: number, detail?: string): Promise<void> => {
+      await sendDebugTimelineEventRecord(createHostDebugTimelineEvent(label, detail, loadToken), loadToken);
+    };
+    const getOrStartExternalToolStatus = (): Promise<Awaited<ReturnType<typeof getExternalToolStatus>>> => {
+      if (!externalToolStatusPromise) {
+        externalToolStatusPromise = getExternalToolStatus(document.uri);
+      }
+
+      return externalToolStatusPromise;
+    };
+    void getOrStartExternalToolStatus();
+
+    const postAudioPayload = async (triggerLabel: string): Promise<void> => {
+      const triggerEvent = createHostDebugTimelineEvent(triggerLabel);
+      const buildStartEvent = createHostDebugTimelineEvent('host.buildPayload.start');
       const payload = await this.buildPayload(document, webviewPanel.webview);
+      const buildDoneEvent = createHostDebugTimelineEvent(
+        'host.buildPayload.done',
+        `size=${payload.fileSize ?? 'n/a'} quality=${payload.spectrogramQuality}`,
+      );
+      const loadAudioPostedEvent = createHostDebugTimelineEvent('host.loadAudio.posted');
+      const debugTimelineSeed: DebugTimelineEventPayload[] = [
+        {
+          label: 'host.extension.activate',
+          source: 'host',
+          timeMs: getExtensionActivatedAtMs(),
+        },
+        {
+          label: 'host.resolveCustomEditor.start',
+          source: 'host',
+          timeMs: resolveStartedAtMs,
+        },
+        triggerEvent,
+        buildStartEvent,
+        ...(payload.debugTimelineSeed ?? []),
+        buildDoneEvent,
+        loadAudioPostedEvent,
+      ];
       await webviewPanel.webview.postMessage({
         type: 'loadAudio',
-        body: payload,
+        body: {
+          ...payload,
+          debugTimelineSeed,
+        },
       });
-      await webviewPanel.webview.postMessage({
-        type: 'externalToolStatus',
-        body: payload.externalTools,
-      });
+
+      if (!payload.externalTools.resolved) {
+        void getOrStartExternalToolStatus()
+          .then(async (externalTools) => {
+            await webviewPanel.webview.postMessage({
+              type: 'externalToolStatus',
+              body: externalTools,
+            });
+          })
+          .catch(() => {});
+      }
     };
 
     webviewPanel.webview.onDidReceiveMessage(async (message) => {
       if (message?.type === 'ready' || message?.type === 'reload') {
-        await postAudioPayload();
+        await postAudioPayload(message.type === 'reload' ? 'host.webview.reload.received' : 'host.webview.ready.received');
         return;
       }
 
       if (message?.type === 'requestMediaMetadata') {
         const loadToken = Number(message.body?.loadToken) || 0;
+        await sendDebugTimelineEvent('host.mediaMetadata.request.start', loadToken);
 
         try {
           const metadata = await getMediaMetadata(document.uri);
+          await sendDebugTimelineEvent('host.mediaMetadata.request.done', loadToken);
           await webviewPanel.webview.postMessage({
             type: 'mediaMetadataReady',
             body: {
@@ -130,6 +197,11 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
           });
         } catch (error) {
           const toolStatus = await getExternalToolStatus(document.uri);
+          await sendDebugTimelineEvent(
+            'host.mediaMetadata.request.error',
+            loadToken,
+            error instanceof Error ? error.message : String(error),
+          );
           await webviewPanel.webview.postMessage({
             type: 'mediaMetadataError',
             body: {
@@ -144,9 +216,19 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
 
       if (message?.type === 'requestDecodeFallback') {
         const loadToken = Number(message.body?.loadToken) || 0;
+        await sendDebugTimelineEvent('host.decodeFallback.request.start', loadToken);
 
         try {
-          const fallback = await decodeWithFfmpeg(document.uri);
+          const fallback = await decodeWithFfmpeg(document.uri, {
+            onDebugTimelineEvent: (event) => {
+              void sendDebugTimelineEventRecord(event, loadToken);
+            },
+          });
+          await sendDebugTimelineEvent(
+            'host.decodeFallback.request.done',
+            loadToken,
+            `bytes=${fallback.byteLength}`,
+          );
           await webviewPanel.webview.postMessage({
             type: 'decodeFallbackReady',
             body: {
@@ -156,6 +238,11 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
           });
         } catch (error) {
           const toolStatus = await getExternalToolStatus(document.uri);
+          await sendDebugTimelineEvent(
+            'host.decodeFallback.request.error',
+            loadToken,
+            error instanceof Error ? error.message : String(error),
+          );
           await webviewPanel.webview.postMessage({
             type: 'decodeFallbackError',
             body: {
@@ -189,21 +276,30 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
   }
 
   private async buildPayload(document: WaveScopeDocument, webview: vscode.Webview): Promise<WaveScopePayload> {
+    const debugTimelineSeed: DebugTimelineEventPayload[] = [];
     let fileSize: number | null = null;
 
     try {
+      debugTimelineSeed.push(createHostDebugTimelineEvent('host.buildPayload.fsStat.start'));
       const stat = await vscode.workspace.fs.stat(document.uri);
       fileSize = stat.size;
+      debugTimelineSeed.push(createHostDebugTimelineEvent('host.buildPayload.fsStat.done', `size=${fileSize}`));
     } catch {
       fileSize = null;
+      debugTimelineSeed.push(createHostDebugTimelineEvent('host.buildPayload.fsStat.error'));
     }
 
     const spectrogramQuality = vscode.workspace
       .getConfiguration('waveScope', document.uri)
       .get<'balanced' | 'high' | 'max'>('spectrogramQuality', 'high');
-    const externalTools = await getExternalToolStatus(document.uri);
+    const externalTools = createInitialExternalToolStatus(document.uri);
+
+    if (!externalTools.resolved) {
+      debugTimelineSeed.push(createHostDebugTimelineEvent('host.buildPayload.externalTools.deferred'));
+    }
 
     return {
+      debugTimelineSeed,
       documentUri: document.uri.toString(),
       externalTools,
       fileExtension: path.posix.extname(document.uri.path).replace(/^\./, '').toLowerCase(),
@@ -219,6 +315,9 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'waveScope.js'));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'src-webview', 'waveScope.css'));
     const workerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'audioAnalysisWorker.js'));
+    const decodeWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'embeddedDecodeWorker.js'));
+    const decodeBrowserModuleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_browser_module.js'));
+    const decodeBrowserModuleWasmUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_browser_module.wasm'));
     const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'interactiveWaveformWorker.js'));
     const audioTransportProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'audioTransportProcessor.js'));
     const stretchProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'src-webview', 'vendor', 'SignalsmithStretch.mjs'));
@@ -235,7 +334,7 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
     <link rel="stylesheet" href="${styleUri}" />
     <title>Wave Scope</title>
   </head>
-  <body data-worker-src="${workerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}">
+  <body data-worker-src="${workerUri}" data-decode-module-src="${decodeBrowserModuleUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}">
     <main class="app-shell">
       <section id="wave-scope-viewport" class="viewport" aria-label="Wave Scope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">
@@ -391,6 +490,13 @@ export class WaveScopeEditorProvider implements vscode.CustomReadonlyEditorProvi
         <div id="analysis-status" class="analysis-status">Preparing Wave Scope…</div>
       </footer>
       <div id="status" class="status-overlay" hidden></div>
+      <aside id="debug-timeline-panel" class="debug-timeline-panel" aria-label="Wave Scope debug timeline" data-collapsed="false">
+        <div class="debug-timeline-header">
+          <div id="debug-timeline-summary" class="debug-timeline-summary">Timeline pending…</div>
+          <button id="debug-timeline-toggle" class="debug-timeline-toggle" type="button" aria-expanded="true">Hide</button>
+        </div>
+        <div id="debug-timeline-list" class="debug-timeline-list"></div>
+      </aside>
     </main>
 
     <script type="module" src="${scriptUri}"></script>

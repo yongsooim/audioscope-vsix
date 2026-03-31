@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
+import { noteExtensionActivated } from './debugTimeline';
 import { WaveScopeEditorProvider } from './waveScopeEditor';
 
 export function activate(context: vscode.ExtensionContext): void {
+  noteExtensionActivated();
   context.subscriptions.push(WaveScopeEditorProvider.register(context));
   void maybeOpenBundledSample(context);
 }

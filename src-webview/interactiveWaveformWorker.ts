@@ -20,6 +20,8 @@ let pendingRenderRequest = null;
 let pendingPresentation = null;
 
 const surfaceState = {
+  backCanvas: null,
+  backContext: null,
   canvas: null,
   context: null,
   width: 0,
@@ -30,11 +32,26 @@ const surfaceState = {
 
 let analysisState = createEmptyAnalysisState();
 
+function postDebugTimelineEvent(label, detail = '') {
+  self.postMessage({
+    type: 'debugTimelineEvent',
+    body: {
+      event: {
+        detail,
+        label,
+        source: 'waveform-worker',
+        timeMs: Date.now(),
+      },
+    },
+  });
+}
+
 self.onmessage = (event) => {
   const message = event.data ?? {};
 
   switch (message.type) {
     case 'bootstrapRuntime':
+      postDebugTimelineEvent('waveform-worker.bootstrapRuntime');
       self.postMessage({
         type: 'runtimeReady',
         body: {
@@ -44,6 +61,7 @@ self.onmessage = (event) => {
       return;
     case 'initCanvas':
       initializeCanvas(message.body);
+      postDebugTimelineEvent('waveform-worker.initCanvas');
       void pumpRenderLoop();
       return;
     case 'resizeCanvas':
@@ -81,6 +99,8 @@ self.onmessage = (event) => {
     case 'dispose':
       pendingRenderRequest = null;
       resolvePendingPresentation(null, false);
+      surfaceState.backContext = null;
+      surfaceState.backCanvas = null;
       surfaceState.context = null;
       surfaceState.canvas = null;
       analysisState = createEmptyAnalysisState();
@@ -131,6 +151,7 @@ function initializeCanvas(options) {
 
   resizeSurface();
   surfaceState.context = surfaceState.canvas.getContext('2d');
+  ensureBackBuffer();
   clearCanvas();
 }
 
@@ -143,6 +164,7 @@ function resizeCanvas(options) {
     : surfaceState.color;
 
   resizeSurface();
+  ensureBackBuffer();
 }
 
 function resizeSurface() {
@@ -158,16 +180,88 @@ function resizeSurface() {
   );
 }
 
-function clearCanvas() {
-  if (!surfaceState.context || !surfaceState.canvas) {
+function ensureBackBuffer() {
+  if (!surfaceState.canvas) {
+    surfaceState.backCanvas = null;
+    surfaceState.backContext = null;
     return;
   }
 
+  if (typeof OffscreenCanvas !== 'function') {
+    surfaceState.backCanvas = null;
+    surfaceState.backContext = null;
+    return;
+  }
+
+  if (
+    !(surfaceState.backCanvas instanceof OffscreenCanvas)
+    || surfaceState.backCanvas.width !== surfaceState.canvas.width
+    || surfaceState.backCanvas.height !== surfaceState.canvas.height
+  ) {
+    surfaceState.backCanvas = new OffscreenCanvas(
+      Math.max(1, surfaceState.canvas.width),
+      Math.max(1, surfaceState.canvas.height),
+    );
+    surfaceState.backContext = surfaceState.backCanvas.getContext('2d');
+  }
+}
+
+function getRenderSurface() {
+  if (surfaceState.backCanvas && surfaceState.backContext) {
+    return {
+      canvas: surfaceState.backCanvas,
+      context: surfaceState.backContext,
+    };
+  }
+
+  if (surfaceState.canvas && surfaceState.context) {
+    return {
+      canvas: surfaceState.canvas,
+      context: surfaceState.context,
+    };
+  }
+
+  return null;
+}
+
+function presentRenderSurface(renderSurface) {
+  if (!renderSurface || !surfaceState.canvas || !surfaceState.context) {
+    return;
+  }
+
+  if (renderSurface.canvas === surfaceState.canvas) {
+    return;
+  }
+
+  surfaceState.context.save();
   surfaceState.context.setTransform(1, 0, 0, 1, 0, 0);
-  surfaceState.context.clearRect(0, 0, surfaceState.canvas.width, surfaceState.canvas.height);
+  surfaceState.context.globalCompositeOperation = 'copy';
+  surfaceState.context.drawImage(renderSurface.canvas, 0, 0);
+  surfaceState.context.restore();
+}
+
+function clearCanvas() {
+  const surfaces = [
+    surfaceState.backCanvas && surfaceState.backContext
+      ? { canvas: surfaceState.backCanvas, context: surfaceState.backContext }
+      : null,
+    surfaceState.canvas && surfaceState.context
+      ? { canvas: surfaceState.canvas, context: surfaceState.context }
+      : null,
+  ];
+
+  for (const surface of surfaces) {
+    if (!surface) {
+      continue;
+    }
+
+    surface.context.setTransform(1, 0, 0, 1, 0, 0);
+    surface.context.clearRect(0, 0, surface.canvas.width, surface.canvas.height);
+  }
 }
 
 function attachAudioSession(options) {
+  postDebugTimelineEvent('waveform-worker.attachAudioSession.start');
   const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
   const duration = Number(options?.duration);
@@ -210,15 +304,19 @@ function attachAudioSession(options) {
       sampleRate,
     },
   });
+  postDebugTimelineEvent('waveform-worker.attachAudioSession.done', `samples=${sampleCount} rate=${sampleRate}`);
 }
 
 function buildWaveformPyramid() {
+  const startedAt = performance.now();
+  postDebugTimelineEvent('waveform-worker.buildWaveformPyramid.start');
   assertInitialized();
 
   if (analysisState.waveformBuilt) {
     self.postMessage({
       type: 'waveformPyramidReady',
     });
+    postDebugTimelineEvent('waveform-worker.buildWaveformPyramid.done', 'cache-hit');
     return;
   }
 
@@ -234,6 +332,10 @@ function buildWaveformPyramid() {
   self.postMessage({
     type: 'waveformPyramidReady',
   });
+  postDebugTimelineEvent(
+    'waveform-worker.buildWaveformPyramid.done',
+    `${(performance.now() - startedAt).toFixed(1)} ms`,
+  );
 }
 async function pumpRenderLoop() {
   if (renderLoopActive) {
@@ -268,6 +370,7 @@ async function pumpRenderLoop() {
 }
 
 async function renderWaveform(request) {
+  const startedAt = performance.now();
   const viewStart = clamp(Number(request?.viewStart) || 0, 0, analysisState.duration);
   const viewEnd = clamp(
     Number(request?.viewEnd) || analysisState.duration,
@@ -325,6 +428,10 @@ async function renderWaveform(request) {
       width,
     },
   });
+  postDebugTimelineEvent(
+    'waveform-worker.waveformReady.posted',
+    `${(performance.now() - startedAt).toFixed(1)} ms cols=${columnCount}`,
+  );
 
   const shouldPresent = await waitForPresentationDecision(generation);
 
@@ -332,8 +439,15 @@ async function renderWaveform(request) {
     return;
   }
 
+  const renderSurface = getRenderSurface();
+
+  if (!renderSurface) {
+    return;
+  }
+
   if (rawSamplePlotMode && sampleData instanceof Float32Array) {
     drawRawSamplePlot(
+      renderSurface,
       sampleData,
       drawColumnsCount(columnCount),
       color,
@@ -341,11 +455,13 @@ async function renderWaveform(request) {
       sampleStartPosition,
       visibleSampleSpan,
     );
+    presentRenderSurface(renderSurface);
     return;
   }
 
   if (samplePlotMode && sampleData instanceof Float32Array) {
     drawRepresentativeSamplePlot(
+      renderSurface,
       sampleData,
       drawColumnsCount(columnCount),
       color,
@@ -353,10 +469,12 @@ async function renderWaveform(request) {
       sampleStartPosition,
       visibleSampleCount,
     );
+    presentRenderSurface(renderSurface);
     return;
   }
 
-  drawFrame(slice, columnCount, color, false, pixelsPerSample);
+  drawFrame(renderSurface, slice, columnCount, color, false, pixelsPerSample);
+  presentRenderSurface(renderSurface);
 }
 
 function drawColumnsCount(columnCount) {
@@ -365,9 +483,9 @@ function drawColumnsCount(columnCount) {
   return Math.min(columnCount, deviceWidth);
 }
 
-function drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample) {
-  const context = surfaceState.context;
-  const canvas = surfaceState.canvas;
+function drawFrame(renderSurface, slice, columnCount, color, samplePlotMode, pixelsPerSample) {
+  const context = renderSurface?.context;
+  const canvas = renderSurface?.canvas;
 
   if (!context || !canvas) {
     return;
@@ -391,7 +509,7 @@ function drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample) {
   const drawColumns = Math.min(columnCount, deviceWidth);
 
   if (samplePlotMode) {
-    drawSamplePlot(slice, drawColumns, color, midY, amplitudeHeight, chartTop, chartBottom, pixelsPerSample);
+    drawSamplePlot(renderSurface, slice, drawColumns, color, midY, amplitudeHeight, chartTop, chartBottom, pixelsPerSample);
     return;
   }
 
@@ -406,8 +524,8 @@ function drawFrame(slice, columnCount, color, samplePlotMode, pixelsPerSample) {
   }
 }
 
-function drawSamplePlot(slice, drawColumns, color, midY, amplitudeHeight, chartTop, chartBottom, pixelsPerSample) {
-  const context = surfaceState.context;
+function drawSamplePlot(renderSurface, slice, drawColumns, color, midY, amplitudeHeight, chartTop, chartBottom, pixelsPerSample) {
+  const context = renderSurface?.context;
 
   if (!context || drawColumns <= 0) {
     return;
@@ -450,9 +568,9 @@ function drawSamplePlot(slice, drawColumns, color, midY, amplitudeHeight, chartT
   }
 }
 
-function drawRepresentativeSamplePlot(samples, drawColumns, color, pixelsPerSample, sampleStartPosition, visibleSampleCount) {
-  const context = surfaceState.context;
-  const canvas = surfaceState.canvas;
+function drawRepresentativeSamplePlot(renderSurface, samples, drawColumns, color, pixelsPerSample, sampleStartPosition, visibleSampleCount) {
+  const context = renderSurface?.context;
+  const canvas = renderSurface?.canvas;
 
   if (!context || !canvas || drawColumns <= 0 || samples.length === 0) {
     return;
@@ -515,9 +633,9 @@ function drawRepresentativeSamplePlot(samples, drawColumns, color, pixelsPerSamp
   }
 }
 
-function drawRawSamplePlot(samples, drawColumns, color, pixelsPerSample, sampleStartPosition, visibleSampleSpan) {
-  const context = surfaceState.context;
-  const canvas = surfaceState.canvas;
+function drawRawSamplePlot(renderSurface, samples, drawColumns, color, pixelsPerSample, sampleStartPosition, visibleSampleSpan) {
+  const context = renderSurface?.context;
+  const canvas = renderSurface?.canvas;
 
   if (!context || !canvas || drawColumns <= 0 || samples.length === 0) {
     return;

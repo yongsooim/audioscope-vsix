@@ -6,6 +6,9 @@ import { createAudioTransport, type PlaybackSession } from './audioTransport';
 
 const vscode = acquireVsCodeApi();
 const analysisWorkerScriptUri = document.body.dataset.workerSrc;
+const decodeBrowserModuleScriptUri = document.body.dataset.decodeModuleSrc;
+const decodeBrowserModuleWasmUri = document.body.dataset.decodeModuleWasmSrc;
+const decodeWorkerScriptUri = document.body.dataset.decodeWorkerSrc;
 const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc;
 const audioTransportProcessorScriptUri = document.body.dataset.audioTransportProcessorSrc;
 const stretchProcessorScriptUri = document.body.dataset.stretchProcessorSrc;
@@ -44,8 +47,6 @@ const LOOP_SELECTION_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const LOOP_HANDLE_WIDTH_PX = 12;
 const LOOP_WRAP_EPSILON_SECONDS = 1 / 120;
-const ANALYSIS_IDLE_TIMEOUT_MS = 1500;
-const ANALYSIS_FALLBACK_DELAY_MS = 240;
 const WAVEFORM_TOP_PADDING_PX = 10;
 const WAVEFORM_BOTTOM_PADDING_PX = 10;
 const WAVEFORM_AMPLITUDE_HEIGHT_RATIO = 0.38;
@@ -89,6 +90,16 @@ interface WaveformAxisRenderOptions {
   renderRange?: TimeRange;
   renderWidth?: number;
 }
+
+interface DebugTimelineEvent {
+  detail?: string | null;
+  label: string;
+  loadToken?: number;
+  source: 'host' | 'webview' | 'waveform-worker' | 'analysis-worker' | 'decode-worker';
+  timeMs: number;
+}
+
+const DEBUG_TIMELINE_MAX_EVENTS = 96;
 
 const elements = {
   viewport: requireElement<HTMLElement>('wave-scope-viewport'),
@@ -151,6 +162,10 @@ const elements = {
   loudnessTruePeak: requireElement<HTMLElement>('loudness-true-peak'),
   analysisStatus: requireElement<HTMLElement>('analysis-status'),
   status: requireElement<HTMLElement>('status'),
+  debugTimelinePanel: requireElement<HTMLElement>('debug-timeline-panel'),
+  debugTimelineSummary: requireElement<HTMLElement>('debug-timeline-summary'),
+  debugTimelineList: requireElement<HTMLElement>('debug-timeline-list'),
+  debugTimelineToggle: requireElement<HTMLButtonElement>('debug-timeline-toggle'),
 };
 
 const state = {
@@ -174,14 +189,15 @@ const state = {
   decodeFallbackError: null,
   resolveDecodeFallback: null,
   rejectDecodeFallback: null,
+  decodeWorker: null,
+  decodeWorkerBootstrapUrl: null,
+  decodeWorkerReady: false,
+  decodeWorkerPrewarmed: false,
   analysisWorker: null,
   analysisWorkerBootstrapUrl: null,
   analysisRuntimeReadyPromise: null,
   resolveAnalysisRuntimeReady: null,
-  analysisIdleCallbackId: null,
-  analysisTimeoutId: null,
   analysisStartedForLoadToken: 0,
-  analysisQueuedForLoadToken: 0,
   waveformWorker: null,
   waveformWorkerBootstrapUrl: null,
   waveformRuntimeReadyPromise: null,
@@ -221,12 +237,14 @@ const state = {
   playbackFrame: 0,
   spectrogramFrame: 0,
   spectrogramRequestFrame: 0,
-  waveformPyramidFrame: 0,
   observedWaveformViewportWidth: 0,
   observedWaveformViewportHeight: 0,
   observedSpectrogramPixelWidth: 0,
   observedSpectrogramPixelHeight: 0,
   observedOverviewWidth: 0,
+  debugTimelineCollapsed: false,
+  debugTimelineEvents: [] as DebugTimelineEvent[],
+  debugTimelineLoadToken: 0,
 };
 
 function ensureWaveformSampleMarkerElement() {
@@ -244,6 +262,154 @@ function ensureWaveformSampleMarkerElement() {
 
 ensureWaveformSampleMarkerElement();
 
+function normalizeDebugTimelineEvent(event, fallbackLoadToken = state.debugTimelineLoadToken || state.loadToken): DebugTimelineEvent | null {
+  if (!event || typeof event !== 'object') {
+    return null;
+  }
+
+  const label = typeof event.label === 'string' ? event.label.trim() : '';
+  const source = event.source;
+  const timeMs = Number(event.timeMs);
+
+  if (
+    !label
+    || !Number.isFinite(timeMs)
+    || (source !== 'host' && source !== 'webview' && source !== 'waveform-worker' && source !== 'analysis-worker' && source !== 'decode-worker')
+  ) {
+    return null;
+  }
+
+  const loadToken = Number.isFinite(Number(event.loadToken))
+    ? Number(event.loadToken)
+    : fallbackLoadToken;
+
+  return {
+    detail: typeof event.detail === 'string' && event.detail.length > 0 ? event.detail : null,
+    label,
+    loadToken: loadToken > 0 ? loadToken : undefined,
+    source,
+    timeMs,
+  };
+}
+
+function formatDebugTimelineDelta(deltaMs) {
+  return `+${deltaMs.toFixed(deltaMs >= 100 ? 0 : 1)} ms`;
+}
+
+function renderDebugTimeline() {
+  const events = [...state.debugTimelineEvents].sort((left, right) => left.timeMs - right.timeMs);
+
+  if (events.length === 0) {
+    elements.debugTimelineSummary.textContent = 'Timeline pending…';
+    elements.debugTimelineList.replaceChildren();
+    return;
+  }
+
+  const startTime = events[0].timeMs;
+  const firstWaveformCommit = events.find((event) => event.label === 'webview.waveform.display.commit') ?? null;
+  const firstPyramidReady = events.find((event) => event.label === 'waveform-worker.buildWaveformPyramid.done') ?? null;
+  const latestEvent = events[events.length - 1];
+  const waveformSummary = firstWaveformCommit
+    ? formatDebugTimelineDelta(firstWaveformCommit.timeMs - startTime)
+    : 'pending';
+  const pyramidSummary = firstPyramidReady
+    ? formatDebugTimelineDelta(firstPyramidReady.timeMs - startTime)
+    : 'pending';
+  elements.debugTimelineSummary.textContent = `Waveform ${waveformSummary} • Pyramid ${pyramidSummary} • Last ${latestEvent.label}`;
+
+  const rows = events.map((event) => {
+    const row = document.createElement('div');
+    row.className = 'debug-timeline-row';
+
+    const delta = document.createElement('div');
+    delta.className = 'debug-timeline-delta';
+    delta.textContent = formatDebugTimelineDelta(event.timeMs - startTime);
+
+    const source = document.createElement('div');
+    source.className = 'debug-timeline-source';
+    source.textContent = event.source;
+
+    const label = document.createElement('div');
+    label.className = 'debug-timeline-label';
+    label.textContent = event.label;
+
+    if (event.detail) {
+      const detail = document.createElement('div');
+      detail.className = 'debug-timeline-detail';
+      detail.textContent = event.detail;
+      label.append(document.createElement('br'), detail);
+    }
+
+    row.append(delta, source, label);
+    return row;
+  });
+
+  elements.debugTimelineList.replaceChildren(...rows);
+}
+
+function recordDebugTimelineEvent(event) {
+  const normalized = normalizeDebugTimelineEvent(event);
+
+  if (!normalized) {
+    return;
+  }
+
+  if (
+    normalized.loadToken
+    && state.debugTimelineLoadToken > 0
+    && normalized.loadToken !== state.debugTimelineLoadToken
+  ) {
+    return;
+  }
+
+  if (normalized.loadToken && state.debugTimelineLoadToken === 0) {
+    state.debugTimelineLoadToken = normalized.loadToken;
+  }
+
+  state.debugTimelineEvents.push(normalized);
+  state.debugTimelineEvents.sort((left, right) => left.timeMs - right.timeMs);
+  if (state.debugTimelineEvents.length > DEBUG_TIMELINE_MAX_EVENTS) {
+    state.debugTimelineEvents.splice(0, state.debugTimelineEvents.length - DEBUG_TIMELINE_MAX_EVENTS);
+  }
+
+  renderDebugTimeline();
+}
+
+function addDebugTimelineEvent(label, detail = '', source: DebugTimelineEvent['source'] = 'webview', loadToken = state.loadToken) {
+  recordDebugTimelineEvent({
+    detail,
+    label,
+    loadToken,
+    source,
+    timeMs: Date.now(),
+  });
+}
+
+function resetDebugTimeline(loadToken, seedEvents = []) {
+  state.debugTimelineLoadToken = loadToken;
+  state.debugTimelineEvents = [];
+
+  for (const event of seedEvents) {
+    const normalized = normalizeDebugTimelineEvent(event, loadToken);
+    if (normalized) {
+      state.debugTimelineEvents.push(normalized);
+    }
+  }
+
+  state.debugTimelineEvents.sort((left, right) => left.timeMs - right.timeMs);
+  renderDebugTimeline();
+}
+
+function setDebugTimelineCollapsed(collapsed) {
+  state.debugTimelineCollapsed = Boolean(collapsed);
+  elements.debugTimelinePanel.dataset.collapsed = state.debugTimelineCollapsed ? 'true' : 'false';
+  elements.debugTimelineToggle.textContent = state.debugTimelineCollapsed ? 'Show' : 'Hide';
+  elements.debugTimelineToggle.setAttribute('aria-expanded', state.debugTimelineCollapsed ? 'false' : 'true');
+}
+
+setDebugTimelineCollapsed(false);
+renderDebugTimeline();
+
 if (
   typeof elements.spectrogram.transferControlToOffscreen !== 'function'
   || typeof OffscreenCanvas !== 'function'
@@ -259,6 +425,7 @@ if (
   renderSpectrogramScale();
   renderSpectrogramMeta();
   renderLoudnessSummary();
+  addDebugTimelineEvent('webview.ready.posted');
   vscode.postMessage({ type: 'ready' });
 }
 
@@ -269,6 +436,16 @@ window.addEventListener('message', (event) => {
     state.activeFile = message.body;
     state.externalTools = normalizeExternalToolStatus(message.body?.externalTools);
     void loadAudioFile(message.body);
+    return;
+  }
+
+  if (message?.type === 'debugTimelineEvent') {
+    const events = Array.isArray(message.body?.events)
+      ? message.body.events
+      : [message.body?.event];
+    for (const eventRecord of events) {
+      recordDebugTimelineEvent(eventRecord);
+    }
     return;
   }
 
@@ -294,6 +471,7 @@ window.addEventListener('message', (event) => {
     };
     state.externalTools = normalizeExternalToolStatus(message.body?.metadata?.toolStatus ?? state.externalTools);
     renderMediaMetadata();
+    addDebugTimelineEvent('webview.mediaMetadata.ready', '', 'webview', loadToken);
     return;
   }
 
@@ -313,6 +491,7 @@ window.addEventListener('message', (event) => {
       summary: null,
     };
     renderMediaMetadata();
+    addDebugTimelineEvent('webview.mediaMetadata.error', state.mediaMetadata.message, 'webview', loadToken);
     return;
   }
 
@@ -322,32 +501,7 @@ window.addEventListener('message', (event) => {
     if (loadToken !== state.loadToken) {
       return;
     }
-
-    const audioBuffer = message.body?.audioBuffer;
-
-    if (!(audioBuffer instanceof ArrayBuffer)) {
-      state.rejectDecodeFallback?.(new Error('ffmpeg fallback did not return audio bytes.'));
-      state.decodeFallbackPromise = null;
-      state.decodeFallbackResult = null;
-      state.resolveDecodeFallback = null;
-      state.rejectDecodeFallback = null;
-      return;
-    }
-
-    state.decodeFallbackError = null;
-    state.decodeFallbackResult = {
-      audioBuffer,
-      byteLength: Number(message.body?.byteLength) || audioBuffer.byteLength,
-      mimeType: typeof message.body?.mimeType === 'string' && message.body.mimeType.length > 0
-        ? message.body.mimeType
-        : 'audio/wav',
-      source: message.body?.source === 'ffmpeg' ? 'ffmpeg' : 'ffmpeg',
-    };
-    state.resolveDecodeFallback?.(state.decodeFallbackResult);
-    state.decodeFallbackPromise = null;
-    state.resolveDecodeFallback = null;
-    state.rejectDecodeFallback = null;
-    renderMediaMetadata();
+    acceptDecodeFallbackResult(loadToken, message.body);
     return;
   }
 
@@ -359,16 +513,9 @@ window.addEventListener('message', (event) => {
     }
 
     state.externalTools = normalizeExternalToolStatus(message.body?.toolStatus ?? state.externalTools);
-    state.decodeFallbackResult = null;
-    state.decodeFallbackError = {
-      loadToken,
-      message: message.body?.message || state.externalTools.guidance || 'ffmpeg decode fallback failed.',
-    };
-    state.rejectDecodeFallback?.(new Error(state.decodeFallbackError.message));
-    state.decodeFallbackPromise = null;
-    state.resolveDecodeFallback = null;
-    state.rejectDecodeFallback = null;
+    rejectDecodeFallbackRequest(loadToken, message.body?.message || state.externalTools.guidance || 'ffmpeg decode fallback failed.');
     renderMediaMetadata();
+    addDebugTimelineEvent('webview.decodeFallback.error', state.decodeFallbackError.message, 'webview', loadToken);
     return;
   }
 
@@ -446,6 +593,7 @@ function getEffectiveSpectrogramRenderConfig(config = state.spectrogramRenderCon
 
 function createExternalToolStatusState() {
   return {
+    resolved: false,
     canDecodeFallback: false,
     canReadMetadata: false,
     ffmpegAvailable: false,
@@ -470,6 +618,7 @@ function normalizeExternalToolStatus(status) {
 
   return {
     ...base,
+    resolved: Boolean(status.resolved),
     canDecodeFallback: Boolean(status.canDecodeFallback),
     canReadMetadata: Boolean(status.canReadMetadata),
     ffmpegAvailable: Boolean(status.ffmpegAvailable),
@@ -639,6 +788,10 @@ function formatMetadataSummaryText() {
 
   if (metadata?.message) {
     return metadata.message;
+  }
+
+  if (!state.externalTools.resolved) {
+    return 'Checking installed ffmpeg CLI tools...';
   }
 
   if (!state.externalTools.canReadMetadata) {
@@ -1016,13 +1169,17 @@ window.addEventListener('keydown', (event) => {
 async function loadAudioFile(payload) {
   const loadToken = state.loadToken + 1;
   state.loadToken = loadToken;
+  resetDebugTimeline(loadToken, payload?.debugTimelineSeed ?? []);
+  addDebugTimelineEvent('webview.loadAudio.received', payload?.fileName || '');
 
   destroySession();
   state.externalTools = normalizeExternalToolStatus(payload?.externalTools);
   state.mediaMetadata = {
     ...createMediaMetadataState('pending'),
     loadToken,
-    message: state.externalTools.canReadMetadata
+    message: !payload?.fileBacked
+      ? 'Metadata is only available for local filesystem files.'
+      : (!state.externalTools.resolved || state.externalTools.canReadMetadata)
       ? 'Loading metadata with ffprobe…'
       : state.externalTools.guidance || `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata for local files.`,
   };
@@ -1032,16 +1189,21 @@ async function loadAudioFile(payload) {
   setPendingLoudnessSummary();
   clearFatalStatus();
   setAnalysisStatus('Preparing playback…');
+  addDebugTimelineEvent('webview.playback.prepare');
   state.audioTransport = createPlaybackTransport(loadToken);
   state.playbackSession = null;
   state.waveformViewRange = { start: 0, end: 0 };
 
+  addDebugTimelineEvent('webview.waveformSurface.init.start');
   state.waveformSurfaceReadyPromise = initializeWaveformSurface(loadToken);
+  addDebugTimelineEvent('webview.spectrogramSurface.init.start');
   state.spectrogramSurfaceReadyPromise = initializeSpectrogramSurface(loadToken);
+  prewarmDecodeWorker(loadToken);
   syncTransport();
   renderWaveformUi();
   renderSpectrogramScale();
   requestMediaMetadata(loadToken, payload);
+  addDebugTimelineEvent('webview.mediaMetadata.requested');
   void loadDecodedAudioSource(loadToken, payload);
 }
 
@@ -1157,7 +1319,197 @@ function clearDecodeFallbackCache() {
   state.rejectDecodeFallback = null;
 }
 
-function requestDecodeFallback(loadToken, payload, reason) {
+function rejectDecodeFallbackRequest(loadToken, message) {
+  state.decodeFallbackResult = null;
+  state.decodeFallbackError = {
+    loadToken,
+    message,
+  };
+  state.rejectDecodeFallback?.(new Error(message));
+  state.decodeFallbackPromise = null;
+  state.resolveDecodeFallback = null;
+  state.rejectDecodeFallback = null;
+}
+
+function acceptDecodeFallbackResult(loadToken, body) {
+  state.decodeFallbackError = null;
+
+  if (body?.kind === 'pcm') {
+    const channelBuffers = Array.isArray(body?.channelBuffers)
+      ? body.channelBuffers.filter((buffer) => buffer instanceof ArrayBuffer)
+      : [];
+    const numberOfChannels = Math.max(1, Math.trunc(Number(body?.numberOfChannels) || channelBuffers.length || 0));
+    const sampleRate = Math.max(1, Math.trunc(Number(body?.sampleRate) || 0));
+    const frameCount = Math.max(0, Math.trunc(Number(body?.frameCount) || 0));
+
+    if (channelBuffers.length === 0 || sampleRate <= 0 || frameCount <= 0) {
+      rejectDecodeFallbackRequest(loadToken, 'ffmpeg fallback did not return decoded PCM channel buffers.');
+      return;
+    }
+
+    state.decodeFallbackResult = {
+      byteLength: Number(body?.byteLength) || channelBuffers.reduce((total, buffer) => total + buffer.byteLength, 0),
+      channelBuffers,
+      frameCount,
+      kind: 'pcm',
+      numberOfChannels,
+      sampleRate,
+      source: body?.source === 'ffmpeg' ? 'ffmpeg' : 'ffmpeg',
+    };
+  } else {
+    const audioBuffer = body?.audioBuffer;
+
+    if (!(audioBuffer instanceof ArrayBuffer)) {
+      rejectDecodeFallbackRequest(loadToken, 'ffmpeg fallback did not return audio bytes.');
+      return;
+    }
+
+    state.decodeFallbackResult = {
+      audioBuffer,
+      byteLength: Number(body?.byteLength) || audioBuffer.byteLength,
+      kind: 'wav',
+      mimeType: typeof body?.mimeType === 'string' && body.mimeType.length > 0
+        ? body.mimeType
+        : 'audio/wav',
+      source: body?.source === 'ffmpeg' ? 'ffmpeg' : 'ffmpeg',
+    };
+  }
+
+  state.resolveDecodeFallback?.(state.decodeFallbackResult);
+  state.decodeFallbackPromise = null;
+  state.resolveDecodeFallback = null;
+  state.rejectDecodeFallback = null;
+  renderMediaMetadata();
+  addDebugTimelineEvent('webview.decodeFallback.ready', `bytes=${state.decodeFallbackResult.byteLength}`, 'webview', loadToken);
+}
+
+function postHostDecodeFallbackRequest(loadToken, payload, reason) {
+  vscode.postMessage({
+    type: 'requestDecodeFallback',
+    body: {
+      loadToken,
+      reason,
+      sourceUri: payload?.documentUri ?? payload?.sourceUri ?? '',
+    },
+  });
+}
+
+async function createDecodeWorker() {
+  if (state.decodeWorker) {
+    return state.decodeWorker;
+  }
+
+  if (!decodeWorkerScriptUri || !decodeBrowserModuleScriptUri || !decodeBrowserModuleWasmUri) {
+    return null;
+  }
+
+  const worker = createModuleWorker(decodeWorkerScriptUri, 'decodeWorkerBootstrapUrl');
+  state.decodeWorker = worker;
+  state.decodeWorkerReady = false;
+  state.decodeWorkerPrewarmed = false;
+
+  worker.addEventListener('message', (event) => {
+    handleDecodeWorkerMessage(event.data);
+  });
+  worker.addEventListener('error', (event) => {
+    disposeDecodeWorker();
+
+    if (state.loadToken > 0) {
+      rejectDecodeFallbackRequest(state.loadToken, event.message || 'Embedded decode worker failed.');
+      renderMediaMetadata();
+    }
+  });
+  worker.postMessage({
+    type: 'bootstrapRuntime',
+    body: {
+      moduleUrl: decodeBrowserModuleScriptUri,
+      wasmUrl: decodeBrowserModuleWasmUri,
+    },
+  });
+
+  return worker;
+}
+
+function prewarmDecodeWorker(loadToken) {
+  if (state.decodeWorkerPrewarmed) {
+    return;
+  }
+
+  void createDecodeWorker().then((worker) => {
+    if (!worker || loadToken !== state.loadToken || state.decodeWorkerPrewarmed) {
+      return;
+    }
+
+    addDebugTimelineEvent('webview.decodeFallback.prewarm.requested', '', 'webview', loadToken);
+    worker.postMessage({
+      type: 'prewarmDecodeModule',
+      body: { loadToken },
+    });
+  }).catch(() => {});
+}
+
+function handleDecodeWorkerMessage(message) {
+  const loadToken = Number(message?.body?.loadToken) || state.loadToken;
+
+  if (message?.type === 'debugTimelineEvent') {
+    recordDebugTimelineEvent({
+      ...message.body?.event,
+      loadToken,
+    });
+    return;
+  }
+
+  if (message?.type === 'runtimeReady') {
+    state.decodeWorkerReady = true;
+    addDebugTimelineEvent('decode-worker.runtime.ready', '', 'decode-worker', loadToken);
+    return;
+  }
+
+  if (message?.type === 'prewarmReady') {
+    state.decodeWorkerPrewarmed = true;
+    addDebugTimelineEvent('decode-worker.prewarm.ready', '', 'decode-worker', loadToken);
+    return;
+  }
+
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  if (message?.type === 'decodeReady') {
+    acceptDecodeFallbackResult(loadToken, message.body);
+    return;
+  }
+
+  if (message?.type === 'decodeError') {
+    rejectDecodeFallbackRequest(loadToken, message.body?.message || 'Embedded decode worker failed.');
+    renderMediaMetadata();
+    addDebugTimelineEvent('webview.decodeFallback.error', state.decodeFallbackError.message, 'webview', loadToken);
+    return;
+  }
+
+  if (message?.type === 'error') {
+    rejectDecodeFallbackRequest(loadToken, message.body?.message || 'Embedded decode worker failed.');
+    renderMediaMetadata();
+    addDebugTimelineEvent('webview.decodeFallback.error', state.decodeFallbackError.message, 'webview', loadToken);
+  }
+}
+
+function disposeDecodeWorker() {
+  if (state.decodeWorker) {
+    state.decodeWorker.terminate();
+    state.decodeWorker = null;
+  }
+
+  state.decodeWorkerReady = false;
+  state.decodeWorkerPrewarmed = false;
+
+  if (state.decodeWorkerBootstrapUrl) {
+    URL.revokeObjectURL(state.decodeWorkerBootstrapUrl);
+    state.decodeWorkerBootstrapUrl = null;
+  }
+}
+
+function requestDecodeFallback(loadToken, payload, reason, sourceBytes = null) {
   if (loadToken !== state.loadToken) {
     return Promise.reject(new Error('Decode fallback request is stale.'));
   }
@@ -1174,7 +1526,7 @@ function requestDecodeFallback(loadToken, payload, reason) {
     return Promise.reject(new Error(state.decodeFallbackError.message));
   }
 
-  if (!state.externalTools.canDecodeFallback) {
+  if (state.externalTools.resolved && !state.externalTools.canDecodeFallback) {
     return Promise.reject(new Error(state.externalTools.guidance || `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables decode fallback.`));
   }
 
@@ -1185,15 +1537,40 @@ function requestDecodeFallback(loadToken, payload, reason) {
     state.rejectDecodeFallback = reject;
   });
   renderMediaMetadata();
+  addDebugTimelineEvent('webview.decodeFallback.requested', reason, 'webview', loadToken);
 
-  vscode.postMessage({
-    type: 'requestDecodeFallback',
-    body: {
-      loadToken,
-      reason,
-      sourceUri: payload?.documentUri ?? payload?.sourceUri ?? '',
-    },
-  });
+  void createDecodeWorker()
+    .then((worker) => {
+      if (loadToken !== state.loadToken) {
+        return;
+      }
+
+      if (worker && sourceBytes instanceof ArrayBuffer) {
+        addDebugTimelineEvent('webview.decodeFallback.worker.requested', reason, 'webview', loadToken);
+        worker.postMessage({
+          type: 'decodeAudioData',
+          body: {
+            audioBytes: sourceBytes,
+            fileExtension: typeof payload?.fileExtension === 'string' && payload.fileExtension.length > 0
+              ? payload.fileExtension
+              : 'bin',
+            loadToken,
+          },
+        }, [sourceBytes]);
+        return;
+      }
+
+      addDebugTimelineEvent('webview.decodeFallback.host.requested', reason, 'webview', loadToken);
+      postHostDecodeFallbackRequest(loadToken, payload, reason);
+    })
+    .catch(() => {
+      if (loadToken !== state.loadToken) {
+        return;
+      }
+
+      addDebugTimelineEvent('webview.decodeFallback.host.requested', reason, 'webview', loadToken);
+      postHostDecodeFallbackRequest(loadToken, payload, reason);
+    });
 
   return state.decodeFallbackPromise;
 }
@@ -1204,6 +1581,7 @@ async function loadDecodedAudioSource(loadToken, payload) {
 
   try {
     setAnalysisStatus('Loading audio…');
+    addDebugTimelineEvent('webview.fetch.start', payload?.sourceUri || '', 'webview', loadToken);
 
     const response = await fetch(payload.sourceUri, { signal: controller.signal });
 
@@ -1211,7 +1589,15 @@ async function loadDecodedAudioSource(loadToken, payload) {
       throw new Error(`HTTP ${response.status}`);
     }
 
+    addDebugTimelineEvent(
+      'webview.fetch.response',
+      `status=${response.status} type=${response.headers.get('content-type') || 'n/a'}`,
+      'webview',
+      loadToken,
+    );
+
     let audioData = await response.arrayBuffer();
+    addDebugTimelineEvent('webview.fetch.arrayBuffer.ready', `bytes=${audioData.byteLength}`, 'webview', loadToken);
     let mimeType = resolvePlayableAudioMimeType(payload, response.headers.get('content-type'));
     let sourceKind = 'native';
 
@@ -1224,31 +1610,63 @@ async function loadDecodedAudioSource(loadToken, payload) {
     renderMediaMetadata();
 
     setAnalysisStatus('Decoding audio…');
+    addDebugTimelineEvent('webview.decode.start', mimeType || 'unknown', 'webview', loadToken);
 
     let decodedAudio;
 
     try {
       decodedAudio = await decodeAudioData(audioData);
+      addDebugTimelineEvent(
+        'webview.decode.done',
+        `channels=${decodedAudio.numberOfChannels} frames=${decodedAudio.length} rate=${decodedAudio.sampleRate}`,
+        'webview',
+        loadToken,
+      );
     } catch (nativeDecodeError) {
+      addDebugTimelineEvent(
+        'webview.decode.error',
+        nativeDecodeError instanceof Error ? nativeDecodeError.message : String(nativeDecodeError),
+        'webview',
+        loadToken,
+      );
       if (loadToken !== state.loadToken) {
         return;
       }
 
       setAnalysisStatus('Requesting ffmpeg decode fallback…');
-      const fallback = await requestDecodeFallback(loadToken, payload, 'analysis-decode-error');
+      const fallback = await requestDecodeFallback(loadToken, payload, 'analysis-decode-error', audioData);
 
       if (loadToken !== state.loadToken) {
         return;
       }
 
-      audioData = fallback.audioBuffer;
-      mimeType = fallback.mimeType;
       sourceKind = 'ffmpeg-fallback';
       setAnalysisSourceKind(sourceKind);
       state.playbackSourceKind = sourceKind;
       renderMediaMetadata();
+
+      if (fallback.kind === 'pcm') {
+        const playbackSession = createPlaybackSessionFromPcmFallback(fallback);
+        await initializePlaybackFromPreparedData(
+          loadToken,
+          payload,
+          createPlaybackAnalysisDataFromPlaybackSession(playbackSession),
+        );
+        clearDecodeFallbackCache();
+        return;
+      }
+
+      audioData = fallback.audioBuffer;
+      mimeType = fallback.mimeType;
       setAnalysisStatus('Decoding audio…');
+      addDebugTimelineEvent('webview.decode.start', mimeType || 'unknown', 'webview', loadToken);
       decodedAudio = await decodeAudioData(audioData);
+      addDebugTimelineEvent(
+        'webview.decode.done',
+        `channels=${decodedAudio.numberOfChannels} frames=${decodedAudio.length} rate=${decodedAudio.sampleRate}`,
+        'webview',
+        loadToken,
+      );
     }
 
     if (loadToken !== state.loadToken) {
@@ -1259,39 +1677,19 @@ async function loadDecodedAudioSource(loadToken, payload) {
     setAnalysisSourceKind(sourceKind);
     renderMediaMetadata();
 
-    const playbackSession = createPlaybackSession(decodedAudio);
-    state.playbackSession = playbackSession;
-    await state.audioTransport?.load({
-      audioBuffer: decodedAudio,
-      playbackSession,
-      workletModuleUrl: audioTransportProcessorScriptUri,
-    });
+    await initializeDecodedPlayback(loadToken, payload, decodedAudio);
     clearDecodeFallbackCache();
     audioData = new ArrayBuffer(0);
     mimeType = '';
-    state.playbackTransportKind = state.audioTransport?.getTransportKind?.() ?? state.playbackTransportKind;
-    state.playbackTransportError =
-      state.audioTransport?.getLastFallbackReason?.() ?? state.playbackTransportError;
-
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
-    ensureWaveformViewRange();
-    renderWaveformUi();
-    syncTransport();
-    if (state.playbackTransportKind === 'unavailable' && state.playbackTransportError) {
-      setAnalysisStatus(`Playback unavailable: ${state.playbackTransportError}`, true);
-    } else {
-      setAnalysisStatus('Playback ready');
-    }
-    scheduleDeferredAnalysis(loadToken, payload);
   } catch (error) {
     if (loadToken !== state.loadToken || controller.signal.aborted) {
       return;
     }
 
-    if (state.playbackSourceKind !== 'ffmpeg-fallback' && state.externalTools.canDecodeFallback) {
+    if (
+      state.playbackSourceKind !== 'ffmpeg-fallback'
+      && (state.externalTools.canDecodeFallback || !state.externalTools.resolved)
+    ) {
       try {
         setAnalysisStatus('Requesting ffmpeg decode fallback…');
         const fallback = await requestDecodeFallback(loadToken, payload, 'fetch-error');
@@ -1304,8 +1702,19 @@ async function loadDecodedAudioSource(loadToken, payload) {
         setAnalysisSourceKind('ffmpeg-fallback');
         state.playbackSourceKind = 'ffmpeg-fallback';
         renderMediaMetadata();
-        setAnalysisStatus('Decoding audio…');
 
+        if (fallback.kind === 'pcm') {
+          const playbackSession = createPlaybackSessionFromPcmFallback(fallback);
+          await initializePlaybackFromPreparedData(
+            loadToken,
+            payload,
+            createPlaybackAnalysisDataFromPlaybackSession(playbackSession),
+          );
+          clearDecodeFallbackCache();
+          return;
+        }
+
+        setAnalysisStatus('Decoding audio…');
         const decodedAudio = await decodeAudioData(fallback.audioBuffer);
 
         if (loadToken !== state.loadToken) {
@@ -1315,31 +1724,8 @@ async function loadDecodedAudioSource(loadToken, payload) {
         state.playbackSourceKind = 'ffmpeg-fallback';
         setAnalysisSourceKind('ffmpeg-fallback');
         renderMediaMetadata();
-        const playbackSession = createPlaybackSession(decodedAudio);
-        state.playbackSession = playbackSession;
-        await state.audioTransport?.load({
-          audioBuffer: decodedAudio,
-          playbackSession,
-          workletModuleUrl: audioTransportProcessorScriptUri,
-        });
+        await initializeDecodedPlayback(loadToken, payload, decodedAudio);
         clearDecodeFallbackCache();
-        state.playbackTransportKind = state.audioTransport?.getTransportKind?.() ?? state.playbackTransportKind;
-        state.playbackTransportError =
-          state.audioTransport?.getLastFallbackReason?.() ?? state.playbackTransportError;
-
-        if (loadToken !== state.loadToken) {
-          return;
-        }
-
-        ensureWaveformViewRange();
-        renderWaveformUi();
-        syncTransport();
-        if (state.playbackTransportKind === 'unavailable' && state.playbackTransportError) {
-          setAnalysisStatus(`Playback unavailable: ${state.playbackTransportError}`, true);
-        } else {
-          setAnalysisStatus('Playback ready');
-        }
-        scheduleDeferredAnalysis(loadToken, payload);
         return;
       } catch (fallbackError) {
         if (loadToken !== state.loadToken) {
@@ -1398,6 +1784,7 @@ async function initializeWaveformSurface(loadToken) {
       width,
     },
   }, [offscreenCanvas]);
+  addDebugTimelineEvent('webview.waveformSurface.init.done', `${width}x${height} scale=${WAVEFORM_RENDER_SCALE}`, 'webview', loadToken);
 }
 
 async function initializeSpectrogramSurface(loadToken) {
@@ -1434,83 +1821,28 @@ async function initializeSpectrogramSurface(loadToken) {
       pixelWidth,
     },
   }, [offscreenCanvas]);
+  addDebugTimelineEvent('webview.spectrogramSurface.init.done', `${pixelWidth}x${pixelHeight}`, 'webview', loadToken);
 }
 
 function cancelDeferredAnalysis() {
-  if (state.analysisIdleCallbackId !== null && typeof window.cancelIdleCallback === 'function') {
-    window.cancelIdleCallback(state.analysisIdleCallbackId);
-  }
-
-  if (state.analysisTimeoutId !== null) {
-    window.clearTimeout(state.analysisTimeoutId);
-  }
-
-  state.analysisIdleCallbackId = null;
-  state.analysisTimeoutId = null;
-  state.analysisQueuedForLoadToken = 0;
+  state.analysisStartedForLoadToken = 0;
 }
 
-function cancelPendingWaveformPyramidBuild() {
-  if (state.waveformPyramidFrame) {
-    window.cancelAnimationFrame(state.waveformPyramidFrame);
-    state.waveformPyramidFrame = 0;
-  }
-}
-
-function scheduleWaveformPyramidBuild(loadToken, worker, sessionVersion) {
-  cancelPendingWaveformPyramidBuild();
-  state.waveformPyramidFrame = window.requestAnimationFrame(() => {
-    state.waveformPyramidFrame = 0;
-
-    if (
-      loadToken !== state.loadToken
-      || !state.waveformWorker
-      || state.waveformWorker !== worker
-      || sessionVersion !== state.sessionVersion
-    ) {
-      return;
-    }
-
-    worker.postMessage({ type: 'buildWaveformPyramid' });
-  });
-}
-
-function scheduleDeferredAnalysis(loadToken, payload) {
+function scheduleDeferredAnalysis(loadToken, payload, monoSamples = null) {
   if (
     loadToken !== state.loadToken
     || state.analysisStartedForLoadToken === loadToken
-    || state.analysisQueuedForLoadToken === loadToken
   ) {
     return;
   }
 
   cancelDeferredAnalysis();
-  state.analysisQueuedForLoadToken = loadToken;
-  setAnalysisStatus('Queued');
-
-  const startDeferredAnalysis = () => {
-    if (loadToken !== state.loadToken || state.analysisStartedForLoadToken === loadToken) {
-      return;
-    }
-
-    state.analysisIdleCallbackId = null;
-    state.analysisTimeoutId = null;
-    state.analysisQueuedForLoadToken = 0;
-    state.analysisStartedForLoadToken = loadToken;
-    void startAnalysis(loadToken, payload);
-  };
-
-  if (typeof window.requestIdleCallback === 'function') {
-    state.analysisIdleCallbackId = window.requestIdleCallback(startDeferredAnalysis, {
-      timeout: ANALYSIS_IDLE_TIMEOUT_MS,
-    });
-    return;
-  }
-
-  state.analysisTimeoutId = window.setTimeout(startDeferredAnalysis, ANALYSIS_FALLBACK_DELAY_MS);
+  state.analysisStartedForLoadToken = loadToken;
+  addDebugTimelineEvent('webview.analysis.start.requested', '', 'webview', loadToken);
+  void startAnalysis(loadToken, payload, monoSamples);
 }
 
-async function startAnalysis(loadToken, payload) {
+async function startAnalysis(loadToken, payload, monoSamplesOverride = null) {
   if (!analysisWorkerScriptUri || !waveformWorkerScriptUri) {
     setLoudnessSummaryUnavailable('Analysis worker is unavailable.');
     setAnalysisStatus('Analysis worker is unavailable.', true);
@@ -1518,6 +1850,7 @@ async function startAnalysis(loadToken, payload) {
   }
 
   try {
+    addDebugTimelineEvent('webview.analysis.start', '', 'webview', loadToken);
     const playbackSession = state.playbackSession;
 
     if (!playbackSession) {
@@ -1542,15 +1875,18 @@ async function startAnalysis(loadToken, payload) {
       state.analysisRuntimeReadyPromise,
       state.waveformRuntimeReadyPromise,
     ]);
+    addDebugTimelineEvent('webview.analysis.workers.ready', '', 'webview', loadToken);
 
     if (loadToken !== state.loadToken) {
       return;
     }
 
-    const monoSamples = downmixPlaybackSessionToMono(playbackSession);
+    const monoSamples = monoSamplesOverride instanceof Float32Array
+      ? monoSamplesOverride
+      : state.waveformSamples;
 
-    if (loadToken !== state.loadToken) {
-      return;
+    if (!(monoSamples instanceof Float32Array) || monoSamples.length === 0) {
+      throw new Error('Waveform samples are unavailable.');
     }
 
     state.waveformSamples = monoSamples;
@@ -1564,23 +1900,8 @@ async function startAnalysis(loadToken, payload) {
       sampleRate: playbackSession.sourceSampleRate,
     });
 
-    ensureWaveformViewRange();
-    renderWaveformUi();
-    renderSpectrogramScale();
-    scheduleSpectrogramRender();
-
-    await Promise.all([
-      state.waveformSurfaceReadyPromise,
-      state.spectrogramSurfaceReadyPromise,
-    ]);
-
-    if (loadToken !== state.loadToken) {
-      return;
-    }
-
     state.sessionVersion += 1;
     const sessionVersion = state.sessionVersion;
-    setAnalysisStatus('Queued');
     const waveformWorkerSamples = monoSamples.slice();
     const analysisWorkerSamples = monoSamples.slice();
 
@@ -1595,8 +1916,9 @@ async function startAnalysis(loadToken, payload) {
         sessionVersion,
       },
     }, [waveformWorkerSamples.buffer]);
-    void syncWaveformView({ force: true });
-    scheduleWaveformPyramidBuild(loadToken, waveformWorker, sessionVersion);
+    addDebugTimelineEvent('webview.waveform.attach.sent', `samples=${waveformWorkerSamples.length}`, 'webview', loadToken);
+    waveformWorker.postMessage({ type: 'buildWaveformPyramid' });
+    addDebugTimelineEvent('webview.waveform.pyramid.requested', '', 'webview', loadToken);
 
     analysisWorker.postMessage({
       type: 'attachAudioSession',
@@ -1609,7 +1931,21 @@ async function startAnalysis(loadToken, payload) {
         sessionVersion,
       },
     }, [analysisWorkerSamples.buffer]);
+    addDebugTimelineEvent('webview.analysis.attach.sent', `samples=${analysisWorkerSamples.length}`, 'webview', loadToken);
 
+    await Promise.all([
+      state.waveformSurfaceReadyPromise,
+      state.spectrogramSurfaceReadyPromise,
+    ]);
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    ensureWaveformViewRange();
+    renderWaveformUi();
+    renderSpectrogramScale();
+    void syncWaveformView({ force: true });
     requestOverviewSpectrogram({ force: true });
     scheduleSpectrogramRender({ force: true });
   } catch (error) {
@@ -1618,6 +1954,7 @@ async function startAnalysis(loadToken, payload) {
     }
 
     const message = error instanceof Error ? error.message : String(error);
+    state.analysisStartedForLoadToken = 0;
     setLoudnessSummaryUnavailable(message);
     setAnalysisStatus(`Analysis unavailable: ${message}`, true);
   }
@@ -1699,7 +2036,16 @@ function handleAnalysisWorkerMessage(loadToken, message) {
     return;
   }
 
+  if (message?.type === 'debugTimelineEvent') {
+    recordDebugTimelineEvent({
+      ...message.body?.event,
+      loadToken,
+    });
+    return;
+  }
+
   if (message?.type === 'runtimeReady') {
+    addDebugTimelineEvent('analysis-worker.runtime.ready', '', 'analysis-worker', loadToken);
     state.resolveAnalysisRuntimeReady?.();
     state.resolveAnalysisRuntimeReady = null;
     return;
@@ -1712,6 +2058,7 @@ function handleAnalysisWorkerMessage(loadToken, message) {
   if (message?.type === 'analysisInitialized') {
     const { body } = message;
 
+    addDebugTimelineEvent('analysis-worker.analysisInitialized', body.runtimeVariant || '', 'analysis-worker', loadToken);
     state.analysis.initialized = true;
     state.analysis.runtimeVariant = body.runtimeVariant;
     state.analysis.sampleRate = body.sampleRate;
@@ -1826,22 +2173,43 @@ function handleWaveformWorkerMessage(loadToken, message) {
     return;
   }
 
+  if (message?.type === 'debugTimelineEvent') {
+    recordDebugTimelineEvent({
+      ...message.body?.event,
+      loadToken,
+    });
+    return;
+  }
+
   if (message?.type === 'runtimeReady') {
+    addDebugTimelineEvent('waveform-worker.runtime.ready', '', 'waveform-worker', loadToken);
     state.resolveWaveformRuntimeReady?.();
     state.resolveWaveformRuntimeReady = null;
     return;
   }
 
   if (message?.type === 'analysisInitialized') {
+    addDebugTimelineEvent('waveform-worker.analysisInitialized', '', 'waveform-worker', loadToken);
     return;
   }
 
   if (message?.type === 'waveformPyramidReady') {
-    void syncWaveformView({ force: true });
+    addDebugTimelineEvent('webview.waveformPyramidReady.received', '', 'webview', loadToken);
+    if (state.waveformRenderWidth > 0 && state.waveformRenderRange.end > state.waveformRenderRange.start) {
+      void syncWaveformView();
+    } else {
+      void syncWaveformView({ force: true });
+    }
     return;
   }
 
   if (message?.type === 'waveformReady') {
+    addDebugTimelineEvent(
+      'webview.waveformReady.received',
+      `generation=${message.body?.generation ?? 'n/a'}`,
+      'webview',
+      loadToken,
+    );
     handleWaveformReady(message.body);
     return;
   }
@@ -2126,6 +2494,11 @@ function handleWaveformReady(body) {
   state.waveformRawSamplePlotMode = Boolean(body.rawSamplePlotMode);
   state.waveformPendingRequest = null;
   applyWaveformCanvasTransform();
+  addDebugTimelineEvent(
+    'webview.waveform.display.commit',
+    `generation=${body.generation ?? 'n/a'} width=${width}`,
+    'webview',
+  );
 
   if (isSmoothFollowPlaybackActive()) {
     renderWaveformAxis({
@@ -2715,6 +3088,11 @@ async function syncWaveformView({ force = false } = {}) {
     visibleSpan,
     width: renderWidth,
   };
+  addDebugTimelineEvent(
+    'webview.waveform.render.requested',
+    `generation=${state.waveformRequestGeneration} width=${renderWidth} force=${force ? '1' : '0'}`,
+    'webview',
+  );
   state.waveformWorker.postMessage({
     type: 'renderWaveformView',
     body: {
@@ -3594,6 +3972,10 @@ function handleSharedViewportWheel(event, targetElement) {
 }
 
 function attachUiEvents() {
+  elements.debugTimelineToggle.addEventListener('click', () => {
+    setDebugTimelineCollapsed(!state.debugTimelineCollapsed);
+  });
+
   elements.mediaMetadataPanel?.addEventListener('mouseenter', () => {
     setMediaMetadataDetailOpen(true);
   });
@@ -3909,8 +4291,6 @@ function destroySession() {
   state.spectrogramRequestFrame = 0;
 
   cancelDeferredAnalysis();
-  cancelPendingWaveformPyramidBuild();
-
   if (state.sourceFetchController) {
     state.sourceFetchController.abort();
     state.sourceFetchController = null;
@@ -3959,7 +4339,6 @@ function destroySession() {
   state.loopHandleDrag = null;
   state.loopRange = null;
   state.analysisStartedForLoadToken = 0;
-  state.analysisQueuedForLoadToken = 0;
   state.sessionVersion = 0;
   state.analysis = null;
   state.loudness = createLoudnessSummaryState('idle');
@@ -4113,10 +4492,75 @@ async function decodeAudioData(arrayBuffer) {
   }
 }
 
-function downmixPlaybackSessionToMono(playbackSession: PlaybackSession): Float32Array {
+async function initializeDecodedPlayback(loadToken, payload, decodedAudio) {
+  await initializePlaybackFromPreparedData(loadToken, payload, createPlaybackAnalysisData(decodedAudio));
+}
+
+async function initializePlaybackFromPreparedData(loadToken, payload, preparedPlaybackData) {
+  addDebugTimelineEvent('webview.initializeDecodedPlayback.start', '', 'webview', loadToken);
+  const { monoSamples, playbackSession } = preparedPlaybackData;
+  state.playbackSession = playbackSession;
+  state.waveformSamples = monoSamples;
+
+  scheduleDeferredAnalysis(loadToken, payload, monoSamples);
+
+  await state.audioTransport?.load({
+    playbackSession,
+    workletModuleUrl: audioTransportProcessorScriptUri,
+  });
+
+  state.playbackTransportKind = state.audioTransport?.getTransportKind?.() ?? state.playbackTransportKind;
+  state.playbackTransportError =
+    state.audioTransport?.getLastFallbackReason?.() ?? state.playbackTransportError;
+
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  ensureWaveformViewRange();
+  renderWaveformUi();
+  syncTransport();
+  if (state.playbackTransportKind === 'unavailable' && state.playbackTransportError) {
+    setAnalysisStatus(`Playback unavailable: ${state.playbackTransportError}`, true);
+  } else {
+    setAnalysisStatus('Playback ready');
+  }
+  addDebugTimelineEvent('webview.initializeDecodedPlayback.done', `mono=${monoSamples.length}`, 'webview', loadToken);
+}
+
+function createPlaybackAnalysisData(audioBuffer: AudioBuffer): { monoSamples: Float32Array; playbackSession: PlaybackSession } {
+  const channelCount = Math.max(1, audioBuffer.numberOfChannels);
+  const sampleCount = Math.max(0, audioBuffer.length);
+  const channelBuffers = [];
+  const mono = new Float32Array(sampleCount);
+  const channelWeight = 1 / channelCount;
+
+  for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+    const channelData = audioBuffer.getChannelData(channelIndex);
+    channelBuffers.push(channelData.slice().buffer);
+
+    for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+      mono[sampleIndex] += (channelData[sampleIndex] ?? 0) * channelWeight;
+    }
+  }
+
+  return {
+    monoSamples: mono,
+    playbackSession: {
+      channelBuffers,
+      durationSeconds: audioBuffer.duration,
+      numberOfChannels: audioBuffer.numberOfChannels,
+      sourceLength: audioBuffer.length,
+      sourceSampleRate: audioBuffer.sampleRate,
+    },
+  };
+}
+
+function createPlaybackAnalysisDataFromPlaybackSession(playbackSession: PlaybackSession): { monoSamples: Float32Array; playbackSession: PlaybackSession } {
   const channelCount = Math.max(1, playbackSession.numberOfChannels);
   const sampleCount = Math.max(0, playbackSession.sourceLength);
   const mono = new Float32Array(sampleCount);
+  const channelWeight = 1 / channelCount;
 
   for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
     const channelBuffer = playbackSession.channelBuffers[channelIndex];
@@ -4128,27 +4572,23 @@ function downmixPlaybackSessionToMono(playbackSession: PlaybackSession): Float32
     const channelData = new Float32Array(channelBuffer);
 
     for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
-      mono[sampleIndex] += (channelData[sampleIndex] ?? 0) / channelCount;
+      mono[sampleIndex] += (channelData[sampleIndex] ?? 0) * channelWeight;
     }
   }
 
-  return mono;
+  return {
+    monoSamples: mono,
+    playbackSession,
+  };
 }
 
-function createPlaybackSession(audioBuffer: AudioBuffer): PlaybackSession {
-  const channelBuffers = [];
-
-  for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
-    const sourceChannelData = audioBuffer.getChannelData(channelIndex);
-    channelBuffers.push(sourceChannelData.slice().buffer);
-  }
-
+function createPlaybackSessionFromPcmFallback(fallback) {
   return {
-    channelBuffers,
-    durationSeconds: audioBuffer.duration,
-    numberOfChannels: audioBuffer.numberOfChannels,
-    sourceLength: audioBuffer.length,
-    sourceSampleRate: audioBuffer.sampleRate,
+    channelBuffers: fallback.channelBuffers,
+    durationSeconds: fallback.sampleRate > 0 ? fallback.frameCount / fallback.sampleRate : 0,
+    numberOfChannels: fallback.numberOfChannels,
+    sourceLength: fallback.frameCount,
+    sourceSampleRate: fallback.sampleRate,
   };
 }
 

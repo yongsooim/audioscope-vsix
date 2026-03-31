@@ -1362,6 +1362,12 @@ body {
     width: 44px;
   }
 
+  .debug-timeline-panel {
+    right: 10px;
+    bottom: 78px;
+    width: min(320px, calc(100vw - 20px));
+  }
+
 }
 
 .status-overlay {
@@ -1385,4 +1391,117 @@ body {
 
 .status-overlay.error {
   color: var(--status-error);
+}
+
+.debug-timeline-panel {
+  position: fixed;
+  right: 14px;
+  bottom: 88px;
+  z-index: 26;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  width: min(360px, calc(100vw - 28px));
+  max-height: min(42vh, 360px);
+  min-height: 0;
+  padding: 10px 12px;
+  overflow: hidden;
+  border: 1px solid rgba(191, 219, 254, 0.16);
+  border-radius: 12px;
+  background: rgba(4, 8, 18, 0.92);
+  box-shadow:
+    0 20px 46px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(10px);
+}
+
+.debug-timeline-panel[data-collapsed="true"] {
+  max-height: none;
+}
+
+.debug-timeline-header {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.debug-timeline-summary {
+  min-width: 0;
+  color: rgba(239, 246, 255, 0.94);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.debug-timeline-toggle {
+  flex: 0 0 auto;
+  min-width: 52px;
+  padding: 4px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.9);
+  color: rgba(191, 219, 254, 0.88);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.debug-timeline-toggle:hover,
+.debug-timeline-toggle:focus-visible {
+  border-color: rgba(191, 219, 254, 0.42);
+  color: rgba(239, 246, 255, 0.96);
+}
+
+.debug-timeline-list {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  overscroll-behavior: contain;
+}
+
+.debug-timeline-panel[data-collapsed="true"] .debug-timeline-list {
+  display: none;
+}
+
+.debug-timeline-row {
+  display: grid;
+  grid-template-columns: 70px 74px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  color: rgba(226, 236, 255, 0.88);
+  font-size: 10px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.debug-timeline-delta {
+  color: rgba(125, 211, 252, 0.92);
+  font-weight: 700;
+}
+
+.debug-timeline-source {
+  color: rgba(191, 219, 254, 0.74);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.debug-timeline-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.debug-timeline-detail {
+  color: rgba(148, 163, 184, 0.88);
+}
+
+@media (max-width: 720px) {
+  .debug-timeline-panel {
+    right: 10px;
+    bottom: 78px;
+    width: min(320px, calc(100vw - 20px));
+  }
 }

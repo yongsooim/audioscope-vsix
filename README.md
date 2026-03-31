@@ -84,14 +84,20 @@ Wave Scope contributes a custom editor for:
 - Mouse wheel or trackpad: zoom or pan the visible range
 - Drag the center splitter: resize waveform and spectrogram panels
 
-## Optional ffmpeg Integration
+## Embedded ffmpeg Tools
 
-Wave Scope works out of the box for formats the runtime can decode natively. Installing `ffmpeg` and `ffprobe` improves the experience for local filesystem files by enabling:
+Wave Scope now bundles embedded FFmpeg WebAssembly tools for:
 
-- richer metadata via `ffprobe`
+- richer metadata via embedded `ffprobe`
 - decode fallback for files the runtime cannot open directly
+- probing files even when the webview cannot decode them natively
 
-Quick install examples:
+If you prefer a system `ffmpeg` / `ffprobe` install instead, set:
+
+- `waveScope.ffmpegPath`
+- `waveScope.ffprobePath`
+
+Quick install examples for external overrides:
 
 ```bash
 # macOS (Homebrew)
@@ -105,21 +111,16 @@ winget install --id Gyan.FFmpeg --exact
 
 Other platforms: [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 
-If the binaries are not on `PATH`, configure them with:
-
-- `waveScope.ffmpegPath`
-- `waveScope.ffprobePath`
-
 ## Requirements
 
 - VS Code `1.100.0` or later
-- Optional but recommended: `ffmpeg` CLI tools including `ffprobe`
+- Development builds of the embedded media tools require Emscripten (`emcc`, `emconfigure`, `emmake`)
 
 ## Settings
 
 - `waveScope.spectrogramQuality`: choose `balanced`, `high`, or `max`
-- `waveScope.ffmpegPath`: custom `ffmpeg` executable path or command name
-- `waveScope.ffprobePath`: custom `ffprobe` executable path or command name
+- `waveScope.ffmpegPath`: optional external `ffmpeg` executable path or command name
+- `waveScope.ffprobePath`: optional external `ffprobe` executable path or command name
 - `waveScope.openSampleOnStartupInDevelopment`: open the bundled sample file automatically in development mode
 
 ## Notes

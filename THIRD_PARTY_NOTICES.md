@@ -3,6 +3,20 @@
 Wave Scope distributes WebAssembly binaries that are built from the following
 third-party components.
 
+## FFmpeg
+
+Wave Scope distributes embedded FFmpeg WebAssembly binaries built from FFmpeg.
+The FFmpeg source is included as the `wasm/third_party/ffmpeg` submodule.
+
+Copyright (c) the FFmpeg developers
+
+FFmpeg is licensed under the GNU Lesser General Public License, version 2.1
+or later, for the configuration distributed by this project. The relevant
+license text is available in the FFmpeg source tree under:
+
+- `wasm/third_party/ffmpeg/COPYING.LGPLv2.1`
+- `wasm/third_party/ffmpeg/COPYING.LGPLv3`
+
 ## Signalsmith Stretch Web
 
 Wave Scope vendors `src-webview/vendor/SignalsmithStretch.mjs` from
