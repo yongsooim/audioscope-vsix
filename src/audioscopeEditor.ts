@@ -452,17 +452,29 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         <button id="seek-backward" class="transport-button" type="button" disabled>-5s</button>
         <button id="play-toggle" class="play-toggle" type="button" disabled>Play</button>
         <button id="seek-forward" class="transport-button" type="button" disabled>+5s</button>
-        <label class="transport-rate" for="playback-rate-select">
+        <div class="transport-rate" role="group" aria-label="Playback speed">
           <span class="transport-rate-label">Speed</span>
-          <select id="playback-rate-select" class="transport-rate-select" aria-label="Playback speed" disabled>
-            <option value="0.5">0.5x</option>
-            <option value="0.75">0.75x</option>
-            <option value="1" selected>1x</option>
-            <option value="1.25">1.25x</option>
-            <option value="1.5">1.5x</option>
-            <option value="2">2x</option>
-          </select>
-        </label>
+          <div id="playback-rate-control" class="transport-rate-control">
+            <button
+              id="playback-rate-button"
+              class="transport-rate-button"
+              type="button"
+              aria-haspopup="listbox"
+              aria-controls="playback-rate-menu"
+              aria-expanded="false"
+              aria-label="Playback speed"
+              disabled
+            >1x</button>
+            <select id="playback-rate-select" class="transport-rate-select" aria-label="Playback speed" disabled tabindex="-1">
+              <option value="0.5">0.5x</option>
+              <option value="0.75">0.75x</option>
+              <option value="1" selected>1x</option>
+              <option value="1.25">1.25x</option>
+              <option value="1.5">1.5x</option>
+              <option value="2">2x</option>
+            </select>
+          </div>
+        </div>
         <div id="time-readout" class="time-readout">0:00 / --:--</div>
         <div id="waveform-overview" class="timeline-shell">
           <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>
@@ -489,6 +501,9 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         </div>
         <div id="analysis-status" class="analysis-status">Preparing audioscope…</div>
       </footer>
+      <div id="playback-rate-layer" class="transport-rate-layer" hidden>
+        <div id="playback-rate-menu" class="transport-rate-menu" role="listbox" aria-label="Playback speed"></div>
+      </div>
       <div id="status" class="status-overlay" hidden></div>
       <aside id="debug-timeline-panel" class="debug-timeline-panel" aria-label="audioscope debug timeline" data-collapsed="false">
         <div class="debug-timeline-header">

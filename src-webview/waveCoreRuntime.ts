@@ -52,12 +52,12 @@ export interface WaveCoreRuntime {
 
 const wasmCandidates = [
   {
-    url: new URL('../wasm/wave_core_simd.wasm', import.meta.url),
-    variant: 'wave-core-wasm-simd',
+    url: new URL('../wasm/wasm_core_simd.wasm', import.meta.url),
+    variant: 'wasm-core-wasm-simd',
   },
   {
-    url: new URL('../wasm/wave_core_fallback.wasm', import.meta.url),
-    variant: 'wave-core-wasm-fallback',
+    url: new URL('../wasm/wasm_core_fallback.wasm', import.meta.url),
+    variant: 'wasm-core-wasm-fallback',
   },
 ];
 

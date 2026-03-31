@@ -6,7 +6,7 @@ third-party components.
 ## FFmpeg
 
 audioscope distributes embedded FFmpeg WebAssembly binaries built from FFmpeg.
-The FFmpeg source is included as the `wasm/third_party/ffmpeg` submodule.
+The FFmpeg source is included as the `src-wasm/third_party/ffmpeg` submodule.
 The exact bundled revision and rebuild notes for this release are documented in
 `FFMPEG_SOURCE.md`.
 
@@ -16,8 +16,8 @@ FFmpeg is licensed under the GNU Lesser General Public License, version 2.1
 or later, for the configuration distributed by this project. The relevant
 license text is available in the FFmpeg source tree under:
 
-- `wasm/third_party/ffmpeg/COPYING.LGPLv2.1`
-- `wasm/third_party/ffmpeg/COPYING.LGPLv3`
+- `src-wasm/third_party/ffmpeg/COPYING.LGPLv2.1`
+- `src-wasm/third_party/ffmpeg/COPYING.LGPLv3`
 
 ## Signalsmith Stretch Web
 
@@ -46,7 +46,7 @@ SOFTWARE.
 
 ## PFFFT / FFTPACK
 
-Files in `wasm/third_party/pffft` are based on PFFFT by Julien Pommier and
+Files in `src-wasm/third_party/pffft` are based on PFFFT by Julien Pommier and
 FFTPACK code from NCAR/UCAR.
 
 Copyright (c) 2013 Julien Pommier
@@ -80,7 +80,7 @@ SOFTWARE.
 
 ## libebur128
 
-Files in `wasm/third_party/libebur128` are from libebur128 by Jan Kokemuller.
+Files in `src-wasm/third_party/libebur128` are from libebur128 by Jan Kokemuller.
 
 Copyright (c) 2011 Jan Kokemuller
 

@@ -78,6 +78,7 @@ audioscope contributes a custom editor for:
 
 - `Space`: play or pause
 - `Left Arrow` / `Right Arrow`: seek backward or forward by 5 seconds
+- `F` / `f`: toggle follow playback
 - `-` / `=`: zoom out or zoom in
 - Playback speed menu: switch from `0.5x` to `2x`
 - Click on the waveform or spectrogram: seek to that point
@@ -97,7 +98,7 @@ audioscope now bundles embedded FFmpeg WebAssembly tools for:
 
 audioscope no longer depends on a system `ffmpeg` or `ffprobe` install at runtime.
 
-For the exact FFmpeg revision, wrapper sources, and rebuild notes used by the bundled WebAssembly tools, see [FFMPEG_SOURCE.md](./FFMPEG_SOURCE.md).
+For the bundled FFmpeg revision and rebuild notes used by the embedded media tools, see [FFMPEG_SOURCE.md](./FFMPEG_SOURCE.md).
 
 ## Requirements
 
@@ -140,15 +141,9 @@ In development mode, `exampleFiles/sample-tone.wav` opens automatically in `audi
 Before publishing a VSIX, run:
 
 ```bash
-bun run check:release
+bun run compile
 npx @vscode/vsce package
 ```
-
-`bun run check:release` rebuilds the extension and verifies that:
-
-- required runtime modules are included by `package.json#files`
-- required webview, WASM, and embedded media artifacts exist
-- release docs such as `CHANGELOG.md`, `SUPPORT.md`, and `FFMPEG_SOURCE.md` are packaged
 
 ## Acknowledgements
 

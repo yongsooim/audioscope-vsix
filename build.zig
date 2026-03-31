@@ -23,23 +23,23 @@ pub fn build(b: *std.Build) void {
     });
 
     const update_artifacts = b.addUpdateSourceFiles();
-    const wave_core_step = b.step("wave-core-artifacts", "Build wave core wasm artifacts into dist/wasm/");
+    const wasm_core_step = b.step("wasm-core-artifacts", "Build wasm core artifacts into dist/wasm/");
 
     const simd_artifact = addWaveCoreArtifact(b, .{
-        .artifact_name = "wave_core_simd",
+        .artifact_name = "wasm_core_simd",
         .pffft_flags = &.{ "-msimd128" },
         .target = simd_target,
     }, optimize);
-    update_artifacts.addCopyFileToSource(simd_artifact.getEmittedBin(), "dist/wasm/wave_core_simd.wasm");
+    update_artifacts.addCopyFileToSource(simd_artifact.getEmittedBin(), "dist/wasm/wasm_core_simd.wasm");
 
     const fallback_artifact = addWaveCoreArtifact(b, .{
-        .artifact_name = "wave_core_fallback",
+        .artifact_name = "wasm_core_fallback",
         .pffft_flags = &.{ "-DPFFFT_SIMD_DISABLE=1" },
         .target = fallback_target,
     }, optimize);
-    update_artifacts.addCopyFileToSource(fallback_artifact.getEmittedBin(), "dist/wasm/wave_core_fallback.wasm");
+    update_artifacts.addCopyFileToSource(fallback_artifact.getEmittedBin(), "dist/wasm/wasm_core_fallback.wasm");
 
-    wave_core_step.dependOn(&update_artifacts.step);
+    wasm_core_step.dependOn(&update_artifacts.step);
 }
 
 fn addWaveCoreArtifact(
@@ -48,22 +48,22 @@ fn addWaveCoreArtifact(
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Step.Compile {
     const root_module = b.createModule(.{
-        .root_source_file = b.path("wasm/wave_core.zig"),
+        .root_source_file = b.path("src-wasm/wasm_core.zig"),
         .target = variant.target,
         .optimize = optimize,
         .strip = true,
     });
 
-    root_module.addIncludePath(b.path("wasm/freestanding/include"));
-    root_module.addIncludePath(b.path("wasm/third_party/pffft"));
-    root_module.addIncludePath(b.path("wasm/third_party/libebur128/ebur128"));
+    root_module.addIncludePath(b.path("src-wasm/freestanding/include"));
+    root_module.addIncludePath(b.path("src-wasm/third_party/pffft"));
+    root_module.addIncludePath(b.path("src-wasm/third_party/libebur128/ebur128"));
 
     root_module.addCSourceFile(.{
-        .file = b.path("wasm/third_party/pffft/pffft.c"),
+        .file = b.path("src-wasm/third_party/pffft/pffft.c"),
         .flags = buildCFlags(b, variant.pffft_flags),
     });
     root_module.addCSourceFile(.{
-        .file = b.path("wasm/third_party/libebur128/ebur128/ebur128.c"),
+        .file = b.path("src-wasm/third_party/libebur128/ebur128/ebur128.c"),
         .flags = buildCFlags(b, &.{}),
     });
 

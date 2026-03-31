@@ -6,11 +6,11 @@
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yongsooim/audioscope-vsix.git"
+    "url": "https://github.com/yongsooim/wave-scope-vsix.git"
   },
-  "homepage": "https://github.com/yongsooim/audioscope-vsix#readme",
+  "homepage": "https://github.com/yongsooim/wave-scope-vsix#readme",
   "bugs": {
-    "url": "https://github.com/yongsooim/audioscope-vsix/issues"
+    "url": "https://github.com/yongsooim/wave-scope-vsix/issues"
   },
   "license": "MIT",
   "icon": "images/icon.png",
@@ -43,7 +43,6 @@
     "images/*.png",
     "README.md",
     "CHANGELOG.md",
-    "SUPPORT.md",
     "FFMPEG_SOURCE.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
@@ -133,12 +132,11 @@
   },
   "scripts": {
     "vscode:prepublish": "bun run compile",
-    "check:release": "bun run compile && node ./scripts/check-release.mts",
     "clean": "node -e \"const fs=require('node:fs'); for (const dir of ['dist','out']) fs.rmSync(dir,{recursive:true,force:true});\"",
     "build:embedded-media-tools": "tsx ./scripts/build-embedded-media-tools.mts",
-    "build:wave-core": "zig build wave-core-artifacts",
+    "build:wasm-core": "zig build wasm-core-artifacts",
     "build:webview": "tsx ./scripts/build-webview.mts",
-    "compile": "bun run clean && bun run build:embedded-media-tools && bun run build:wave-core && bun run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
+    "compile": "bun run clean && bun run build:embedded-media-tools && bun run build:wasm-core && bun run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
     "watch": "tsc -w -p ./"
   },
   "devDependencies": {
