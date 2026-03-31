@@ -148,6 +148,10 @@ const elements = {
   seekBackward: requireElement<HTMLButtonElement>('seek-backward'),
   playToggle: requireElement<HTMLButtonElement>('play-toggle'),
   seekForward: requireElement<HTMLButtonElement>('seek-forward'),
+  playbackRateControl: requireElement<HTMLElement>('playback-rate-control'),
+  playbackRateButton: requireElement<HTMLButtonElement>('playback-rate-button'),
+  playbackRateLayer: requireElement<HTMLElement>('playback-rate-layer'),
+  playbackRateMenu: requireElement<HTMLElement>('playback-rate-menu'),
   playbackRateSelect: requireElement<HTMLSelectElement>('playback-rate-select'),
   timeline: requireElement<HTMLInputElement>('timeline'),
   timelineHoverTooltip: requireElement<HTMLElement>('timeline-hover-tooltip'),
@@ -181,6 +185,7 @@ const state = {
   playbackLatencyCompensationApplied: false,
   playbackLatencyEstimateSeconds: 0,
   playbackRate: 1,
+  playbackRateMenuOpen: false,
   analysisSourceKind: 'native',
   decodeFallbackLoadToken: 0,
   decodeFallbackPromise: null,
@@ -416,6 +421,7 @@ if (
   setFatalStatus('OffscreenCanvas is required for audioscope.');
 } else {
   initializeKeyboardFocus();
+  initializePlaybackRateControl();
   state.followPlayback = elements.waveFollow.checked;
   attachUiEvents();
   applyViewportSplit(true);
@@ -572,6 +578,187 @@ function normalizePlaybackRateSelection(value) {
   }
 
   return numericValue;
+}
+
+function getPlaybackRateOptionButtons() {
+  return Array.from(elements.playbackRateMenu.querySelectorAll<HTMLButtonElement>('.transport-rate-option'));
+}
+
+function getPlaybackRateLabel(value) {
+  const normalizedValue = String(normalizePlaybackRateSelection(value));
+  const selectedOption = Array.from(elements.playbackRateSelect.options).find((option) => option.value === normalizedValue);
+  return selectedOption?.textContent?.trim() || `${normalizedValue}x`;
+}
+
+function syncPlaybackRateControl() {
+  const normalizedValue = String(normalizePlaybackRateSelection(state.playbackRate));
+  const buttonLabel = getPlaybackRateLabel(normalizedValue);
+
+  elements.playbackRateButton.textContent = buttonLabel;
+  elements.playbackRateButton.disabled = elements.playbackRateSelect.disabled;
+  elements.playbackRateButton.dataset.open = state.playbackRateMenuOpen ? 'true' : 'false';
+  elements.playbackRateButton.setAttribute('aria-expanded', state.playbackRateMenuOpen ? 'true' : 'false');
+
+  for (const optionButton of getPlaybackRateOptionButtons()) {
+    const isSelected = optionButton.dataset.rate === normalizedValue;
+    optionButton.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+    optionButton.tabIndex = isSelected ? 0 : -1;
+  }
+}
+
+function initializePlaybackRateControl() {
+  const fragment = document.createDocumentFragment();
+
+  for (const option of Array.from(elements.playbackRateSelect.options)) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'transport-rate-option';
+    button.dataset.rate = option.value;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', option.selected ? 'true' : 'false');
+    button.tabIndex = option.selected ? 0 : -1;
+    button.textContent = option.textContent?.trim() || `${option.value}x`;
+    button.addEventListener('click', () => {
+      applyPlaybackRateSelection(option.value);
+      closePlaybackRateMenu({ restoreFocus: true });
+    });
+    fragment.append(button);
+  }
+
+  elements.playbackRateMenu.replaceChildren(fragment);
+  syncPlaybackRateControl();
+}
+
+function positionPlaybackRateMenu() {
+  if (!state.playbackRateMenuOpen) {
+    return;
+  }
+
+  const triggerRect = elements.playbackRateButton.getBoundingClientRect();
+  const menuWidth = Math.max(Math.ceil(triggerRect.width), Math.ceil(elements.playbackRateMenu.offsetWidth || 0));
+  const menuHeight = Math.ceil(elements.playbackRateMenu.offsetHeight || 0);
+  const viewportPadding = 8;
+  const verticalOffset = 6;
+  const spaceAbove = triggerRect.top - viewportPadding;
+  const spaceBelow = window.innerHeight - triggerRect.bottom - viewportPadding;
+  const openAbove = spaceAbove > spaceBelow && spaceAbove >= menuHeight;
+  const top = openAbove
+    ? Math.max(viewportPadding, Math.round(triggerRect.top - menuHeight - verticalOffset))
+    : Math.min(
+      Math.max(viewportPadding, window.innerHeight - menuHeight - viewportPadding),
+      Math.round(triggerRect.bottom + verticalOffset),
+    );
+  const left = Math.min(
+    Math.max(viewportPadding, Math.round(triggerRect.right - menuWidth)),
+    Math.max(viewportPadding, window.innerWidth - menuWidth - viewportPadding),
+  );
+
+  elements.playbackRateMenu.style.minWidth = `${menuWidth}px`;
+  elements.playbackRateMenu.style.top = `${top}px`;
+  elements.playbackRateMenu.style.left = `${left}px`;
+}
+
+function focusPlaybackRateOption(index) {
+  const buttons = getPlaybackRateOptionButtons();
+
+  if (buttons.length === 0) {
+    return;
+  }
+
+  const normalizedIndex = Math.max(0, Math.min(index, buttons.length - 1));
+
+  for (const [buttonIndex, optionButton] of buttons.entries()) {
+    optionButton.tabIndex = buttonIndex === normalizedIndex ? 0 : -1;
+  }
+
+  buttons[normalizedIndex]?.focus();
+}
+
+function openPlaybackRateMenu({ focusSelected = true } = {}) {
+  if (state.playbackRateMenuOpen || elements.playbackRateButton.disabled) {
+    return;
+  }
+
+  state.playbackRateMenuOpen = true;
+  elements.playbackRateLayer.hidden = false;
+  elements.playbackRateMenu.hidden = false;
+  syncPlaybackRateControl();
+  positionPlaybackRateMenu();
+
+  if (focusSelected) {
+    const selectedIndex = getPlaybackRateOptionButtons()
+      .findIndex((optionButton) => optionButton.dataset.rate === String(normalizePlaybackRateSelection(state.playbackRate)));
+    focusPlaybackRateOption(selectedIndex >= 0 ? selectedIndex : 0);
+  }
+}
+
+function closePlaybackRateMenu({ restoreFocus = false } = {}) {
+  if (!state.playbackRateMenuOpen && elements.playbackRateMenu.hidden) {
+    return;
+  }
+
+  state.playbackRateMenuOpen = false;
+  elements.playbackRateLayer.hidden = true;
+  elements.playbackRateMenu.hidden = true;
+  elements.playbackRateMenu.style.top = '';
+  elements.playbackRateMenu.style.left = '';
+  elements.playbackRateMenu.style.minWidth = '';
+  syncPlaybackRateControl();
+
+  if (restoreFocus) {
+    elements.playbackRateButton.focus();
+  }
+}
+
+function togglePlaybackRateMenu() {
+  if (state.playbackRateMenuOpen) {
+    closePlaybackRateMenu({ restoreFocus: true });
+    return;
+  }
+
+  openPlaybackRateMenu();
+}
+
+function applyPlaybackRateSelection(value) {
+  const normalizedValue = String(normalizePlaybackRateSelection(value));
+
+  if (elements.playbackRateSelect.value === normalizedValue) {
+    syncPlaybackRateControl();
+    return;
+  }
+
+  elements.playbackRateSelect.value = normalizedValue;
+  elements.playbackRateSelect.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function movePlaybackRateFocus(direction) {
+  const buttons = getPlaybackRateOptionButtons();
+
+  if (buttons.length === 0) {
+    return;
+  }
+
+  const activeIndex = buttons.findIndex((button) => button === document.activeElement);
+  const startIndex = activeIndex >= 0 ? activeIndex : buttons.findIndex((button) => button.dataset.rate === String(state.playbackRate));
+  const nextIndex = Math.max(0, Math.min(buttons.length - 1, startIndex + direction));
+  focusPlaybackRateOption(nextIndex);
+}
+
+function isInteractiveElementTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  return Boolean(target.closest('button, input, select, textarea, [contenteditable="true"], [role="option"], [role="listbox"]'));
+}
+
+function isPlaybackRateUiTarget(target) {
+  return target instanceof Node
+    && (
+      elements.playbackRateControl.contains(target)
+      || elements.playbackRateMenu.contains(target)
+      || elements.playbackRateLayer.contains(target)
+    );
 }
 
 function getEffectiveSpectrogramRenderConfig(config = state.spectrogramRenderConfig) {
@@ -1139,12 +1326,6 @@ window.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (event.code === 'Space') {
-    event.preventDefault();
-    void togglePlayback();
-    return;
-  }
-
   if (event.code === 'ArrowLeft') {
     event.preventDefault();
     seekBy(-5);
@@ -1154,6 +1335,22 @@ window.addEventListener('keydown', (event) => {
   if (event.code === 'ArrowRight') {
     event.preventDefault();
     seekBy(5);
+    return;
+  }
+
+  if (event.code === 'Space') {
+    event.preventDefault();
+    void togglePlayback();
+    return;
+  }
+
+  if (event.code === 'KeyF' && !event.repeat) {
+    event.preventDefault();
+    setFollowPlaybackEnabled(!state.followPlayback);
+    return;
+  }
+
+  if (isInteractiveElementTarget(event.target)) {
     return;
   }
 
@@ -1167,7 +1364,7 @@ window.addEventListener('keydown', (event) => {
     event.preventDefault();
     zoomWaveformIn();
   }
-});
+}, { capture: true });
 
 async function loadAudioFile(payload) {
   const loadToken = state.loadToken + 1;
@@ -3231,8 +3428,19 @@ function disableFollowPlayback() {
     return;
   }
 
-  state.followPlayback = false;
-  elements.waveFollow.checked = false;
+  setFollowPlaybackEnabled(false);
+}
+
+function setFollowPlaybackEnabled(enabled) {
+  const nextEnabled = Boolean(enabled);
+
+  if (state.followPlayback === nextEnabled && elements.waveFollow.checked === nextEnabled) {
+    return;
+  }
+
+  state.followPlayback = nextEnabled;
+  elements.waveFollow.checked = nextEnabled;
+  syncTransport();
 }
 
 function updateTimelineHoverTooltip(event) {
@@ -3932,6 +4140,10 @@ function resetViewportSplit() {
 }
 
 function handleViewportSplitterKeydown(event) {
+  if (event.defaultPrevented) {
+    return;
+  }
+
   let nextRatio = null;
 
   if (event.key === 'ArrowUp') {
@@ -4078,6 +4290,7 @@ function attachUiEvents() {
   }, { passive: true });
   window.addEventListener('resize', () => {
     updateMediaMetadataDetailPosition();
+    closePlaybackRateMenu();
   });
 
   elements.viewportSplitter?.addEventListener('pointerdown', (event) => {
@@ -4134,6 +4347,81 @@ function attachUiEvents() {
   elements.seekForward.addEventListener('click', () => {
     seekBy(5);
   });
+  elements.playbackRateButton.addEventListener('click', () => {
+    togglePlaybackRateMenu();
+  });
+  elements.playbackRateButton.addEventListener('keydown', (event) => {
+    if (event.defaultPrevented) {
+      return;
+    }
+
+    if (event.code === 'ArrowDown' || event.code === 'Enter' || event.code === 'Space') {
+      event.preventDefault();
+      openPlaybackRateMenu();
+      return;
+    }
+
+    if (event.code === 'ArrowUp') {
+      event.preventDefault();
+      openPlaybackRateMenu();
+      const buttons = getPlaybackRateOptionButtons();
+      focusPlaybackRateOption(Math.max(0, buttons.length - 1));
+      return;
+    }
+
+    if (event.code === 'Escape') {
+      event.preventDefault();
+      closePlaybackRateMenu();
+    }
+  });
+  elements.playbackRateMenu.addEventListener('keydown', (event) => {
+    if (event.defaultPrevented) {
+      return;
+    }
+
+    if (event.code === 'Escape') {
+      event.preventDefault();
+      closePlaybackRateMenu({ restoreFocus: true });
+      return;
+    }
+
+    if (event.code === 'ArrowDown') {
+      event.preventDefault();
+      movePlaybackRateFocus(1);
+      return;
+    }
+
+    if (event.code === 'ArrowUp') {
+      event.preventDefault();
+      movePlaybackRateFocus(-1);
+      return;
+    }
+
+    if (event.code === 'Home') {
+      event.preventDefault();
+      focusPlaybackRateOption(0);
+      return;
+    }
+
+    if (event.code === 'End') {
+      event.preventDefault();
+      focusPlaybackRateOption(getPlaybackRateOptionButtons().length - 1);
+    }
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (isPlaybackRateUiTarget(event.target)) {
+      return;
+    }
+
+    closePlaybackRateMenu();
+  }, true);
+  document.addEventListener('focusin', (event) => {
+    if (isPlaybackRateUiTarget(event.target)) {
+      return;
+    }
+
+    closePlaybackRateMenu();
+  });
   elements.playbackRateSelect.addEventListener('change', () => {
     const nextRate = normalizePlaybackRateSelection(elements.playbackRateSelect.value);
     state.playbackRate = nextRate;
@@ -4174,9 +4462,8 @@ function attachUiEvents() {
   elements.waveZoomIn.addEventListener('click', () => {
     zoomWaveformIn();
   });
-  elements.waveFollow.addEventListener('change', (event) => {
-    state.followPlayback = elements.waveFollow.checked;
-    syncTransport();
+  elements.waveFollow.addEventListener('change', () => {
+    setFollowPlaybackEnabled(elements.waveFollow.checked);
   });
   elements.waveClearLoop.addEventListener('click', () => {
     state.loopRange = null;
@@ -4507,6 +4794,10 @@ function syncTransport() {
   elements.seekForward.disabled = !isPlayable;
   elements.playbackRateSelect.disabled = !hasSession;
   elements.playbackRateSelect.value = String(state.playbackRate);
+  if (!hasSession) {
+    closePlaybackRateMenu();
+  }
+  syncPlaybackRateControl();
   elements.timeline.disabled = !isPlayable;
   elements.timeline.value = String(progress);
   elements.timeline.style.setProperty('--seek-progress', `${Math.round(progress * 100)}%`);

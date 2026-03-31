@@ -213,8 +213,7 @@ body {
   border-bottom: 1px solid rgba(147, 197, 253, 0.28);
 }
 
-.media-metadata-link:hover,
-.media-metadata-link:focus-visible {
+.media-metadata-link:hover {
   color: #dbeafe;
   border-bottom-color: rgba(219, 234, 254, 0.56);
 }
@@ -273,7 +272,6 @@ body {
 }
 
 .viewport-splitter:hover .viewport-splitter-handle,
-.viewport-splitter:focus-visible .viewport-splitter-handle,
 .viewport-splitter[data-dragging="true"] .viewport-splitter-handle {
   transform: scaleX(1.12);
   opacity: 1;
@@ -285,7 +283,6 @@ body {
   outline: none;
 }
 
-.viewport-splitter:focus-visible::before,
 .viewport-splitter[data-dragging="true"]::before {
   background: rgba(96, 165, 250, 0.35);
 }
@@ -450,8 +447,7 @@ body {
   transition: border-color 120ms ease, transform 120ms ease, background 120ms ease;
 }
 
-.wave-tool-button:hover,
-.wave-tool-button:focus-visible {
+.wave-tool-button:hover {
   border-color: rgba(147, 197, 253, 0.34);
   background: linear-gradient(180deg, rgba(23, 35, 60, 0.98) 0%, rgba(12, 20, 38, 0.98) 100%);
 }
@@ -461,8 +457,7 @@ body {
 }
 
 .wave-tool-button:disabled,
-.wave-tool-button:disabled:hover,
-.wave-tool-button:disabled:focus-visible {
+.wave-tool-button:disabled:hover {
   border-color: rgba(148, 163, 184, 0.14);
   background: linear-gradient(180deg, rgba(15, 23, 42, 0.82) 0%, rgba(9, 14, 25, 0.82) 100%);
   color: rgba(148, 163, 184, 0.72);
@@ -548,7 +543,6 @@ body {
   background: #ffffff;
 }
 
-.wave-follow-toggle-input:focus-visible + .wave-follow-toggle-button,
 .wave-follow-toggle-input:hover + .wave-follow-toggle-button {
   border-color: rgba(147, 197, 253, 0.34);
   box-shadow:
@@ -1061,6 +1055,11 @@ body {
   text-transform: uppercase;
 }
 
+.transport-rate-control {
+  position: relative;
+}
+
+.transport-rate-button,
 .transport-rate-select {
   min-width: 62px;
   padding: 5px 18px;
@@ -1083,15 +1082,78 @@ body {
   cursor: pointer;
 }
 
+.transport-rate-select {
+  display: none;
+}
+
+.transport-rate-button[data-open="true"] {
+  border-color: rgba(147, 197, 253, 0.38);
+  box-shadow:
+    0 0 0 1px rgba(96, 165, 250, 0.14),
+    0 10px 24px rgba(0, 0, 0, 0.24);
+}
+
+.transport-rate-button:disabled,
 .transport-rate-select:disabled {
   cursor: default;
   opacity: 0.6;
 }
 
+.transport-rate-button:focus,
+.transport-rate-button:focus-visible,
 .transport-rate-select:focus,
 .transport-rate-select:focus-visible {
   outline: none;
   box-shadow: none;
+}
+
+.transport-rate-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+}
+
+.transport-rate-menu {
+  position: absolute;
+  display: grid;
+  gap: 4px;
+  min-width: 78px;
+  padding: 6px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(14, 21, 38, 0.99) 0%, rgba(8, 13, 24, 0.99) 100%);
+  box-shadow:
+    0 16px 32px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(10px);
+  pointer-events: auto;
+}
+
+.transport-rate-option {
+  min-width: 0;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #dbeafe;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+}
+
+.transport-rate-option:hover {
+  outline: none;
+  background: rgba(96, 165, 250, 0.16);
+}
+
+.transport-rate-option[aria-selected="true"] {
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.94) 0%, rgba(29, 78, 216, 0.94) 100%);
+  color: #eff6ff;
+  box-shadow: 0 6px 16px rgba(29, 78, 216, 0.2);
 }
 
 .timeline {
@@ -1498,10 +1560,37 @@ body {
   cursor: pointer;
 }
 
-.debug-timeline-toggle:hover,
-.debug-timeline-toggle:focus-visible {
+.debug-timeline-toggle:hover {
   border-color: rgba(191, 219, 254, 0.42);
   color: rgba(239, 246, 255, 0.96);
+}
+
+:where(
+  a,
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  [tabindex],
+  [role="button"],
+  [role="option"],
+  [role="listbox"]
+):focus,
+:where(
+  a,
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  [tabindex],
+  [role="button"],
+  [role="option"],
+  [role="listbox"]
+):focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 .debug-timeline-list {

@@ -158,9 +158,18 @@ export function resizeInteractiveWaveformSurface(
   width: number,
   height: number,
   renderScale: number,
-): void {
-  surface.width = Math.max(1, Math.round(width * renderScale));
-  surface.height = Math.max(1, Math.round(height * renderScale));
+): boolean {
+  const nextWidth = Math.max(1, Math.round(width * renderScale));
+  const nextHeight = Math.max(1, Math.round(height * renderScale));
+  const changed = surface.width !== nextWidth || surface.height !== nextHeight;
+
+  if (!changed) {
+    return false;
+  }
+
+  surface.width = nextWidth;
+  surface.height = nextHeight;
+  return true;
 }
 
 export function renderInteractiveWaveform(

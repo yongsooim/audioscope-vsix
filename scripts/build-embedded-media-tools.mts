@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..');
-const ffmpegSourceDir = path.join(projectRoot, 'wasm', 'third_party', 'ffmpeg');
+const ffmpegSourceDir = path.join(projectRoot, 'src-wasm', 'third_party', 'ffmpeg');
 const buildRoot = path.join(projectRoot, '.ffmpeg-build');
 const outputRoot = path.join(projectRoot, 'dist', 'embedded-tools');
 const jobCount = String(Math.max(1, Math.min(8, os.availableParallelism())));
@@ -131,10 +131,10 @@ const toolSpecs: ToolSpec[] = [
       '--enable-muxer=wav',
       '--enable-encoder=pcm_f32le',
     ],
-    customExecutableSource: path.join(projectRoot, 'wasm', 'embedded', 'ffdecode.c'),
+    customExecutableSource: path.join(projectRoot, 'src-wasm', 'embedded', 'ffdecode.c'),
     browserModuleOutputBaseName: 'ffdecode_browser_module',
     directModuleOutputBaseName: 'ffdecode_module',
-    directModuleSource: path.join(projectRoot, 'wasm', 'embedded', 'ffdecode_module.c'),
+    directModuleSource: path.join(projectRoot, 'src-wasm', 'embedded', 'ffdecode_module.c'),
     name: 'ffmpeg',
     outputs: [
       'ffmpeg',
