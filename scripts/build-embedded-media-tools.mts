@@ -24,6 +24,32 @@ interface ToolSpec {
   outputs: string[];
 }
 
+interface SpawnCommandOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+interface EmscriptenToolchain {
+  description: string;
+  emcc: string;
+  emconfigure: string;
+  emmake: string;
+  env: NodeJS.ProcessEnv;
+}
+
+const emscriptenExecutableNames =
+  process.platform === 'win32'
+    ? {
+        emcc: 'emcc.bat',
+        emconfigure: 'emconfigure.bat',
+        emmake: 'emmake.bat',
+      }
+    : {
+        emcc: 'emcc',
+        emconfigure: 'emconfigure',
+        emmake: 'emmake',
+      };
+
 const sharedConfigureArgs = [
   '--cc=emcc',
   '--cxx=em++',
@@ -122,8 +148,7 @@ const toolSpecs: ToolSpec[] = [
 ];
 
 async function main(): Promise<void> {
-  await ensureExecutableOnPath('emconfigure');
-  await ensureExecutableOnPath('emmake');
+  const emscripten = await resolveEmscriptenToolchain();
 
   if (!fs.existsSync(ffmpegSourceDir)) {
     throw new Error('FFmpeg submodule is missing. Run `git submodule update --init --recursive` first.');
@@ -135,7 +160,7 @@ async function main(): Promise<void> {
   const ffmpegRevision = (await capture('git', ['-C', ffmpegSourceDir, 'rev-parse', 'HEAD'])).trim();
 
   for (const spec of toolSpecs) {
-    await buildTool(spec, ffmpegRevision);
+    await buildTool(spec, ffmpegRevision, emscripten);
   }
 
   await fsp.writeFile(
@@ -152,7 +177,7 @@ async function main(): Promise<void> {
   );
 }
 
-async function buildTool(spec: ToolSpec, ffmpegRevision: string): Promise<void> {
+async function buildTool(spec: ToolSpec, ffmpegRevision: string, emscripten: EmscriptenToolchain): Promise<void> {
   const buildDir = path.join(buildRoot, spec.buildDirName);
   const stampPath = path.join(buildDir, '.stamp.json');
   const nextStamp = JSON.stringify({
@@ -168,23 +193,25 @@ async function buildTool(spec: ToolSpec, ffmpegRevision: string): Promise<void> 
     await fsp.rm(buildDir, { force: true, recursive: true });
     await fsp.mkdir(buildDir, { recursive: true });
 
-    await run('emconfigure', [path.join(ffmpegSourceDir, 'configure'), ...spec.configureArgs], {
+    await run(emscripten.emconfigure, [path.join(ffmpegSourceDir, 'configure'), ...spec.configureArgs], {
       cwd: buildDir,
+      env: emscripten.env,
     });
-    await run('emmake', ['make', '-j', jobCount], {
+    await run(emscripten.emmake, ['make', '-j', jobCount], {
       cwd: buildDir,
+      env: emscripten.env,
     });
 
     if (spec.customExecutableSource) {
-      await buildCustomExecutable(spec, buildDir);
+      await buildCustomExecutable(spec, buildDir, emscripten);
     }
 
     if (spec.directModuleSource && spec.directModuleOutputBaseName) {
-      await buildDirectModule(spec, buildDir);
+      await buildDirectModule(spec, buildDir, emscripten);
     }
 
     if (spec.directModuleSource && spec.browserModuleOutputBaseName) {
-      await buildBrowserDirectModule(spec, buildDir);
+      await buildBrowserDirectModule(spec, buildDir, emscripten);
     }
 
     await fsp.writeFile(stampPath, nextStamp, 'utf8');
@@ -211,13 +238,149 @@ async function hasOutputs(directory: string, outputNames: string[]): Promise<boo
   return true;
 }
 
-async function ensureExecutableOnPath(command: string): Promise<void> {
-  await capture(process.platform === 'win32' ? 'where' : 'which', [command]);
+async function resolveEmscriptenToolchain(): Promise<EmscriptenToolchain> {
+  const candidates: EmscriptenToolchain[] = [
+    {
+      description: 'PATH',
+      emcc: 'emcc',
+      emconfigure: 'emconfigure',
+      emmake: 'emmake',
+      env: { ...process.env },
+    },
+    ...getEmscriptenRootCandidates()
+      .map((rootPath) => createEmscriptenToolchain(rootPath))
+      .filter((candidate): candidate is EmscriptenToolchain => candidate !== null),
+  ];
+  const failures: string[] = [];
+
+  for (const candidate of candidates) {
+    try {
+      await capture(candidate.emcc, ['--version'], { env: candidate.env });
+      return candidate;
+    } catch (error) {
+      failures.push(`${candidate.description}: ${getErrorMessage(error)}`);
+    }
+  }
+
+  throw new Error(
+    [
+      'Unable to locate a working Emscripten toolchain.',
+      'Install or activate emsdk first, or set EMSCRIPTEN_ROOT/EMSDK/EMSDK_PYTHON.',
+      ...failures.map((failure) => `- ${failure}`),
+    ].join('\n'),
+  );
 }
 
-async function capture(command: string, args: string[]): Promise<string> {
+function getEmscriptenRootCandidates(): string[] {
+  const candidates = [
+    process.env.EMSCRIPTEN_ROOT,
+    process.env.EMSDK ? path.join(process.env.EMSDK, 'upstream', 'emscripten') : null,
+    path.join(os.homedir(), 'emsdk', 'upstream', 'emscripten'),
+    path.join(os.homedir(), '.emsdk', 'upstream', 'emscripten'),
+    '/opt/homebrew/opt/emscripten/libexec',
+    '/usr/local/opt/emscripten/libexec',
+  ];
+
+  return [...new Set(candidates.filter((candidate): candidate is string => Boolean(candidate && fs.existsSync(candidate))))];
+}
+
+function createEmscriptenToolchain(rootPath: string): EmscriptenToolchain | null {
+  const emccPath = path.join(rootPath, emscriptenExecutableNames.emcc);
+  const emconfigurePath = path.join(rootPath, emscriptenExecutableNames.emconfigure);
+  const emmakePath = path.join(rootPath, emscriptenExecutableNames.emmake);
+
+  if (!fs.existsSync(emccPath) || !fs.existsSync(emconfigurePath) || !fs.existsSync(emmakePath)) {
+    return null;
+  }
+
+  return {
+    description: rootPath,
+    emcc: emccPath,
+    emconfigure: emconfigurePath,
+    emmake: emmakePath,
+    env: createEmscriptenEnv(rootPath),
+  };
+}
+
+function createEmscriptenEnv(rootPath: string): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  const extraPathEntries = [rootPath];
+  const emsdkRoot = inferEmsdkRoot(rootPath);
+
+  if (emsdkRoot) {
+    env.EMSDK ??= emsdkRoot;
+
+    const emConfigPath = path.join(emsdkRoot, '.emscripten');
+    if (fs.existsSync(emConfigPath)) {
+      env.EM_CONFIG ??= emConfigPath;
+    }
+
+    const bundledPython = findBundledBinary(
+      path.join(emsdkRoot, 'python'),
+      process.platform === 'win32' ? ['python.exe'] : ['bin', 'python3'],
+    );
+    if (bundledPython) {
+      env.EMSDK_PYTHON ??= bundledPython;
+      extraPathEntries.push(path.dirname(bundledPython));
+    }
+
+    const bundledNode = findBundledBinary(
+      path.join(emsdkRoot, 'node'),
+      process.platform === 'win32' ? ['node.exe'] : ['bin', 'node'],
+    );
+    if (bundledNode) {
+      env.EMSDK_NODE ??= bundledNode;
+      extraPathEntries.push(path.dirname(bundledNode));
+    }
+
+    const llvmRoot = path.join(emsdkRoot, 'upstream', 'bin');
+    if (fs.existsSync(llvmRoot)) {
+      extraPathEntries.push(llvmRoot);
+    }
+
+    extraPathEntries.push(emsdkRoot);
+  }
+
+  env.PATH = joinPathEntries(extraPathEntries, env.PATH);
+  return env;
+}
+
+function inferEmsdkRoot(emscriptenRoot: string): string | null {
+  const emsdkRoot = path.resolve(emscriptenRoot, '..', '..');
+  return fs.existsSync(path.join(emsdkRoot, 'emsdk_env.sh')) ? emsdkRoot : null;
+}
+
+function findBundledBinary(parentDirectory: string, relativeSegments: string[]): string | null {
+  if (!fs.existsSync(parentDirectory)) {
+    return null;
+  }
+
+  const candidates = fs
+    .readdirSync(parentDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(parentDirectory, entry.name, ...relativeSegments))
+    .sort()
+    .reverse();
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function joinPathEntries(entries: string[], existingPath: string | undefined): string {
+  const uniqueEntries = [...new Set([...entries.filter(Boolean), ...(existingPath ? existingPath.split(path.delimiter) : [])])];
+  return uniqueEntries.join(path.delimiter);
+}
+
+async function capture(command: string, args: string[], options: SpawnCommandOptions = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const stdoutChunks: Buffer[] = [];
@@ -231,7 +394,9 @@ async function capture(command: string, args: string[]): Promise<string> {
       stderrChunks.push(chunk);
     });
 
-    child.once('error', reject);
+    child.once('error', (error) => {
+      reject(new Error(`Failed to launch ${command}: ${getErrorMessage(error)}`));
+    });
     child.once('close', (code) => {
       if (code === 0) {
         resolve(Buffer.concat(stdoutChunks).toString('utf8'));
@@ -243,14 +408,17 @@ async function capture(command: string, args: string[]): Promise<string> {
   });
 }
 
-async function run(command: string, args: string[], options: { cwd: string }): Promise<void> {
+async function run(command: string, args: string[], options: SpawnCommandOptions): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
+      env: options.env,
       stdio: 'inherit',
     });
 
-    child.once('error', reject);
+    child.once('error', (error) => {
+      reject(new Error(`Failed to launch ${command}: ${getErrorMessage(error)}`));
+    });
     child.once('close', (code) => {
       if (code === 0) {
         resolve();
@@ -262,6 +430,10 @@ async function run(command: string, args: string[], options: { cwd: string }): P
   });
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function readOptionalFile(filePath: string): Promise<string | null> {
   try {
     return await fsp.readFile(filePath, 'utf8');
@@ -270,13 +442,13 @@ async function readOptionalFile(filePath: string): Promise<string | null> {
   }
 }
 
-async function buildCustomExecutable(spec: ToolSpec, buildDir: string): Promise<void> {
+async function buildCustomExecutable(spec: ToolSpec, buildDir: string, emscripten: EmscriptenToolchain): Promise<void> {
   if (!spec.customExecutableSource) {
     return;
   }
 
   await run(
-    'emcc',
+    emscripten.emcc,
     [
       '-O3',
       '-s',
@@ -310,17 +482,18 @@ async function buildCustomExecutable(spec: ToolSpec, buildDir: string): Promise<
     ],
     {
       cwd: buildDir,
+      env: emscripten.env,
     },
   );
 }
 
-async function buildDirectModule(spec: ToolSpec, buildDir: string): Promise<void> {
+async function buildDirectModule(spec: ToolSpec, buildDir: string, emscripten: EmscriptenToolchain): Promise<void> {
   if (!spec.directModuleSource || !spec.directModuleOutputBaseName) {
     return;
   }
 
   await run(
-    'emcc',
+    emscripten.emcc,
     [
       '-O3',
       '-s',
@@ -364,17 +537,22 @@ async function buildDirectModule(spec: ToolSpec, buildDir: string): Promise<void
     ],
     {
       cwd: buildDir,
+      env: emscripten.env,
     },
   );
 }
 
-async function buildBrowserDirectModule(spec: ToolSpec, buildDir: string): Promise<void> {
+async function buildBrowserDirectModule(
+  spec: ToolSpec,
+  buildDir: string,
+  emscripten: EmscriptenToolchain,
+): Promise<void> {
   if (!spec.directModuleSource || !spec.browserModuleOutputBaseName) {
     return;
   }
 
   await run(
-    'emcc',
+    emscripten.emcc,
     [
       '-O3',
       '-s',
@@ -416,6 +594,7 @@ async function buildBrowserDirectModule(spec: ToolSpec, buildDir: string): Promi
     ],
     {
       cwd: buildDir,
+      env: emscripten.env,
     },
   );
 }

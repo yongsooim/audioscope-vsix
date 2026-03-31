@@ -28,10 +28,7 @@ const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 12;
 const VIEWPORT_MIN_SPECTROGRAM_HEIGHT_PX = 140;
 const VIEWPORT_RATIO_MIN = 0.15;
 const VIEWPORT_RATIO_MAX = 0.85;
-const FFMPEG_DOWNLOAD_URL = 'https://ffmpeg.org/download.html';
-const FFMPEG_HOMEBREW_URL = 'https://formulae.brew.sh/formula/ffmpeg';
-const FFMPEG_WINGET_URL = 'https://github.com/microsoft/winget-pkgs/tree/master/manifests/g/Gyan/FFmpeg';
-const FFMPEG_CLI_INSTALL_GUIDANCE = 'Install ffmpeg CLI first: brew install ffmpeg or winget install --id Gyan.FFmpeg --exact.';
+const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'Embedded FFmpeg WASM tools are unavailable. Rebuild or reinstall Wave Scope to restore metadata and decode fallback.';
 
 const WAVEFORM_COLOR = '#8ccadd';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
@@ -597,15 +594,13 @@ function createExternalToolStatusState() {
     canDecodeFallback: false,
     canReadMetadata: false,
     ffmpegAvailable: false,
-    ffmpegCommand: 'ffmpeg',
-    ffmpegPath: null,
+    ffmpegCommand: 'embedded ffmpeg.wasm',
     ffmpegVersion: null,
     ffprobeAvailable: false,
-    ffprobeCommand: 'ffprobe',
-    ffprobePath: null,
+    ffprobeCommand: 'embedded ffprobe.wasm',
     ffprobeVersion: null,
     fileBacked: false,
-    guidance: `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata and decode fallback for local files.`,
+    guidance: EMBEDDED_MEDIA_TOOLS_GUIDANCE,
   };
 }
 
@@ -625,9 +620,6 @@ function normalizeExternalToolStatus(status) {
     ffmpegCommand: typeof status.ffmpegCommand === 'string' && status.ffmpegCommand.trim().length > 0
       ? status.ffmpegCommand
       : base.ffmpegCommand,
-    ffmpegPath: typeof status.ffmpegPath === 'string' && status.ffmpegPath.trim().length > 0
-      ? status.ffmpegPath
-      : null,
     ffmpegVersion: typeof status.ffmpegVersion === 'string' && status.ffmpegVersion.trim().length > 0
       ? status.ffmpegVersion
       : null,
@@ -635,9 +627,6 @@ function normalizeExternalToolStatus(status) {
     ffprobeCommand: typeof status.ffprobeCommand === 'string' && status.ffprobeCommand.trim().length > 0
       ? status.ffprobeCommand
       : base.ffprobeCommand,
-    ffprobePath: typeof status.ffprobePath === 'string' && status.ffprobePath.trim().length > 0
-      ? status.ffprobePath
-      : null,
     ffprobeVersion: typeof status.ffprobeVersion === 'string' && status.ffprobeVersion.trim().length > 0
       ? status.ffprobeVersion
       : null,
@@ -791,11 +780,11 @@ function formatMetadataSummaryText() {
   }
 
   if (!state.externalTools.resolved) {
-    return 'Checking installed ffmpeg CLI tools...';
+    return 'Checking bundled media tools…';
   }
 
   if (!state.externalTools.canReadMetadata) {
-    return state.externalTools.guidance || `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata for local files.`;
+    return state.externalTools.guidance || EMBEDDED_MEDIA_TOOLS_GUIDANCE;
   }
 
   return 'Metadata unavailable.';
@@ -825,35 +814,6 @@ function createMetadataExternalLink(label, url) {
   link.textContent = label;
   link.dataset.externalUrl = url;
   return link;
-}
-
-function getMissingToolInstallLinks(toolName) {
-  if (!state.externalTools.fileBacked) {
-    return [];
-  }
-
-  if (toolName === 'ffmpeg' && state.externalTools.ffmpegAvailable) {
-    return [];
-  }
-
-  if (toolName === 'ffprobe' && state.externalTools.ffprobeAvailable) {
-    return [];
-  }
-
-  return [
-    {
-      label: 'brew',
-      url: FFMPEG_HOMEBREW_URL,
-    },
-    {
-      label: 'winget',
-      url: FFMPEG_WINGET_URL,
-    },
-    {
-      label: 'download',
-      url: FFMPEG_DOWNLOAD_URL,
-    },
-  ];
 }
 
 function appendMetadataDetailRow(container, label, value, links = []) {
@@ -1033,7 +993,6 @@ function renderMediaMetadata() {
       state.externalTools.ffmpegVersion,
       state.externalTools.ffmpegCommand,
     ),
-    getMissingToolInstallLinks('ffmpeg'),
   );
   appendMetadataDetailRow(
     toolSection,
@@ -1043,7 +1002,6 @@ function renderMediaMetadata() {
       state.externalTools.ffprobeVersion,
       state.externalTools.ffprobeCommand,
     ),
-    getMissingToolInstallLinks('ffprobe'),
   );
   appendMetadataDetailRow(
     toolSection,
@@ -1181,7 +1139,7 @@ async function loadAudioFile(payload) {
       ? 'Metadata is only available for local filesystem files.'
       : (!state.externalTools.resolved || state.externalTools.canReadMetadata)
       ? 'Loading metadata with ffprobe…'
-      : state.externalTools.guidance || `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables metadata for local files.`,
+      : state.externalTools.guidance || EMBEDDED_MEDIA_TOOLS_GUIDANCE,
   };
   state.playbackSourceKind = 'native';
   state.analysisSourceKind = 'native';
@@ -1527,7 +1485,7 @@ function requestDecodeFallback(loadToken, payload, reason, sourceBytes = null) {
   }
 
   if (state.externalTools.resolved && !state.externalTools.canDecodeFallback) {
-    return Promise.reject(new Error(state.externalTools.guidance || `${FFMPEG_CLI_INSTALL_GUIDANCE} This enables decode fallback.`));
+    return Promise.reject(new Error(state.externalTools.guidance || EMBEDDED_MEDIA_TOOLS_GUIDANCE));
   }
 
   state.decodeFallbackLoadToken = loadToken;
@@ -1753,6 +1711,7 @@ async function initializeWaveformSurface(loadToken) {
   canvas.className = 'waveform-canvas';
   canvas.style.width = '100%';
   canvas.style.height = '100%';
+  canvas.style.transform = 'translate3d(0px, 0, 0)';
   elements.waveformCanvasHost.style.width = '100%';
   elements.waveformCanvasHost.style.transform = 'translate3d(0px, 0, 0)';
   elements.waveformCanvasHost.replaceChildren(canvas);
@@ -2480,8 +2439,14 @@ function handleWaveformReady(body) {
     ? state.waveformPendingRequest
     : null;
   const { width: fallbackWidth, height: fallbackHeight } = getWaveformViewportSize();
-  const width = pendingRequest?.width ?? fallbackWidth;
-  const height = pendingRequest?.height ?? fallbackHeight;
+  const responseWidth = Number.isFinite(Number(body.width)) && Number(body.width) > 0
+    ? Math.max(1, Math.round(Number(body.width)))
+    : null;
+  const responseHeight = Number.isFinite(Number(body.height)) && Number(body.height) > 0
+    ? Math.max(1, Math.round(Number(body.height)))
+    : null;
+  const width = pendingRequest?.width ?? responseWidth ?? fallbackWidth;
+  const height = pendingRequest?.height ?? responseHeight ?? fallbackHeight;
 
   state.waveformRenderRange = {
     end: body.viewEnd,
@@ -4233,18 +4198,7 @@ function attachResizeObservers() {
     state.observedOverviewWidth = overviewWidth;
 
     if (state.waveformWorker) {
-      const pendingWaveformWidth = Number(state.waveformPendingRequest?.width);
-      const committedWaveformWidth = Number(state.waveformRenderWidth);
-      const activeWaveformWidth = Math.max(
-        1,
-        Math.round(
-          (Number.isFinite(pendingWaveformWidth) && pendingWaveformWidth > 0)
-            ? pendingWaveformWidth
-            : (Number.isFinite(committedWaveformWidth) && committedWaveformWidth > 0)
-              ? committedWaveformWidth
-              : width,
-        ),
-      );
+      const { renderWidth } = getWaveformRenderRequestMetrics();
 
       state.waveformWorker.postMessage({
         type: 'resizeCanvas',
@@ -4252,7 +4206,7 @@ function attachResizeObservers() {
           color: WAVEFORM_COLOR,
           height,
           renderScale: WAVEFORM_RENDER_SCALE,
-          width: activeWaveformWidth,
+          width: renderWidth,
         },
       });
     }
@@ -4952,10 +4906,15 @@ function applyWaveformCanvasTransform(displayRange = getWaveformRange()) {
   const viewportWidth = getWaveformViewportWidth();
   const renderWidth = Math.max(0, state.waveformRenderWidth);
   const renderSpan = Math.max(0, renderRange.end - renderRange.start);
+  const canvas = state.waveformCanvas;
 
   if (!(displayRange.end > displayRange.start) || renderWidth <= 0 || renderSpan <= 0) {
     elements.waveformCanvasHost.style.width = '100%';
     elements.waveformCanvasHost.style.transform = 'translate3d(0px, 0, 0)';
+    if (canvas) {
+      canvas.style.width = '100%';
+      canvas.style.transform = 'translate3d(0px, 0, 0)';
+    }
     return;
   }
 
@@ -4964,8 +4923,12 @@ function applyWaveformCanvasTransform(displayRange = getWaveformRange()) {
   const minOffset = Math.min(0, viewportWidth - renderWidth);
   const translateX = quantizeWaveformCssOffset(clamp(unclampedOffset, minOffset, 0));
 
-  elements.waveformCanvasHost.style.width = `${renderWidth}px`;
-  elements.waveformCanvasHost.style.transform = `translate3d(${translateX}px, 0, 0)`;
+  elements.waveformCanvasHost.style.width = '100%';
+  elements.waveformCanvasHost.style.transform = 'translate3d(0px, 0, 0)';
+  if (canvas) {
+    canvas.style.width = `${renderWidth}px`;
+    canvas.style.transform = `translate3d(${translateX}px, 0, 0)`;
+  }
 }
 
 function applyWaveformAxisTransform(displayRange = getWaveformRange()) {

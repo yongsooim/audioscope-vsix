@@ -32,7 +32,7 @@ Wave Scope is a custom read-only audio viewer for VS Code. It is built for quick
 - Use follow mode, overview scrolling, and zoom controls for long recordings
 - Review codec, container, duration, bitrate, and channel metadata
 - Inspect integrated loudness, loudness range, sample peak, and true peak at a glance
-- Use optional `ffmpeg` and `ffprobe` integration for richer metadata and decode fallback on local files
+- Use bundled FFmpeg WebAssembly tools for metadata and decode fallback
 
 ## Quick Start
 
@@ -92,24 +92,7 @@ Wave Scope now bundles embedded FFmpeg WebAssembly tools for:
 - decode fallback for files the runtime cannot open directly
 - probing files even when the webview cannot decode them natively
 
-If you prefer a system `ffmpeg` / `ffprobe` install instead, set:
-
-- `waveScope.ffmpegPath`
-- `waveScope.ffprobePath`
-
-Quick install examples for external overrides:
-
-```bash
-# macOS (Homebrew)
-brew install ffmpeg
-```
-
-```powershell
-# Windows (winget)
-winget install --id Gyan.FFmpeg --exact
-```
-
-Other platforms: [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
+Wave Scope no longer depends on a system `ffmpeg` or `ffprobe` install at runtime.
 
 ## Requirements
 
@@ -119,8 +102,6 @@ Other platforms: [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 ## Settings
 
 - `waveScope.spectrogramQuality`: choose `balanced`, `high`, or `max`
-- `waveScope.ffmpegPath`: optional external `ffmpeg` executable path or command name
-- `waveScope.ffprobePath`: optional external `ffprobe` executable path or command name
 - `waveScope.openSampleOnStartupInDevelopment`: open the bundled sample file automatically in development mode
 
 ## Notes
