@@ -156,6 +156,7 @@ function initializeCanvas(options) {
 }
 
 function resizeCanvas(options) {
+  const resizeSnapshot = captureDisplayedSurfaceSnapshot();
   surfaceState.width = Math.max(1, Math.round(Number(options?.width) || surfaceState.width || 1));
   surfaceState.height = Math.max(1, Math.round(Number(options?.height) || surfaceState.height || 1));
   surfaceState.renderScale = Math.max(1, Number(options?.renderScale) || surfaceState.renderScale || 1);
@@ -163,21 +164,80 @@ function resizeCanvas(options) {
     ? options.color
     : surfaceState.color;
 
-  resizeSurface();
+  const resized = resizeSurface();
   ensureBackBuffer();
+
+  if (resized && resizeSnapshot) {
+    restoreDisplayedSurfaceSnapshot(resizeSnapshot);
+  }
 }
 
 function resizeSurface() {
   if (!surfaceState.canvas) {
-    return;
+    return false;
   }
 
-  resizeInteractiveWaveformSurface(
+  return resizeInteractiveWaveformSurface(
     surfaceState.canvas,
     surfaceState.width,
     surfaceState.height,
     surfaceState.renderScale,
   );
+}
+
+function captureDisplayedSurfaceSnapshot() {
+  if (!surfaceState.canvas || typeof OffscreenCanvas !== 'function') {
+    return null;
+  }
+
+  const width = Math.max(1, surfaceState.canvas.width);
+  const height = Math.max(1, surfaceState.canvas.height);
+  const snapshot = new OffscreenCanvas(width, height);
+  const snapshotContext = snapshot.getContext('2d');
+
+  if (!snapshotContext) {
+    return null;
+  }
+
+  snapshotContext.drawImage(surfaceState.canvas, 0, 0);
+  return snapshot;
+}
+
+function restoreDisplayedSurfaceSnapshot(snapshot) {
+  if (!snapshot) {
+    return;
+  }
+
+  const surfaces = [
+    surfaceState.canvas && surfaceState.context
+      ? { canvas: surfaceState.canvas, context: surfaceState.context }
+      : null,
+    surfaceState.backCanvas && surfaceState.backContext
+      ? { canvas: surfaceState.backCanvas, context: surfaceState.backContext }
+      : null,
+  ];
+
+  for (const surface of surfaces) {
+    if (!surface) {
+      continue;
+    }
+
+    surface.context.save();
+    surface.context.setTransform(1, 0, 0, 1, 0, 0);
+    surface.context.globalCompositeOperation = 'copy';
+    surface.context.drawImage(
+      snapshot,
+      0,
+      0,
+      snapshot.width,
+      snapshot.height,
+      0,
+      0,
+      surface.canvas.width,
+      surface.canvas.height,
+    );
+    surface.context.restore();
+  }
 }
 
 function ensureBackBuffer() {

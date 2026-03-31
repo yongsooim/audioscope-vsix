@@ -1,36 +1,50 @@
 {
   "name": "audioscope",
   "displayName": "audioscope",
-  "description": "Audio waveform and spectrogram editor for VS Code with playback, zoom, and loop controls.",
+  "description": "Audio waveform and spectrogram viewer playback, zoom, loop",
   "version": "1.0.0",
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yongsooim/wave-scope-vsix.git"
+    "url": "https://github.com/yongsooim/audioscope-vsix.git"
   },
-  "homepage": "https://github.com/yongsooim/wave-scope-vsix#readme",
+  "homepage": "https://github.com/yongsooim/audioscope-vsix#readme",
   "bugs": {
-    "url": "https://github.com/yongsooim/wave-scope-vsix/issues"
+    "url": "https://github.com/yongsooim/audioscope-vsix/issues"
   },
   "license": "MIT",
   "icon": "images/icon.png",
   "keywords": [
     "audio",
+    "ffmpeg",
     "waveform",
     "spectrogram",
+    "mel-spectrogram",
+    "scalogram",
+    "loudness",
+    "ITU-R BS.1770",
     "mp3",
     "wav",
-    "flac"
+    "wave",
+    "flac",
+    "m4a",
+    "ogg",
+    "oga",
+    "aac",
+    "opus",
+    "aif",
+    "aiff"
   ],
   "files": [
-    "out/extension.js",
-    "out/externalAudioTools.js",
-    "out/audioscopeEditor.js",
+    "out/*.js",
     "dist/**",
     "src-webview/**/*.css",
     "src-webview/vendor/**/*.mjs",
     "images/*.png",
     "README.md",
+    "CHANGELOG.md",
+    "SUPPORT.md",
+    "FFMPEG_SOURCE.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
   ],
@@ -41,7 +55,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onCommand:audioscope.openActiveFileInAudioscope",
+    "onCustomEditor:audioscope.editor"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -118,6 +133,7 @@
   },
   "scripts": {
     "vscode:prepublish": "bun run compile",
+    "check:release": "bun run compile && node ./scripts/check-release.mts",
     "clean": "node -e \"const fs=require('node:fs'); for (const dir of ['dist','out']) fs.rmSync(dir,{recursive:true,force:true});\"",
     "build:embedded-media-tools": "tsx ./scripts/build-embedded-media-tools.mts",
     "build:wave-core": "zig build wave-core-artifacts",

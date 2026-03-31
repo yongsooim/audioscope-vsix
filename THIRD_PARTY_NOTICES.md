@@ -7,6 +7,8 @@ third-party components.
 
 audioscope distributes embedded FFmpeg WebAssembly binaries built from FFmpeg.
 The FFmpeg source is included as the `wasm/third_party/ffmpeg` submodule.
+The exact bundled revision and rebuild notes for this release are documented in
+`FFMPEG_SOURCE.md`.
 
 Copyright (c) the FFmpeg developers
 

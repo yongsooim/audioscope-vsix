@@ -29,7 +29,8 @@ audioscope is a custom read-only audio viewer for VS Code. It is built for quick
 - Open common audio formats in a dedicated VS Code view
 - View waveform and spectrogram together in a fullscreen-first, resizable layout
 - Click to seek, drag to create loop ranges, and refine loop points with direct handles
-- Use follow mode, overview scrolling, and zoom controls for long recordings
+- Use follow mode, overview scrolling, zoom controls, and variable playback speed for long recordings
+- Tune spectrogram type, FFT size, overlap, and frequency scale from the editor UI
 - Review codec, container, duration, bitrate, and channel metadata
 - Inspect integrated loudness, loudness range, sample peak, and true peak at a glance
 - Use bundled FFmpeg WebAssembly tools for metadata and decode fallback
@@ -78,11 +79,13 @@ audioscope contributes a custom editor for:
 - `Space`: play or pause
 - `Left Arrow` / `Right Arrow`: seek backward or forward by 5 seconds
 - `-` / `=`: zoom out or zoom in
+- Playback speed menu: switch from `0.5x` to `2x`
 - Click on the waveform or spectrogram: seek to that point
 - Drag on the waveform or spectrogram: create a loop range
 - Drag loop handles: adjust loop boundaries
 - Mouse wheel or trackpad: zoom or pan the visible range
 - Drag the center splitter: resize waveform and spectrogram panels
+- Spectrogram controls: choose `Spectrogram`, `Mel-Spectrogram`, or `Scalogram`, then adjust FFT, overlap, and frequency scale
 
 ## Embedded ffmpeg Tools
 
@@ -94,10 +97,14 @@ audioscope now bundles embedded FFmpeg WebAssembly tools for:
 
 audioscope no longer depends on a system `ffmpeg` or `ffprobe` install at runtime.
 
+For the exact FFmpeg revision, wrapper sources, and rebuild notes used by the bundled WebAssembly tools, see [FFMPEG_SOURCE.md](./FFMPEG_SOURCE.md).
+
 ## Requirements
 
 - VS Code `1.100.0` or later
-- Development builds of the embedded media tools require Emscripten (`emcc`, `emconfigure`, `emmake`)
+- Runtime use does not require a system `ffmpeg` or `ffprobe`
+- Building from source requires `bun`, `zig` `0.15+`, and an Emscripten toolchain (`emcc`, `emconfigure`, `emmake`)
+- The embedded media tool build can resolve Emscripten from `PATH`, `EMSCRIPTEN_ROOT`, `EMSDK`, or common Homebrew/emSDK install locations
 
 ## Settings
 
@@ -117,15 +124,31 @@ git submodule update --init --recursive
 bun run compile
 ```
 
-`bun run compile` requires `bun` and `zig` 0.15+ and produces:
+`bun run compile` requires `bun`, `zig` `0.15+`, and Emscripten. It produces:
 
 - `dist/webview/` webview bundles
-- `dist/wasm/wave_core_simd.wasm`
-- `dist/wasm/wave_core_fallback.wasm`
+- `dist/wasm/wasm_core_simd.wasm`
+- `dist/wasm/wasm_core_fallback.wasm`
+- `dist/embedded-tools/` embedded `ffmpeg` / `ffprobe` WebAssembly artifacts and manifest
 
 Open this folder in VS Code and press `F5` to launch the Extension Development Host.
 
-In development mode, `exampleFiles/sample-tone.wav` opens automatically in `audioscope`. To disable that behavior, set `audioscope.openSampleOnStartupInDevelopment` to `false`.
+In development mode, `exampleFiles/sample-tone.wav` opens automatically in `audioscope`, and the performance timeline panel is visible for debugging. To disable the sample-open behavior, set `audioscope.openSampleOnStartupInDevelopment` to `false`.
+
+## Release
+
+Before publishing a VSIX, run:
+
+```bash
+bun run check:release
+npx @vscode/vsce package
+```
+
+`bun run check:release` rebuilds the extension and verifies that:
+
+- required runtime modules are included by `package.json#files`
+- required webview, WASM, and embedded media artifacts exist
+- release docs such as `CHANGELOG.md`, `SUPPORT.md`, and `FFMPEG_SOURCE.md` are packaged
 
 ## Acknowledgements
 
