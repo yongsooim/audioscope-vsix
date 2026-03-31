@@ -2378,6 +2378,20 @@ function normalizeSpectrogramQuality(value) {
   return value === 'balanced' || value === 'max' ? value : 'high';
 }
 
+// Keep spectrogram rasters tall enough for any in-window vertical resize, then let CSS scale them.
+function getSpectrogramRenderPixelHeight() {
+  const screenHeight = Number(window.screen?.height);
+  const fallbackHeight = Math.max(
+    1,
+    window.innerHeight || elements.viewport.clientHeight || elements.spectrogram.clientHeight || 1,
+  );
+  const renderHeight = Number.isFinite(screenHeight) && screenHeight > 0
+    ? screenHeight
+    : fallbackHeight;
+
+  return Math.max(1, Math.round(renderHeight * DISPLAY_PIXEL_RATIO));
+}
+
 function getSpectrogramCanvasTargetSize() {
   const clientWidth = Math.max(1, elements.spectrogram.clientWidth);
   const clientHeight = Math.max(1, elements.spectrogram.clientHeight);
@@ -2385,7 +2399,7 @@ function getSpectrogramCanvasTargetSize() {
   return {
     clientHeight,
     clientWidth,
-    pixelHeight: Math.max(1, Math.round(clientHeight * DISPLAY_PIXEL_RATIO)),
+    pixelHeight: getSpectrogramRenderPixelHeight(),
     pixelWidth: Math.max(1, Math.round(clientWidth * DISPLAY_PIXEL_RATIO)),
   };
 }
@@ -2859,7 +2873,7 @@ function syncWaveformSelection() {
   }
 }
 
-function renderWaveformUi() {
+function renderWaveformUi({ syncSpectrogram = true } = {}) {
   const duration = getEffectiveDuration();
   const range = getWaveformRange();
   const span = Math.max(0, range.end - range.start);
@@ -2900,7 +2914,9 @@ function renderWaveformUi() {
   applyWaveformPlaybackTime(getCurrentPlaybackTime());
   applyWaveformCanvasTransform(range);
   refreshWaveformHoverPresentation();
-  scheduleSpectrogramRender();
+  if (syncSpectrogram) {
+    scheduleSpectrogramRender();
+  }
 }
 
 function renderWaveformAxis(options: WaveformAxisRenderOptions = {}) {
@@ -4254,11 +4270,14 @@ function attachResizeObservers() {
     const waveformViewportResized =
       state.observedWaveformViewportWidth !== width
       || state.observedWaveformViewportHeight !== height;
+    const spectrogramSurfaceResized =
+      state.observedSpectrogramPixelWidth !== pixelWidth
+      || state.observedSpectrogramPixelHeight !== pixelHeight;
+    const overviewWidthResized = state.observedOverviewWidth !== overviewWidth;
     const dimensionsUnchanged =
       !waveformViewportResized
-      && state.observedSpectrogramPixelWidth === pixelWidth
-      && state.observedSpectrogramPixelHeight === pixelHeight
-      && state.observedOverviewWidth === overviewWidth;
+      && !spectrogramSurfaceResized
+      && !overviewWidthResized;
 
     if (dimensionsUnchanged) {
       return;
@@ -4284,7 +4303,7 @@ function attachResizeObservers() {
       });
     }
 
-    if (state.analysisWorker) {
+    if (state.analysisWorker && spectrogramSurfaceResized) {
       state.analysisWorker.postMessage({
         type: 'resizeCanvas',
         body: {
@@ -4294,13 +4313,19 @@ function attachResizeObservers() {
       });
     }
 
-    renderWaveformUi();
+    renderWaveformUi({ syncSpectrogram: spectrogramSurfaceResized });
     void syncWaveformView({ force: waveformViewportResized });
     renderSpectrogramScale();
     resetSpectrogramCanvasTransform();
-    requestOverviewSpectrogram({ force: true });
-    queueVisibleSpectrogramRequest({ force: true });
-    scheduleSpectrogramRender({ force: true });
+
+    if (spectrogramSurfaceResized || overviewWidthResized) {
+      requestOverviewSpectrogram({ force: true });
+    }
+
+    if (spectrogramSurfaceResized) {
+      queueVisibleSpectrogramRequest({ force: true });
+      scheduleSpectrogramRender({ force: true });
+    }
   });
 
   resizeObserver.observe(document.body);
