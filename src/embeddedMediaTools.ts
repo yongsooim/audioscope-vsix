@@ -89,8 +89,23 @@ export interface EmbeddedPcmDecodePayload {
   source: 'ffmpeg';
 }
 
+export interface EmbeddedLoudnessSummaryPayload {
+  channelCount: number | null;
+  channelLayout: string | null;
+  integratedLufs: number | null;
+  integratedThresholdLufs: number | null;
+  loudnessRangeLu: number | null;
+  lraHighLufs: number | null;
+  lraLowLufs: number | null;
+  rangeThresholdLufs: number | null;
+  samplePeakDbfs: number | null;
+  truePeakDbtp: number | null;
+}
+
 const DIRECT_DECODE_MODULE_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffdecode_module.js');
 const DIRECT_DECODE_WASM_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffdecode_module.wasm');
+const LOUDNESS_EXECUTABLE_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffloudness');
+const LOUDNESS_EXECUTABLE_WASM_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffloudness.wasm');
 
 let directDecodeModulePromise: Promise<DirectDecodeModule> | null = null;
 let directDecodeQueue = Promise.resolve();
@@ -181,6 +196,10 @@ function getExecErrorMessage(error: unknown): string {
 
 function hasDirectDecodeModule(): boolean {
   return fs.existsSync(DIRECT_DECODE_MODULE_PATH) && fs.existsSync(DIRECT_DECODE_WASM_PATH);
+}
+
+function hasLoudnessExecutable(): boolean {
+  return fs.existsSync(LOUDNESS_EXECUTABLE_PATH) && fs.existsSync(LOUDNESS_EXECUTABLE_WASM_PATH);
 }
 
 async function loadDirectDecodeModule(): Promise<DirectDecodeModule> {
@@ -348,6 +367,44 @@ export async function runEmbeddedFfmpegDecodeToWav(
   } catch (error) {
     emitDebugTimelineEvent('host.decodeFallback.ffmpeg.embedded.error', getExecErrorMessage(error));
     throw error;
+  } finally {
+    await resourceHandle.cleanup();
+  }
+}
+
+export async function runEmbeddedFfmpegMeasureLoudness(
+  resource: vscode.Uri,
+  timeout: number,
+): Promise<EmbeddedLoudnessSummaryPayload> {
+  if (!hasLoudnessExecutable()) {
+    throw new Error('ffloudness.wasm is unavailable.');
+  }
+
+  const resourceHandle = await prepareResourceHandle(resource);
+  const virtualInputPath = `/input${path.extname(resourceHandle.inputPath) || '.bin'}`;
+
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [
+        '-e',
+        EMBEDDED_TOOL_RUNNER_SOURCE,
+        LOUDNESS_EXECUTABLE_PATH,
+        resourceHandle.inputPath,
+        '',
+        virtualInputPath,
+        JSON.stringify([
+          virtualInputPath,
+        ]),
+      ],
+      timeout,
+    );
+
+    try {
+      return JSON.parse(stdout) as EmbeddedLoudnessSummaryPayload;
+    } catch (error) {
+      throw new Error(`ffloudness returned invalid JSON: ${getExecErrorMessage(error)}`);
+    }
   } finally {
     await resourceHandle.cleanup();
   }

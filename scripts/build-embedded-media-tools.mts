@@ -14,6 +14,10 @@ const outputRoot = path.join(projectRoot, 'dist', 'embedded-tools');
 const jobCount = String(Math.max(1, Math.min(8, os.availableParallelism())));
 
 interface ToolSpec {
+  auxiliaryExecutables?: Array<{
+    outputName: string;
+    source: string;
+  }>;
   buildDirName: string;
   browserModuleOutputBaseName?: string;
   customExecutableSource?: string;
@@ -132,16 +136,25 @@ const toolSpecs: ToolSpec[] = [
       ...sharedConfigureArgs,
       '--disable-ffmpeg',
       '--disable-ffprobe',
+      '--enable-filter=ebur128',
       '--enable-swresample',
       '--enable-muxer=wav',
       '--enable-encoder=pcm_f32le',
     ],
     customExecutableSource: path.join(projectRoot, 'src-wasm', 'embedded', 'ffdecode.c'),
+    auxiliaryExecutables: [
+      {
+        outputName: 'ffloudness',
+        source: path.join(projectRoot, 'src-wasm', 'embedded', 'ffloudness.c'),
+      },
+    ],
     browserModuleOutputBaseName: 'ffdecode_browser_module',
     directModuleOutputBaseName: 'ffdecode_module',
     directModuleSource: path.join(projectRoot, 'src-wasm', 'embedded', 'ffdecode_module.c'),
     name: 'ffmpeg',
     outputs: [
+      'ffloudness',
+      'ffloudness.wasm',
       'ffmpeg',
       'ffmpeg.wasm',
       'ffdecode_browser_module.js',
@@ -186,6 +199,7 @@ async function buildTool(spec: ToolSpec, ffmpegRevision: string, emscripten: Ems
   const buildDir = path.join(buildRoot, spec.buildDirName);
   const stampPath = path.join(buildDir, '.stamp.json');
   const nextStamp = JSON.stringify({
+    auxiliaryExecutables: spec.auxiliaryExecutables ?? [],
     browserModuleOutputBaseName: spec.browserModuleOutputBaseName ?? null,
     configureArgs: spec.configureArgs,
     customExecutableSource: spec.customExecutableSource ?? null,
@@ -216,6 +230,10 @@ async function buildTool(spec: ToolSpec, ffmpegRevision: string, emscripten: Ems
       await buildCustomExecutable(spec, buildDir, emscripten);
     }
 
+    for (const executable of spec.auxiliaryExecutables ?? []) {
+      await buildAuxiliaryExecutable(executable.source, executable.outputName, buildDir, emscripten);
+    }
+
     if (spec.directModuleSource && spec.directModuleOutputBaseName) {
       await buildDirectModule(spec, buildDir, emscripten);
     }
@@ -230,7 +248,10 @@ async function buildTool(spec: ToolSpec, ffmpegRevision: string, emscripten: Ems
   for (const outputName of spec.outputs) {
     const outputPath = path.join(outputRoot, outputName);
     await fsp.copyFile(path.join(buildDir, outputName), outputPath);
-    if (outputName === spec.name) {
+    if (
+      outputName === spec.name
+      || (spec.auxiliaryExecutables ?? []).some((executable) => executable.outputName === outputName)
+    ) {
       await patchGeneratedLauncher(outputPath);
     }
   }
@@ -457,6 +478,15 @@ async function buildCustomExecutable(spec: ToolSpec, buildDir: string, emscripte
     return;
   }
 
+  await buildAuxiliaryExecutable(spec.customExecutableSource, spec.name, buildDir, emscripten);
+}
+
+async function buildAuxiliaryExecutable(
+  sourcePath: string,
+  outputName: string,
+  buildDir: string,
+  emscripten: EmscriptenToolchain,
+): Promise<void> {
   await run(
     emscripten.emcc,
     [
@@ -473,7 +503,9 @@ async function buildCustomExecutable(spec: ToolSpec, buildDir: string, emscripte
       ffmpegSourceDir,
       '-I',
       buildDir,
-      spec.customExecutableSource,
+      sourcePath,
+      '-L',
+      path.join(buildDir, 'libavfilter'),
       '-L',
       path.join(buildDir, 'libavformat'),
       '-L',
@@ -481,14 +513,18 @@ async function buildCustomExecutable(spec: ToolSpec, buildDir: string, emscripte
       '-L',
       path.join(buildDir, 'libswresample'),
       '-L',
+      path.join(buildDir, 'libswscale'),
+      '-L',
       path.join(buildDir, 'libavutil'),
+      '-lavfilter',
       '-lavformat',
       '-lavcodec',
       '-lswresample',
+      '-lswscale',
       '-lavutil',
       '-lm',
       '-o',
-      path.join(buildDir, spec.name),
+      path.join(buildDir, outputName),
     ],
     {
       cwd: buildDir,

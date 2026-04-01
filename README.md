@@ -115,7 +115,7 @@ For the bundled FFmpeg revision and rebuild notes used by the embedded media too
 ## Notes
 
 - Very long, high-sample-rate, or multichannel files can use substantial memory while audioscope decodes audio and prepares waveform and spectrogram analysis.
-- Loudness values currently use the same mono downmix used for waveform and spectrogram analysis. Multichannel audio renders correctly, but LUFS/LRA/peak numbers are downmix-based.
+- Loudness values are measured with the bundled FFmpeg `ebur128` analysis path and preserve the source channel layout when available.
 
 ## Development
 

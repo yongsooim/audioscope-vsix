@@ -4,6 +4,7 @@ import {
   type EmbeddedExecutableStatus,
   getEmbeddedExecutableStatusSync,
   runEmbeddedFfmpegDecodeToPcm,
+  runEmbeddedFfmpegMeasureLoudness,
   runEmbeddedFfmpegDecodeToWav,
   runEmbeddedFfprobe,
 } from './embeddedMediaTools';
@@ -85,6 +86,21 @@ export interface MediaMetadataPayload {
   summary: MediaMetadataSummaryPayload;
   tags: MediaMetadataTagPayload[];
   toolStatus: ExternalToolStatusPayload;
+}
+
+export interface LoudnessSummaryPayload {
+  channelCount: number | null;
+  channelLayout: string | null;
+  channelMode: string;
+  integratedLufs: number | null;
+  integratedThresholdLufs: number | null;
+  loudnessRangeLu: number | null;
+  lraHighLufs: number | null;
+  lraLowLufs: number | null;
+  rangeThresholdLufs: number | null;
+  samplePeakDbfs: number | null;
+  source: 'FFmpeg ebur128';
+  truePeakDbtp: number | null;
 }
 
 export type DecodeFallbackPayload =
@@ -500,6 +516,45 @@ async function runFfprobe(
 export async function getMediaMetadata(resource: vscode.Uri): Promise<MediaMetadataPayload> {
   const { metadata } = await runFfprobe(resource);
   return metadata;
+}
+
+export async function getLoudnessSummary(resource: vscode.Uri): Promise<LoudnessSummaryPayload> {
+  const preferredTools = await resolvePreferredTools(resource);
+  const toolStatus = createToolStatusPayload(true, preferredTools);
+
+  if (!toolStatus.fileBacked) {
+    throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
+  }
+
+  if (!toolStatus.ffmpegAvailable) {
+    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
+  }
+
+  if (!toolStatus.canDecodeFallback) {
+    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
+  }
+
+  const summary = await runEmbeddedFfmpegMeasureLoudness(resource, FFMPEG_DECODE_TIMEOUT_MS);
+
+  return {
+    ...summary,
+    channelCount: typeof summary.channelCount === 'number' && Number.isFinite(summary.channelCount)
+      ? Math.max(0, Math.trunc(summary.channelCount))
+      : null,
+    channelLayout: typeof summary.channelLayout === 'string' && summary.channelLayout.trim().length > 0
+      ? summary.channelLayout.trim()
+      : null,
+    channelMode: 'source layout',
+    integratedLufs: parseNumberValue(summary.integratedLufs),
+    integratedThresholdLufs: parseNumberValue(summary.integratedThresholdLufs),
+    loudnessRangeLu: parseNumberValue(summary.loudnessRangeLu),
+    lraHighLufs: parseNumberValue(summary.lraHighLufs),
+    lraLowLufs: parseNumberValue(summary.lraLowLufs),
+    rangeThresholdLufs: parseNumberValue(summary.rangeThresholdLufs),
+    samplePeakDbfs: parseNumberValue(summary.samplePeakDbfs),
+    source: 'FFmpeg ebur128',
+    truePeakDbtp: parseNumberValue(summary.truePeakDbtp),
+  };
 }
 
 export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenResult> {

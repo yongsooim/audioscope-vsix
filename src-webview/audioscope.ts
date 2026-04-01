@@ -28,7 +28,6 @@ const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 12;
 const VIEWPORT_RATIO_MIN = 0;
 const VIEWPORT_RATIO_MAX = 1;
 const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. Rebuild or reinstall audioscope to restore metadata and decoding.';
-const LOUDNESS_METHOD_LABEL = 'Gated loudness';
 
 const WAVEFORM_COLOR = '#8ccadd';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
@@ -524,6 +523,30 @@ window.addEventListener('message', (event) => {
     return;
   }
 
+  if (message?.type === 'loudnessSummaryReady') {
+    const loadToken = Number(message.body?.loadToken) || 0;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    setReadyLoudnessSummary(message.body);
+    addDebugTimelineEvent('webview.loudnessSummary.ready', '', 'webview', loadToken);
+    return;
+  }
+
+  if (message?.type === 'loudnessSummaryError') {
+    const loadToken = Number(message.body?.loadToken) || 0;
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    setLoudnessSummaryUnavailable(message.body?.message ?? 'Failed to measure loudness summary.');
+    addDebugTimelineEvent('webview.loudnessSummary.error', state.loudness.message, 'webview', loadToken);
+    return;
+  }
+
 });
 
 function initializeKeyboardFocus() {
@@ -851,8 +874,14 @@ function createMediaMetadataState(status = 'idle') {
 function createLoudnessSummaryState(status = 'idle') {
   return {
     status,
+    channelCount: null,
+    channelLayout: null,
+    integratedThresholdLufs: null,
     integratedLufs: null,
     loudnessRangeLu: null,
+    lraHighLufs: null,
+    lraLowLufs: null,
+    rangeThresholdLufs: null,
     samplePeakDbfs: null,
     truePeakDbtp: null,
     source: null,
@@ -866,15 +895,26 @@ function setPendingLoudnessSummary() {
   renderLoudnessSummary();
 }
 
+function parseLoudnessNumber(value) {
+  const numericValue = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
 function setReadyLoudnessSummary(summary) {
   state.loudness = {
     status: 'ready',
-    integratedLufs: Number(summary?.integratedLufs),
-    loudnessRangeLu: Number(summary?.loudnessRangeLu),
-    samplePeakDbfs: Number(summary?.samplePeakDbfs),
-    truePeakDbtp: Number(summary?.truePeakDbtp),
-    source: summary?.source ?? 'libebur128',
-    channelMode: summary?.channelMode ?? 'mono-downmix',
+    channelCount: parseLoudnessNumber(summary?.channelCount),
+    channelLayout: typeof summary?.channelLayout === 'string' ? summary.channelLayout : null,
+    integratedThresholdLufs: parseLoudnessNumber(summary?.integratedThresholdLufs),
+    integratedLufs: parseLoudnessNumber(summary?.integratedLufs),
+    loudnessRangeLu: parseLoudnessNumber(summary?.loudnessRangeLu),
+    lraHighLufs: parseLoudnessNumber(summary?.lraHighLufs),
+    lraLowLufs: parseLoudnessNumber(summary?.lraLowLufs),
+    rangeThresholdLufs: parseLoudnessNumber(summary?.rangeThresholdLufs),
+    samplePeakDbfs: parseLoudnessNumber(summary?.samplePeakDbfs),
+    truePeakDbtp: parseLoudnessNumber(summary?.truePeakDbtp),
+    source: summary?.source ?? 'FFmpeg ebur128',
+    channelMode: summary?.channelMode ?? 'source layout',
     message: '',
   };
   renderLoudnessSummary();
@@ -918,7 +958,7 @@ function formatLoudnessValue(status, value, unit) {
 
 function formatLoudnessSourceLabel(loudness) {
   return loudness?.status === 'ready'
-    ? `${loudness.source} • ${loudness.channelMode}`
+    ? [loudness.source, loudness.channelLayout || loudness.channelMode].filter(Boolean).join(' • ')
     : null;
 }
 
@@ -928,7 +968,6 @@ function formatLoudnessSummaryTitle(loudness) {
   }
 
   return [
-    LOUDNESS_METHOD_LABEL,
     formatLoudnessSourceLabel(loudness),
   ].filter(Boolean).join('\n');
 }
@@ -1202,9 +1241,12 @@ function renderMediaMetadata() {
 
   const loudnessSection = appendMetadataDetailSection(detailRoot, 'Loudness');
   const loudness = state.loudness ?? createLoudnessSummaryState('idle');
-  appendMetadataDetailRow(loudnessSection, 'Method', LOUDNESS_METHOD_LABEL);
   appendMetadataDetailRow(loudnessSection, 'Integrated', formatLoudnessValue(loudness.status, loudness.integratedLufs, 'LUFS'));
+  appendMetadataDetailRow(loudnessSection, 'I Threshold', formatLoudnessValue(loudness.status, loudness.integratedThresholdLufs, 'LUFS'));
   appendMetadataDetailRow(loudnessSection, 'Range', formatLoudnessValue(loudness.status, loudness.loudnessRangeLu, 'LU'));
+  appendMetadataDetailRow(loudnessSection, 'LRA Threshold', formatLoudnessValue(loudness.status, loudness.rangeThresholdLufs, 'LUFS'));
+  appendMetadataDetailRow(loudnessSection, 'LRA Low', formatLoudnessValue(loudness.status, loudness.lraLowLufs, 'LUFS'));
+  appendMetadataDetailRow(loudnessSection, 'LRA High', formatLoudnessValue(loudness.status, loudness.lraHighLufs, 'LUFS'));
   appendMetadataDetailRow(loudnessSection, 'Sample Peak', formatLoudnessValue(loudness.status, loudness.samplePeakDbfs, 'dBFS'));
   appendMetadataDetailRow(loudnessSection, 'True Peak', formatLoudnessValue(loudness.status, loudness.truePeakDbtp, 'dBTP'));
   appendMetadataDetailRow(loudnessSection, 'Note', loudness.status === 'error' ? loudness.message : null);
@@ -1404,6 +1446,7 @@ async function loadAudioFile(payload) {
   renderSpectrogramScale();
   requestMediaMetadata(loadToken, payload);
   addDebugTimelineEvent('webview.mediaMetadata.requested');
+  requestLoudnessSummary(loadToken, payload);
   void loadDecodedAudioSource(loadToken, payload);
 }
 
@@ -1512,6 +1555,28 @@ function requestMediaMetadata(loadToken, payload) {
     type: 'requestMediaMetadata',
     body: { loadToken },
   });
+}
+
+function requestLoudnessSummary(loadToken, payload) {
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  if (!payload?.fileBacked) {
+    setLoudnessSummaryUnavailable('Loudness is only available for local filesystem files.');
+    return;
+  }
+
+  if (!state.externalTools.ffmpegAvailable) {
+    setLoudnessSummaryUnavailable(state.externalTools.guidance || 'ffmpeg loudness analysis is unavailable.');
+    return;
+  }
+
+  vscode.postMessage({
+    type: 'requestLoudnessSummary',
+    body: { loadToken },
+  });
+  addDebugTimelineEvent('webview.loudnessSummary.requested', '', 'webview', loadToken);
 }
 
 function setAnalysisSourceKind(sourceKind) {

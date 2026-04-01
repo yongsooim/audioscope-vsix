@@ -4,6 +4,7 @@ import {
   createInitialExternalToolStatus,
   decodeWithFfmpeg,
   getExternalToolStatus,
+  getLoudnessSummary,
   getMediaMetadata,
   probeAudioOpen,
   type AudioscopePayload,
@@ -249,6 +250,37 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
               loadToken,
               message: error instanceof Error ? error.message : String(error),
               toolStatus,
+            },
+          });
+        }
+        return;
+      }
+
+      if (message?.type === 'requestLoudnessSummary') {
+        const loadToken = Number(message.body?.loadToken) || 0;
+        await sendDebugTimelineEvent('host.loudnessSummary.request.start', loadToken);
+
+        try {
+          const summary = await getLoudnessSummary(document.uri);
+          await sendDebugTimelineEvent('host.loudnessSummary.request.done', loadToken);
+          await webviewPanel.webview.postMessage({
+            type: 'loudnessSummaryReady',
+            body: {
+              ...summary,
+              loadToken,
+            },
+          });
+        } catch (error) {
+          await sendDebugTimelineEvent(
+            'host.loudnessSummary.request.error',
+            loadToken,
+            error instanceof Error ? error.message : String(error),
+          );
+          await webviewPanel.webview.postMessage({
+            type: 'loudnessSummaryError',
+            body: {
+              loadToken,
+              message: error instanceof Error ? error.message : String(error),
             },
           });
         }
