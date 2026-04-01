@@ -1909,17 +1909,6 @@ function renderWaveformUi({ syncSpectrogram = true } = {}) {
     elements.waveZoomChip.textContent = `Zoom ${zoomFactor.toFixed(1)}x`;
   }
   elements.waveFollow.checked = state.followPlayback;
-  const hintText = duration > 0
-    ? 'Seek, drag loop, or wheel to zoom and pan.'
-    : 'Preparing playback and analysis.';
-  elements.waveHint.textContent =
-    hintText;
-  if (elements.waveToolbar) {
-    elements.waveToolbar.title = hintText;
-  }
-  if (elements.waveToolbarInfo) {
-    elements.waveToolbarInfo.title = hintText;
-  }
   if (loopGroup instanceof HTMLElement) {
     loopGroup.hidden = false;
   }

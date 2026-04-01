@@ -291,7 +291,6 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                 <div id="media-metadata-summary" class="media-metadata-summary" tabindex="0">Checking metadata…</div>
                 <div id="media-metadata-detail" class="media-metadata-detail" aria-hidden="true" hidden></div>
               </div>
-              <div id="wave-hint" hidden>Click to seek. Drag to set a loop. Wheel to zoom or pan.</div>
             </div>
             <div class="wave-toolbar-actions">
               <div class="wave-toolbar-group wave-toolbar-group-zoom">
