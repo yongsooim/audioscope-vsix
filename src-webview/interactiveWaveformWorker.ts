@@ -1,8 +1,5 @@
-import {
-  buildInteractiveWaveformData,
-  extractInteractiveWaveformSlice,
-  resizeInteractiveWaveformSurface,
-} from './interactiveWaveformRenderer';
+import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from './waveCoreRuntime';
+import { resizeInteractiveWaveformSurface } from './interactiveWaveformRenderer';
 
 const TOP_PADDING = 10;
 const BOTTOM_PADDING = 10;
@@ -12,12 +9,13 @@ const SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 24;
 const RAW_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 1;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
 const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
-const WAVEFORM_RUNTIME_VARIANT = 'waveform-js-worker';
+const WAVEFORM_RUNTIME_VARIANT = 'waveform-worker-pending';
 
 let requestQueue = Promise.resolve();
 let renderLoopActive = false;
 let pendingRenderRequest = null;
 let pendingPresentation = null;
+let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 
 const surfaceState = {
   backCanvas: null,
@@ -51,12 +49,15 @@ self.onmessage = (event) => {
 
   switch (message.type) {
     case 'bootstrapRuntime':
-      postDebugTimelineEvent('waveform-worker.bootstrapRuntime');
-      self.postMessage({
-        type: 'runtimeReady',
-        body: {
-          runtimeVariant: WAVEFORM_RUNTIME_VARIANT,
-        },
+      enqueueRequest(async () => {
+        postDebugTimelineEvent('waveform-worker.bootstrapRuntime');
+        const runtime = await getRuntime();
+        self.postMessage({
+          type: 'runtimeReady',
+          body: {
+            runtimeVariant: runtime.variant,
+          },
+        });
       });
       return;
     case 'initCanvas':
@@ -70,12 +71,14 @@ self.onmessage = (event) => {
       return;
     case 'attachAudioSession':
       enqueueRequest(async () => {
-        attachAudioSession(message.body);
+        const runtime = await getRuntime();
+        attachAudioSession(runtime, message.body);
       });
       return;
     case 'buildWaveformPyramid':
       enqueueRequest(async () => {
-        buildWaveformPyramid();
+        const runtime = await getRuntime();
+        buildWaveformPyramid(runtime);
         void pumpRenderLoop();
       });
       return;
@@ -92,7 +95,8 @@ self.onmessage = (event) => {
     case 'disposeSession':
       resolvePendingPresentation(null, false);
       enqueueRequest(async () => {
-        disposeSession();
+        const runtime = await getRuntime();
+        disposeSession(runtime);
         clearCanvas();
       });
       return;
@@ -119,8 +123,12 @@ function createEmptyAnalysisState() {
     sampleCount: 0,
     duration: 0,
     runtimeVariant: WAVEFORM_RUNTIME_VARIANT,
+    representativeSampleValues: null,
+    representativeSampleValuesCapacity: 0,
     waveformData: null,
+    waveformPcmPointer: 0,
     waveformSlice: null,
+    waveformSlicePointer: 0,
     waveformSliceCapacity: 0,
   };
 }
@@ -320,8 +328,9 @@ function clearCanvas() {
   }
 }
 
-function attachAudioSession(options) {
+function attachAudioSession(runtime, options) {
   postDebugTimelineEvent('waveform-worker.attachAudioSession.start');
+  const module = runtime.module;
   const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
   const duration = Number(options?.duration);
@@ -338,12 +347,23 @@ function attachAudioSession(options) {
   const isNewAudioSession = sessionVersion !== analysisState.attachedSessionVersion;
 
   if (isNewAudioSession) {
+    disposeWasmSession(module);
     const samples = new Float32Array(options.samplesBuffer);
 
-    analysisState.waveformData = {
-      samples,
-      levels: [],
-    };
+    if (!module._wave_prepare_session(sampleCount, sampleRate, duration)) {
+      throw new Error('Failed to allocate waveform session.');
+    }
+
+    const pcmPointer = module._wave_get_pcm_ptr();
+
+    if (!pcmPointer) {
+      throw new Error('Wasm PCM allocation failed.');
+    }
+
+    getHeapF32View(module, pcmPointer, sampleCount).set(samples);
+    analysisState.waveformPcmPointer = pcmPointer;
+
+    analysisState.waveformData = null;
     analysisState.waveformBuilt = false;
     analysisState.waveformSlice = null;
     analysisState.waveformSliceCapacity = 0;
@@ -354,6 +374,7 @@ function attachAudioSession(options) {
   analysisState.sampleRate = sampleRate;
   analysisState.sampleCount = sampleCount;
   analysisState.duration = duration;
+  analysisState.runtimeVariant = runtime.variant;
 
   self.postMessage({
     type: 'analysisInitialized',
@@ -367,7 +388,7 @@ function attachAudioSession(options) {
   postDebugTimelineEvent('waveform-worker.attachAudioSession.done', `samples=${sampleCount} rate=${sampleRate}`);
 }
 
-function buildWaveformPyramid() {
+function buildWaveformPyramid(runtime) {
   const startedAt = performance.now();
   postDebugTimelineEvent('waveform-worker.buildWaveformPyramid.start');
   assertInitialized();
@@ -380,13 +401,7 @@ function buildWaveformPyramid() {
     return;
   }
 
-  const samples = analysisState.waveformData?.samples;
-
-  if (!(samples instanceof Float32Array)) {
-    throw new Error('Waveform samples are unavailable.');
-  }
-
-  analysisState.waveformData = buildInteractiveWaveformData(samples, { copy: false });
+  const levelCount = runtime.module._wave_build_waveform_pyramid();
   analysisState.waveformBuilt = true;
 
   self.postMessage({
@@ -394,7 +409,7 @@ function buildWaveformPyramid() {
   });
   postDebugTimelineEvent(
     'waveform-worker.buildWaveformPyramid.done',
-    `${(performance.now() - startedAt).toFixed(1)} ms`,
+    `${(performance.now() - startedAt).toFixed(1)} ms levels=${levelCount}`,
   );
 }
 async function pumpRenderLoop() {
@@ -450,9 +465,9 @@ async function renderWaveform(request) {
   const visibleSampleCount = Math.max(1, renderSpan * analysisState.sampleRate);
   const samplesPerPixel = visibleSampleCount / columnCount;
   const pixelsPerSample = columnCount / visibleSampleCount;
-  const sampleData = hasSampleWaveformData(analysisState.waveformData)
-    ? analysisState.waveformData.samples
-    : null;
+  const runtime = await getRuntime();
+  const module = runtime.module;
+  const sampleData = getWaveformSampleData(module);
   const samplePlotMode = sampleData instanceof Float32Array && samplesPerPixel <= SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
   const rawSamplePlotMode = sampleData instanceof Float32Array && samplesPerPixel <= RAW_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL;
   const sampleStartPosition = viewStart * analysisState.sampleRate;
@@ -465,15 +480,15 @@ async function renderWaveform(request) {
   resizeSurface();
   ensureBackBuffer();
 
-  const slice = ensureWaveformSliceCapacity(columnCount * 2);
-  extractInteractiveWaveformSlice(
-    analysisState.waveformData,
-    analysisState.duration,
-    viewStart,
-    viewEnd,
-    columnCount,
-    slice,
-  );
+  let slice = null;
+
+  if (!rawSamplePlotMode && !samplePlotMode) {
+    slice = ensureWaveformSliceCapacity(module, columnCount * 2);
+
+    if (!module._wave_extract_waveform_slice(viewStart, viewEnd, columnCount, analysisState.waveformSlicePointer)) {
+      throw new Error('Waveform slice extraction failed.');
+    }
+  }
 
   self.postMessage({
     type: 'waveformReady',
@@ -656,12 +671,13 @@ function drawRepresentativeSamplePlot(renderSurface, samples, drawColumns, color
   context.lineJoin = 'round';
   context.lineCap = 'round';
   context.beginPath();
+  const representativeValues = ensureRepresentativeSampleValueCapacity(drawColumns);
 
   for (let x = 0; x < drawColumns; x += 1) {
     const columnStartPosition = sampleStartPosition + (x / drawColumns) * visibleSampleCount;
     const columnEndPosition = sampleStartPosition + ((x + 1) / drawColumns) * visibleSampleCount;
-    const sample = pickRepresentativeSample(samples, columnStartPosition, columnEndPosition);
-    const sampleValue = sample?.value ?? 0;
+    const sampleValue = pickRepresentativeSampleValue(samples, columnStartPosition, columnEndPosition);
+    representativeValues[x] = sampleValue;
     const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
 
     if (x === 0) {
@@ -676,21 +692,21 @@ function drawRepresentativeSamplePlot(renderSurface, samples, drawColumns, color
 
   if (pixelsPerSample >= SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE) {
     const pointSize = Math.max(1.5, surfaceState.renderScale * 1.1);
+    context.beginPath();
 
     for (let x = 0; x < drawColumns; x += 1) {
-      const columnStartPosition = sampleStartPosition + (x / drawColumns) * visibleSampleCount;
-      const columnEndPosition = sampleStartPosition + ((x + 1) / drawColumns) * visibleSampleCount;
-      const sample = pickRepresentativeSample(samples, columnStartPosition, columnEndPosition);
-      const sampleValue = sample?.value ?? 0;
+      const sampleValue = representativeValues[x] ?? 0;
       const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
 
-      context.fillRect(
+      context.rect(
         Math.round(x - pointSize * 0.5),
         Math.round(y - pointSize * 0.5),
         Math.max(1, Math.round(pointSize)),
         Math.max(1, Math.round(pointSize)),
       );
     }
+
+    context.fill();
   }
 }
 
@@ -743,6 +759,7 @@ function drawRawSamplePlot(renderSurface, samples, drawColumns, color, pixelsPer
     const pointSize = Math.max(1.5, surfaceState.renderScale * 1.1);
     const firstSampleIndex = Math.max(0, Math.ceil(sampleStartPosition));
     const lastSampleIndex = Math.min(maxSampleIndex, Math.floor(sampleStartPosition + visibleSampleSpan));
+    context.beginPath();
 
     for (let sampleIndex = firstSampleIndex; sampleIndex <= lastSampleIndex; sampleIndex += 1) {
       const ratio = visibleSampleSpan <= 0
@@ -752,13 +769,15 @@ function drawRawSamplePlot(renderSurface, samples, drawColumns, color, pixelsPer
       const sampleValue = clamp(samples[sampleIndex] ?? 0, -1, 1);
       const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
 
-      context.fillRect(
+      context.rect(
         Math.round(x - pointSize * 0.5),
         Math.round(y - pointSize * 0.5),
         Math.max(1, Math.round(pointSize)),
         Math.max(1, Math.round(pointSize)),
       );
     }
+
+    context.fill();
   }
 }
 
@@ -784,11 +803,11 @@ function getInterpolatedSample(samples, position) {
   return a + (b - a) * fraction;
 }
 
-function pickRepresentativeSample(samples, startPosition, endPosition) {
+function pickRepresentativeSampleValue(samples, startPosition, endPosition) {
   const maxSampleIndex = Math.max(0, samples.length - 1);
 
   if (maxSampleIndex < 0) {
-    return null;
+    return 0;
   }
 
   const safeStart = clamp(Math.floor(startPosition), 0, maxSampleIndex);
@@ -823,10 +842,7 @@ function pickRepresentativeSample(samples, startPosition, endPosition) {
     }
   }
 
-  return {
-    index: bestIndex,
-    value: bestValue,
-  };
+  return bestValue;
 }
 
 function waitForPresentationDecision(generation) {
@@ -854,27 +870,91 @@ function resolvePendingPresentation(body, shouldPresent) {
   resolve(shouldPresent);
 }
 
-function ensureWaveformSliceCapacity(floatCount) {
-  if (analysisState.waveformSliceCapacity >= floatCount && analysisState.waveformSlice) {
-    return analysisState.waveformSlice;
+function ensureWaveformSliceCapacity(module, floatCount) {
+  if (
+    analysisState.waveformSliceCapacity >= floatCount
+    && analysisState.waveformSlicePointer
+  ) {
+    const view = getHeapF32View(module, analysisState.waveformSlicePointer, floatCount);
+    analysisState.waveformSlice = view;
+    return view;
   }
 
-  analysisState.waveformSlice = new Float32Array(floatCount);
+  if (analysisState.waveformSlicePointer) {
+    module._free(analysisState.waveformSlicePointer);
+  }
+
+  const pointer = module._malloc(floatCount * Float32Array.BYTES_PER_ELEMENT);
+
+  if (!pointer) {
+    throw new Error('Failed to allocate waveform slice buffer.');
+  }
+
+  analysisState.waveformSlicePointer = pointer;
   analysisState.waveformSliceCapacity = floatCount;
+  analysisState.waveformSlice = getHeapF32View(module, pointer, floatCount);
   return analysisState.waveformSlice;
 }
 
+function ensureRepresentativeSampleValueCapacity(count) {
+  if (
+    analysisState.representativeSampleValuesCapacity >= count
+    && analysisState.representativeSampleValues instanceof Float32Array
+  ) {
+    return analysisState.representativeSampleValues;
+  }
+
+  analysisState.representativeSampleValues = new Float32Array(count);
+  analysisState.representativeSampleValuesCapacity = count;
+  return analysisState.representativeSampleValues;
+}
+
 function hasRenderableWaveformData(waveformData) {
-  return hasSampleWaveformData(waveformData)
-    || (Array.isArray(waveformData?.levels) && waveformData.levels.length > 0);
+  return Boolean(analysisState.waveformPcmPointer && analysisState.sampleCount > 0);
 }
 
 function hasSampleWaveformData(waveformData) {
   return waveformData?.samples instanceof Float32Array && waveformData.samples.length > 0;
 }
 
-function disposeSession() {
+function getWaveformSampleData(module: WaveCoreModule): Float32Array | null {
+  if (!analysisState.waveformPcmPointer || analysisState.sampleCount <= 0) {
+    return null;
+  }
+
+  return getHeapF32View(module, analysisState.waveformPcmPointer, analysisState.sampleCount);
+}
+
+function disposeWasmSession(module: WaveCoreModule) {
+  if (analysisState.waveformSlicePointer) {
+    module._free(analysisState.waveformSlicePointer);
+  }
+
+  module._wave_dispose_session();
+  analysisState.waveformPcmPointer = 0;
+  analysisState.waveformSlicePointer = 0;
+  analysisState.waveformSlice = null;
+  analysisState.waveformSliceCapacity = 0;
+}
+
+function disposeSession(runtime: WaveCoreRuntime) {
+  if (analysisState.initialized) {
+    disposeWasmSession(runtime.module);
+  }
+
   analysisState = createEmptyAnalysisState();
+}
+
+function getRuntime() {
+  if (!runtimePromise) {
+    runtimePromise = loadWaveCoreRuntime();
+  }
+
+  return runtimePromise;
+}
+
+function getHeapF32View(module: WaveCoreModule, pointer: number, length: number): Float32Array {
+  return new Float32Array(module.HEAPF32.buffer, pointer, length);
 }
 
 function assertInitialized() {
