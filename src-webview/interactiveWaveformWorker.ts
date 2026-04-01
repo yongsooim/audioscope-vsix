@@ -14,13 +14,17 @@ const WAVEFORM_RUNTIME_VARIANT = 'waveform-worker-pending';
 let requestQueue = Promise.resolve();
 let renderLoopActive = false;
 let pendingRenderRequest = null;
-let pendingPresentation = null;
+let latestRequestedGeneration = 0;
 let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 
 const surfaceState = {
   backCanvas: null,
   backContext: null,
   canvas: null,
+  committedCanvas: null,
+  committedContext: null,
+  committedHeight: 0,
+  committedWidth: 0,
   context: null,
   width: 0,
   height: 0,
@@ -84,16 +88,12 @@ self.onmessage = (event) => {
       return;
     case 'renderWaveformView':
       pendingRenderRequest = message.body ?? null;
+      latestRequestedGeneration = Number.isFinite(Number(message.body?.generation))
+        ? Number(message.body.generation)
+        : latestRequestedGeneration;
       void pumpRenderLoop();
       return;
-    case 'commitWaveformRender':
-      resolvePendingPresentation(message.body, true);
-      return;
-    case 'discardWaveformRender':
-      resolvePendingPresentation(message.body, false);
-      return;
     case 'disposeSession':
-      resolvePendingPresentation(null, false);
       enqueueRequest(async () => {
         const runtime = await getRuntime();
         disposeSession(runtime);
@@ -102,11 +102,15 @@ self.onmessage = (event) => {
       return;
     case 'dispose':
       pendingRenderRequest = null;
-      resolvePendingPresentation(null, false);
+      latestRequestedGeneration = 0;
       surfaceState.backContext = null;
       surfaceState.backCanvas = null;
       surfaceState.context = null;
       surfaceState.canvas = null;
+      surfaceState.committedCanvas = null;
+      surfaceState.committedContext = null;
+      surfaceState.committedWidth = 0;
+      surfaceState.committedHeight = 0;
       analysisState = createEmptyAnalysisState();
       return;
     default:
@@ -153,13 +157,13 @@ function initializeCanvas(options) {
     ? options.color
     : surfaceState.color;
 
-  if (!surfaceState.canvas) {
-    return;
+  if (surfaceState.canvas) {
+    resizeDisplaySurface();
+    surfaceState.context = surfaceState.canvas.getContext('2d');
   }
 
-  resizeSurface();
-  surfaceState.context = surfaceState.canvas.getContext('2d');
-  ensureBackBuffer();
+  ensureBackBuffer(surfaceState.width, surfaceState.height, surfaceState.renderScale);
+  ensureCommittedBuffer(surfaceState.width, surfaceState.height, surfaceState.renderScale);
   clearCanvas();
 }
 
@@ -172,20 +176,32 @@ function resizeCanvas(options) {
     ? options.color
     : surfaceState.color;
 
-  const resized = resizeSurface();
-  ensureBackBuffer();
+  const resized = resizeDisplaySurface();
 
   if (resized && resizeSnapshot) {
     restoreDisplayedSurfaceSnapshot(resizeSnapshot);
   }
 }
 
-function resizeSurface() {
-  if (!surfaceState.canvas) {
+function resizeSurface(surface, width, height, renderScale) {
+  if (!surface) {
     return false;
   }
 
   return resizeInteractiveWaveformSurface(
+    surface,
+    width,
+    height,
+    renderScale,
+  );
+}
+
+function resizeDisplaySurface() {
+  if (!surfaceState.canvas) {
+    return false;
+  }
+
+  return resizeSurface(
     surfaceState.canvas,
     surfaceState.width,
     surfaceState.height,
@@ -220,9 +236,6 @@ function restoreDisplayedSurfaceSnapshot(snapshot) {
     surfaceState.canvas && surfaceState.context
       ? { canvas: surfaceState.canvas, context: surfaceState.context }
       : null,
-    surfaceState.backCanvas && surfaceState.backContext
-      ? { canvas: surfaceState.backCanvas, context: surfaceState.backContext }
-      : null,
   ];
 
   for (const surface of surfaces) {
@@ -248,13 +261,7 @@ function restoreDisplayedSurfaceSnapshot(snapshot) {
   }
 }
 
-function ensureBackBuffer() {
-  if (!surfaceState.canvas) {
-    surfaceState.backCanvas = null;
-    surfaceState.backContext = null;
-    return;
-  }
-
+function ensureBackBuffer(width = surfaceState.width, height = surfaceState.height, renderScale = surfaceState.renderScale) {
   if (typeof OffscreenCanvas !== 'function') {
     surfaceState.backCanvas = null;
     surfaceState.backContext = null;
@@ -263,15 +270,31 @@ function ensureBackBuffer() {
 
   if (
     !(surfaceState.backCanvas instanceof OffscreenCanvas)
-    || surfaceState.backCanvas.width !== surfaceState.canvas.width
-    || surfaceState.backCanvas.height !== surfaceState.canvas.height
   ) {
-    surfaceState.backCanvas = new OffscreenCanvas(
-      Math.max(1, surfaceState.canvas.width),
-      Math.max(1, surfaceState.canvas.height),
-    );
+    surfaceState.backCanvas = new OffscreenCanvas(1, 1);
     surfaceState.backContext = surfaceState.backCanvas.getContext('2d');
   }
+
+  resizeSurface(surfaceState.backCanvas, width, height, renderScale);
+}
+
+function ensureCommittedBuffer(width = surfaceState.width, height = surfaceState.height, renderScale = surfaceState.renderScale) {
+  if (typeof OffscreenCanvas !== 'function') {
+    surfaceState.committedCanvas = null;
+    surfaceState.committedContext = null;
+    surfaceState.committedWidth = 0;
+    surfaceState.committedHeight = 0;
+    return;
+  }
+
+  if (!(surfaceState.committedCanvas instanceof OffscreenCanvas)) {
+    surfaceState.committedCanvas = new OffscreenCanvas(1, 1);
+    surfaceState.committedContext = surfaceState.committedCanvas.getContext('2d');
+  }
+
+  resizeSurface(surfaceState.committedCanvas, width, height, renderScale);
+  surfaceState.committedWidth = width;
+  surfaceState.committedHeight = height;
 }
 
 function getRenderSurface() {
@@ -292,26 +315,55 @@ function getRenderSurface() {
   return null;
 }
 
-function presentRenderSurface(renderSurface) {
-  if (!renderSurface || !surfaceState.canvas || !surfaceState.context) {
+function getCommittedSurface() {
+  if (surfaceState.committedCanvas && surfaceState.committedContext) {
+    return {
+      canvas: surfaceState.committedCanvas,
+      context: surfaceState.committedContext,
+    };
+  }
+
+  return null;
+}
+
+function commitRenderSurface(renderSurface, width, height) {
+  if (!renderSurface) {
     return;
   }
 
-  if (renderSurface.canvas === surfaceState.canvas) {
+  if (renderSurface.canvas === surfaceState.backCanvas && surfaceState.backContext) {
+    const previousCommittedCanvas = surfaceState.committedCanvas;
+    const previousCommittedContext = surfaceState.committedContext;
+    surfaceState.committedCanvas = surfaceState.backCanvas;
+    surfaceState.committedContext = surfaceState.backContext;
+    surfaceState.backCanvas = previousCommittedCanvas;
+    surfaceState.backContext = previousCommittedContext;
+    surfaceState.committedWidth = width;
+    surfaceState.committedHeight = height;
     return;
   }
 
-  surfaceState.context.save();
-  surfaceState.context.setTransform(1, 0, 0, 1, 0, 0);
-  surfaceState.context.globalCompositeOperation = 'copy';
-  surfaceState.context.drawImage(renderSurface.canvas, 0, 0);
-  surfaceState.context.restore();
+  ensureCommittedBuffer(width, height, surfaceState.renderScale);
+  if (!surfaceState.committedCanvas || !surfaceState.committedContext) {
+    return;
+  }
+
+  surfaceState.committedContext.save();
+  surfaceState.committedContext.setTransform(1, 0, 0, 1, 0, 0);
+  surfaceState.committedContext.globalCompositeOperation = 'copy';
+  surfaceState.committedContext.drawImage(renderSurface.canvas, 0, 0);
+  surfaceState.committedContext.restore();
+  surfaceState.committedWidth = width;
+  surfaceState.committedHeight = height;
 }
 
 function clearCanvas() {
   const surfaces = [
     surfaceState.backCanvas && surfaceState.backContext
       ? { canvas: surfaceState.backCanvas, context: surfaceState.backContext }
+      : null,
+    surfaceState.committedCanvas && surfaceState.committedContext
+      ? { canvas: surfaceState.committedCanvas, context: surfaceState.committedContext }
       : null,
     surfaceState.canvas && surfaceState.context
       ? { canvas: surfaceState.canvas, context: surfaceState.context }
@@ -326,6 +378,9 @@ function clearCanvas() {
     surface.context.setTransform(1, 0, 0, 1, 0, 0);
     surface.context.clearRect(0, 0, surface.canvas.width, surface.canvas.height);
   }
+
+  surfaceState.committedWidth = 0;
+  surfaceState.committedHeight = 0;
 }
 
 function attachAudioSession(runtime, options) {
@@ -421,21 +476,23 @@ async function pumpRenderLoop() {
 
   try {
     while (pendingRenderRequest) {
-      const request = pendingRenderRequest;
-      pendingRenderRequest = null;
+      if (pendingRenderRequest) {
+        const request = pendingRenderRequest;
+        pendingRenderRequest = null;
 
-      await requestQueue;
+        await requestQueue;
 
-      if (!request || !surfaceState.context || !surfaceState.canvas) {
-        clearCanvas();
-        continue;
+        if (!request) {
+          clearCanvas();
+          continue;
+        }
+
+        if (!analysisState.initialized || !hasRenderableWaveformData(analysisState.waveformData)) {
+          continue;
+        }
+
+        await renderWaveform(request);
       }
-
-      if (!analysisState.initialized || !hasRenderableWaveformData(analysisState.waveformData)) {
-        continue;
-      }
-
-      await renderWaveform(request);
     }
   } catch (error) {
     postError(error);
@@ -477,8 +534,7 @@ async function renderWaveform(request) {
   surfaceState.height = height;
   surfaceState.renderScale = renderScale;
   surfaceState.color = color;
-  resizeSurface();
-  ensureBackBuffer();
+  ensureBackBuffer(width, height, renderScale);
 
   let slice = null;
 
@@ -490,28 +546,7 @@ async function renderWaveform(request) {
     }
   }
 
-  self.postMessage({
-    type: 'waveformReady',
-    body: {
-      columnCount,
-      generation,
-      height,
-      samplePlotMode,
-      rawSamplePlotMode,
-      viewEnd,
-      viewStart,
-      visibleSpan,
-      width,
-    },
-  });
-  postDebugTimelineEvent(
-    'waveform-worker.waveformReady.posted',
-    `${(performance.now() - startedAt).toFixed(1)} ms cols=${columnCount}`,
-  );
-
-  const shouldPresent = await waitForPresentationDecision(generation);
-
-  if (!shouldPresent) {
+  if (generation !== latestRequestedGeneration) {
     return;
   }
 
@@ -525,14 +560,25 @@ async function renderWaveform(request) {
     drawRawSamplePlot(
       renderSurface,
       sampleData,
-      drawColumnsCount(columnCount),
+      drawColumnsCount(renderSurface, columnCount),
       color,
       pixelsPerSample,
       sampleStartPosition,
       visibleSampleSpan,
     );
-    presentRenderSurface(renderSurface);
+    if (generation !== latestRequestedGeneration) {
+      return;
+    }
+    commitRenderSurface(renderSurface, width, height);
+    const bitmap = await snapshotCommittedSurfaceBitmap();
+    if (generation !== latestRequestedGeneration) {
+      if (bitmap && typeof bitmap.close === 'function') {
+        bitmap.close();
+      }
+      return;
+    }
     postWaveformPresented({
+      bitmap,
       columnCount,
       generation,
       height,
@@ -550,14 +596,25 @@ async function renderWaveform(request) {
     drawRepresentativeSamplePlot(
       renderSurface,
       sampleData,
-      drawColumnsCount(columnCount),
+      drawColumnsCount(renderSurface, columnCount),
       color,
       pixelsPerSample,
       sampleStartPosition,
       visibleSampleCount,
     );
-    presentRenderSurface(renderSurface);
+    if (generation !== latestRequestedGeneration) {
+      return;
+    }
+    commitRenderSurface(renderSurface, width, height);
+    const bitmap = await snapshotCommittedSurfaceBitmap();
+    if (generation !== latestRequestedGeneration) {
+      if (bitmap && typeof bitmap.close === 'function') {
+        bitmap.close();
+      }
+      return;
+    }
     postWaveformPresented({
+      bitmap,
       columnCount,
       generation,
       height,
@@ -572,8 +629,19 @@ async function renderWaveform(request) {
   }
 
   drawFrame(renderSurface, slice, columnCount, color, false, pixelsPerSample);
-  presentRenderSurface(renderSurface);
+  if (generation !== latestRequestedGeneration) {
+    return;
+  }
+  commitRenderSurface(renderSurface, width, height);
+  const bitmap = await snapshotCommittedSurfaceBitmap();
+  if (generation !== latestRequestedGeneration) {
+    if (bitmap && typeof bitmap.close === 'function') {
+      bitmap.close();
+    }
+    return;
+  }
   postWaveformPresented({
+    bitmap,
     columnCount,
     generation,
     height,
@@ -586,19 +654,45 @@ async function renderWaveform(request) {
   }, startedAt);
 }
 
+async function snapshotCommittedSurfaceBitmap() {
+  const committedSurface = getCommittedSurface();
+
+  if (!committedSurface) {
+    return null;
+  }
+
+  if (typeof committedSurface.canvas.transferToImageBitmap === 'function') {
+    return committedSurface.canvas.transferToImageBitmap();
+  }
+
+  if (typeof createImageBitmap === 'function') {
+    return createImageBitmap(committedSurface.canvas);
+  }
+
+  return null;
+}
+
 function postWaveformPresented(body, startedAt) {
-  self.postMessage({
+  const bitmap = body?.bitmap instanceof ImageBitmap ? body.bitmap : null;
+  const message = {
     type: 'waveformPresented',
     body,
-  });
+  };
+
+  if (bitmap) {
+    self.postMessage(message, [bitmap]);
+  } else {
+    self.postMessage(message);
+  }
+
   postDebugTimelineEvent(
     'waveform-worker.waveformPresented.posted',
     `${(performance.now() - startedAt).toFixed(1)} ms cols=${body?.columnCount ?? 'n/a'}`,
   );
 }
 
-function drawColumnsCount(columnCount) {
-  const canvas = surfaceState.canvas;
+function drawColumnsCount(renderSurface, columnCount) {
+  const canvas = renderSurface?.canvas ?? surfaceState.canvas;
   const deviceWidth = canvas ? Math.max(1, canvas.width) : columnCount;
   return Math.min(columnCount, deviceWidth);
 }
@@ -887,31 +981,6 @@ function pickRepresentativeSampleValue(samples, startPosition, endPosition) {
   }
 
   return bestValue;
-}
-
-function waitForPresentationDecision(generation) {
-  return new Promise((resolve) => {
-    pendingPresentation = {
-      generation,
-      resolve,
-    };
-  });
-}
-
-function resolvePendingPresentation(body, shouldPresent) {
-  if (!pendingPresentation) {
-    return;
-  }
-
-  const generation = Number(body?.generation);
-
-  if (Number.isFinite(generation) && pendingPresentation.generation !== generation) {
-    return;
-  }
-
-  const { resolve } = pendingPresentation;
-  pendingPresentation = null;
-  resolve(shouldPresent);
 }
 
 function ensureWaveformSliceCapacity(module, floatCount) {

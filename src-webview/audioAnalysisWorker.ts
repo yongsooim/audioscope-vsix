@@ -232,6 +232,12 @@ self.onmessage = (event) => {
       paintSpectrogramDisplay();
       void pumpVisibleLoop();
       return;
+    case 'updateVisibleDisplayRange':
+      if (message.body) {
+        updateCurrentDisplayRange(message.body);
+      }
+      paintSpectrogramDisplay();
+      return;
     case 'cancelGeneration':
       cancelGeneration(message.body?.generation);
       return;

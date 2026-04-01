@@ -38,7 +38,6 @@ export interface AudioTransport {
   getCurrentTime(): number;
   getDuration(): number;
   getLastFallbackReason(): string | null;
-  getLatencyCompensationInfo(): { applied: boolean; estimatedSeconds: number };
   getPlaybackRate(): number;
   getTransportKind(): TransportKind;
   isPlaying(): boolean;
@@ -280,14 +279,6 @@ class AudioWorkletCopyTransport {
 
   getLastFallbackReason(): string | null {
     return this.lastFallbackReason;
-  }
-
-  getLatencyCompensationInfo(): { applied: boolean; estimatedSeconds: number } {
-    const estimatedSeconds = getEstimatedOutputLatencySeconds(this.audioContext);
-    return {
-      applied: hasOutputTimestampContextTime(this.audioContext) || estimatedSeconds > 0,
-      estimatedSeconds,
-    };
   }
 
   getPlaybackRate(): number {
@@ -619,7 +610,7 @@ class AudioWorkletCopyTransport {
       return clampFrame(snapshotState?.currentFrame ?? 0, sourceLength);
     }
 
-    const nowContextTime = getProjectedContextTime(this.audioContext);
+    const nowContextTime = Number(this.audioContext?.currentTime) || 0;
     const elapsedSeconds = Math.max(0, nowContextTime - (Number(snapshotState.contextTime) || 0));
     const projectedFrame = (Number(snapshotState.currentFrame) || 0) + (elapsedSeconds * this.getSourceSampleRate());
 
@@ -789,10 +780,6 @@ class HybridAudioTransport implements AudioTransport {
 
   getLastFallbackReason(): string | null {
     return this.getSelectedTransport().getLastFallbackReason();
-  }
-
-  getLatencyCompensationInfo(): { applied: boolean; estimatedSeconds: number } {
-    return this.getSelectedTransport().getLatencyCompensationInfo();
   }
 
   isPlaying(): boolean {
@@ -1012,9 +999,7 @@ class StretchAudioTransport implements AudioTransport {
     }
 
     if (this.playing && !this.ended) {
-      const estimatedOutputLatencySeconds = getEstimatedOutputLatencySeconds(this.audioContext);
-      const compensatedTime = this.inputTimeSeconds - (estimatedOutputLatencySeconds * this.playbackRate);
-      return this.normalizeObservedTime(compensatedTime);
+      return this.normalizeObservedTime(this.inputTimeSeconds);
     }
 
     return this.normalizePausedTime(this.pausedAtSeconds);
@@ -1030,14 +1015,6 @@ class StretchAudioTransport implements AudioTransport {
 
   getLastFallbackReason(): string | null {
     return this.lastFallbackReason;
-  }
-
-  getLatencyCompensationInfo(): { applied: boolean; estimatedSeconds: number } {
-    const estimatedSeconds = getEstimatedOutputLatencySeconds(this.audioContext);
-    return {
-      applied: hasOutputTimestampContextTime(this.audioContext) || estimatedSeconds > 0,
-      estimatedSeconds,
-    };
   }
 
   isPlaying(): boolean {
@@ -1202,7 +1179,7 @@ class StretchAudioTransport implements AudioTransport {
   }
 
   private getStretchScheduleTime(): number {
-    const contextTime = getProjectedContextTime(this.audioContext);
+    const contextTime = Number(this.audioContext?.currentTime) || 0;
     return contextTime + Math.max(0, this.outputLatencySeconds);
   }
 
@@ -1421,54 +1398,6 @@ function isPlaybackSourceObject(value: PlaybackSource): value is PlaybackSourceO
     && !(value instanceof AudioBuffer)
     && !Array.isArray((value as PlaybackSession).channelBuffers),
   );
-}
-
-function getProjectedContextTime(audioContext: AudioContext | null): number {
-  const outputTimestampContextTime = getOutputTimestampContextTime(audioContext);
-
-  if (outputTimestampContextTime !== null) {
-    return outputTimestampContextTime;
-  }
-
-  const estimatedOutputLatencySeconds = getEstimatedOutputLatencySeconds(audioContext);
-  return (Number(audioContext?.currentTime) || 0) + estimatedOutputLatencySeconds;
-}
-
-function getOutputTimestampContextTime(audioContext: AudioContext | null): number | null {
-  if (!audioContext) {
-    return null;
-  }
-
-  if (typeof audioContext.getOutputTimestamp === 'function') {
-    const outputTimestamp = audioContext.getOutputTimestamp();
-    const contextTime = Number(outputTimestamp?.contextTime);
-
-    if (Number.isFinite(contextTime) && contextTime >= 0) {
-      return contextTime;
-    }
-  }
-
-  return null;
-}
-
-function hasOutputTimestampContextTime(audioContext: AudioContext | null): boolean {
-  return getOutputTimestampContextTime(audioContext) !== null;
-}
-
-function getEstimatedOutputLatencySeconds(audioContext: AudioContext | null): number {
-  if (!audioContext) {
-    return 0;
-  }
-
-  const outputLatency = Number((audioContext as AudioContext & { outputLatency?: number }).outputLatency);
-  const baseLatency = Number(audioContext.baseLatency);
-  const candidates = [outputLatency, baseLatency].filter((value) => Number.isFinite(value) && value > 0);
-
-  if (candidates.length === 0) {
-    return 0;
-  }
-
-  return Math.max(...candidates);
 }
 
 function formatTransportFailureReason(reason: unknown): string {
