@@ -6,6 +6,8 @@ const exportedFunctionNames = [
   'wave_get_pcm_ptr',
   'wave_build_waveform_pyramid',
   'wave_extract_waveform_slice',
+  'wave_plan_waveform_follow_render',
+  'wave_plan_spectrogram_follow_render',
   'wave_render_spectrogram_tile_rgba',
 ] as const;
 
@@ -19,6 +21,7 @@ type WaveCoreWasmExports = WebAssembly.Exports & {
 
 export interface WaveCoreModule {
   HEAPF32: Float32Array;
+  HEAPF64: Float64Array;
   HEAPU8: Uint8Array;
   _free(pointer: number): number;
   _malloc(byteLength: number): number;
@@ -26,6 +29,28 @@ export interface WaveCoreModule {
   _wave_dispose_session(): number;
   _wave_extract_waveform_slice(viewStart: number, viewEnd: number, columnCount: number, outputPointer: number): number;
   _wave_get_pcm_ptr(): number;
+  _wave_plan_spectrogram_follow_render(
+    displayStart: number,
+    displayEnd: number,
+    duration: number,
+    pixelWidth: number,
+    bufferFactor: number,
+    outputPointer: number,
+  ): number;
+  _wave_plan_waveform_follow_render(
+    displayStart: number,
+    displayEnd: number,
+    duration: number,
+    displayWidth: number,
+    renderScale: number,
+    preferredStart: number,
+    preferredEnd: number,
+    preferredValid: number,
+    bufferFactor: number,
+    marginRatio: number,
+    epsilon: number,
+    outputPointer: number,
+  ): number;
   _wave_prepare_session(sampleCount: number, sampleRate: number, duration: number): number;
   _wave_render_spectrogram_tile_rgba(
     tileStart: number,
@@ -48,6 +73,48 @@ export interface WaveCoreRuntime {
   variant: string;
 }
 
+export interface WaveformFollowRenderPlan {
+  end: number;
+  start: number;
+  width: number;
+}
+
+export interface SpectrogramFollowRenderPlan {
+  end: number;
+  pixelWidth: number;
+  start: number;
+}
+
+export interface WaveformFollowRenderPlanOptions {
+  bufferFactor: number;
+  displayEnd: number;
+  displayStart: number;
+  displayWidth: number;
+  duration: number;
+  epsilon: number;
+  marginRatio: number;
+  preferredEnd?: number | null;
+  preferredStart?: number | null;
+  renderScale: number;
+}
+
+export interface SpectrogramFollowRenderPlanOptions {
+  bufferFactor: number;
+  displayEnd: number;
+  displayStart: number;
+  duration: number;
+  pixelWidth: number;
+}
+
+export interface WaveDisplayPlanner {
+  dispose(): void;
+  planSpectrogramFollowRender(options: SpectrogramFollowRenderPlanOptions): SpectrogramFollowRenderPlan | null;
+  planWaveformFollowRender(options: WaveformFollowRenderPlanOptions): WaveformFollowRenderPlan | null;
+}
+
+const plannerOutputValueCount = 3;
+const plannerOutputByteLength = plannerOutputValueCount * Float64Array.BYTES_PER_ELEMENT;
+
 const wasmCandidates = [
   {
     url: new URL('../wasm/wasm_core_simd.wasm', import.meta.url),
@@ -67,6 +134,93 @@ export async function loadWaveCoreRuntime() {
   }
 
   return runtimePromise;
+}
+
+export function createWaveDisplayPlanner(module: WaveCoreModule): WaveDisplayPlanner {
+  const outputPointer = module._malloc(plannerOutputByteLength);
+
+  if (!outputPointer) {
+    throw new Error('Unable to allocate wave display planner output buffer.');
+  }
+
+  const outputOffset = Math.floor(outputPointer / Float64Array.BYTES_PER_ELEMENT);
+  let disposed = false;
+
+  const readOutput = () => {
+    const heap = module.HEAPF64;
+    return {
+      end: Number(heap[outputOffset + 1] ?? 0),
+      start: Number(heap[outputOffset] ?? 0),
+      width: Math.max(1, Math.round(Number(heap[outputOffset + 2] ?? 1))),
+    };
+  };
+
+  return {
+    dispose() {
+      if (disposed) {
+        return;
+      }
+
+      disposed = true;
+      module._free(outputPointer);
+    },
+    planSpectrogramFollowRender(options) {
+      if (disposed) {
+        return null;
+      }
+
+      const ok = module._wave_plan_spectrogram_follow_render(
+        Number(options.displayStart) || 0,
+        Number(options.displayEnd) || 0,
+        Number(options.duration) || 0,
+        Math.max(1, Math.round(Number(options.pixelWidth) || 1)),
+        Number(options.bufferFactor) || 1,
+        outputPointer,
+      );
+
+      if (!ok) {
+        return null;
+      }
+
+      const result = readOutput();
+      return {
+        end: result.end,
+        pixelWidth: result.width,
+        start: result.start,
+      };
+    },
+    planWaveformFollowRender(options) {
+      if (disposed) {
+        return null;
+      }
+
+      const preferredStart = Number(options.preferredStart);
+      const preferredEnd = Number(options.preferredEnd);
+      const preferredValid = Number.isFinite(preferredStart)
+        && Number.isFinite(preferredEnd)
+        && preferredEnd > preferredStart;
+      const ok = module._wave_plan_waveform_follow_render(
+        Number(options.displayStart) || 0,
+        Number(options.displayEnd) || 0,
+        Number(options.duration) || 0,
+        Math.max(1, Math.round(Number(options.displayWidth) || 1)),
+        Math.max(1, Number(options.renderScale) || 1),
+        preferredValid ? preferredStart : 0,
+        preferredValid ? preferredEnd : 0,
+        preferredValid ? 1 : 0,
+        Number(options.bufferFactor) || 1,
+        Number(options.marginRatio) || 0,
+        Number(options.epsilon) || 0,
+        outputPointer,
+      );
+
+      if (!ok) {
+        return null;
+      }
+
+      return readOutput();
+    },
+  };
 }
 
 async function instantiateWaveCoreRuntime() {
@@ -128,6 +282,7 @@ function createModuleFacade(exports: WaveCoreWasmExports): WaveCoreModule {
     currentBuffer = memory.buffer;
     module.HEAPU8 = new Uint8Array(currentBuffer);
     module.HEAPF32 = new Float32Array(currentBuffer);
+    module.HEAPF64 = new Float64Array(currentBuffer);
   };
 
   refreshViews();
