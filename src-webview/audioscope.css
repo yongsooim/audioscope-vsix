@@ -130,17 +130,19 @@ body {
   z-index: 24;
   display: grid;
   gap: 16px;
+  box-sizing: border-box;
   width: min(280px, calc(100vw - (var(--surface-inline-padding) * 2)));
-  max-height: min(35.2vh, 272px);
+  height: min(52.8vh, 408px);
+  min-height: min(216px, calc(100vh - 24px));
+  max-height: calc(100vh - 24px);
   padding: 10px 12px;
   overflow: auto;
   border: 1px solid rgba(191, 219, 254, 0.18);
   border-radius: 12px;
-  background: rgba(5, 9, 18, 0.94);
+  background: rgb(3, 6, 12);
   box-shadow:
     0 22px 52px rgba(0, 0, 0, 0.34),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  backdrop-filter: blur(12px);
   opacity: 0;
   pointer-events: none;
   transform: translate3d(0, 8px, 0);

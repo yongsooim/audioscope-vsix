@@ -2494,6 +2494,17 @@ function handleWaveformWorkerMessage(loadToken, message) {
     return;
   }
 
+  if (message?.type === 'waveformPresented') {
+    addDebugTimelineEvent(
+      'webview.waveformPresented.received',
+      `generation=${message.body?.generation ?? 'n/a'}`,
+      'webview',
+      loadToken,
+    );
+    handleWaveformPresented(message.body);
+    return;
+  }
+
   if (message?.type === 'error') {
     setFatalStatus(`Waveform renderer failed: ${message.body.message}`);
   }
@@ -2770,6 +2781,17 @@ function handleWaveformReady(body) {
     return;
   }
 
+  state.waveformWorker.postMessage({
+    type: 'commitWaveformRender',
+    body: { generation: body.generation },
+  });
+}
+
+function handleWaveformPresented(body) {
+  if (body.generation !== state.waveformRequestGeneration) {
+    return;
+  }
+
   const pendingRequest = state.waveformPendingRequest?.generation === body.generation
     ? state.waveformPendingRequest
     : null;
@@ -2807,11 +2829,6 @@ function handleWaveformReady(body) {
       renderWidth: state.waveformRenderWidth,
     });
   }
-
-  state.waveformWorker.postMessage({
-    type: 'commitWaveformRender',
-    body: { generation: body.generation },
-  });
 }
 
 function renderSpectrogramScale() {
@@ -4691,6 +4708,7 @@ function attachResizeObservers() {
   resizeObserver.observe(elements.viewport);
   resizeObserver.observe(elements.waveformViewport);
   resizeObserver.observe(elements.waveformOverview);
+
 }
 
 function destroySession() {
@@ -5100,6 +5118,49 @@ function expandWaveformRange(range, duration, factor) {
   };
 }
 
+function getStableFollowWaveformRenderRange(displayRange, duration, renderWidth) {
+  const expandedRange = expandWaveformRange(displayRange, duration, WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR);
+  const renderSpan = Math.max(0, expandedRange.end - expandedRange.start);
+  const preferredCandidate = getCommittedWaveformRenderCandidate() ?? getPendingWaveformRenderCandidate();
+
+  if (
+    !preferredCandidate
+    || !(preferredCandidate.end > preferredCandidate.start)
+    || renderSpan <= 0
+    || duration <= 0
+    || renderWidth <= 0
+  ) {
+    return snapWaveformRenderRange(displayRange, expandedRange, duration, renderWidth);
+  }
+
+  const preferredSpan = preferredCandidate.end - preferredCandidate.start;
+  const spanTolerance = Math.max(SPECTROGRAM_RANGE_EPSILON_SECONDS, renderSpan * 0.001);
+
+  if (Math.abs(preferredSpan - renderSpan) > spanTolerance) {
+    return snapWaveformRenderRange(displayRange, expandedRange, duration, renderWidth);
+  }
+
+  const visibleSpan = Math.max(0, displayRange.end - displayRange.start);
+  const maxStart = Math.max(0, duration - renderSpan);
+  const availablePadding = Math.max(0, (renderSpan - visibleSpan) * 0.5);
+  const requestedPadding = Math.max(0, renderSpan * WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO);
+  const effectivePadding = Math.min(availablePadding, requestedPadding);
+  const lowerBound = clamp(displayRange.end - renderSpan + effectivePadding, 0, maxStart);
+  const upperBound = clamp(displayRange.start - effectivePadding, lowerBound, maxStart);
+  const columnCount = Math.max(1, Math.round(renderWidth * WAVEFORM_RENDER_SCALE));
+  const secondsPerColumn = renderSpan / columnCount;
+  const unclampedStart = clamp(preferredCandidate.start, lowerBound, upperBound);
+  const snappedStart = Number.isFinite(secondsPerColumn) && secondsPerColumn > 0
+    ? Math.round(unclampedStart / secondsPerColumn) * secondsPerColumn
+    : unclampedStart;
+  const nextStart = clamp(snappedStart, lowerBound, upperBound);
+
+  return {
+    start: nextStart,
+    end: nextStart + renderSpan,
+  };
+}
+
 function snapWaveformRenderRange(displayRange, candidateRange, duration, renderWidth) {
   const renderSpan = Math.max(0, candidateRange.end - candidateRange.start);
   const clampedDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
@@ -5178,7 +5239,7 @@ function getWaveformRenderRequestMetrics(displayRange = getWaveformRange()) {
       width,
       Math.ceil(width * ((expandedRange.end - expandedRange.start) / visibleSpan)),
     );
-    renderRange = snapWaveformRenderRange(displayRange, expandedRange, duration, renderWidth);
+    renderRange = getStableFollowWaveformRenderRange(displayRange, duration, renderWidth);
   }
 
   return {
@@ -5218,12 +5279,30 @@ function getWaveformAxisRenderMetrics(options: WaveformAxisRenderOptions = {}) {
   }
 
   if (duration > 0 && visibleSpan > 0 && isSmoothFollowPlaybackActive()) {
+    if (hasCommittedWaveformDisplayCoverage(displayRange)) {
+      return {
+        displayRange,
+        renderRange: state.waveformRenderRange,
+        renderWidth: Math.max(1, state.waveformRenderWidth),
+        viewportWidth,
+      };
+    }
+
+    if (state.waveformAxisRenderRange.end > state.waveformAxisRenderRange.start && state.waveformAxisRenderWidth > 0) {
+      return {
+        displayRange,
+        renderRange: state.waveformAxisRenderRange,
+        renderWidth: Math.max(1, state.waveformAxisRenderWidth),
+        viewportWidth,
+      };
+    }
+
     const expandedRange = expandWaveformRange(displayRange, duration, WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR);
     renderWidth = Math.max(
       viewportWidth,
       Math.ceil(viewportWidth * ((expandedRange.end - expandedRange.start) / visibleSpan)),
     );
-    renderRange = snapWaveformRenderRange(displayRange, expandedRange, duration, renderWidth);
+    renderRange = getStableFollowWaveformRenderRange(displayRange, duration, renderWidth);
   }
 
   return {

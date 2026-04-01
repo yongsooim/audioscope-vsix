@@ -532,6 +532,17 @@ async function renderWaveform(request) {
       visibleSampleSpan,
     );
     presentRenderSurface(renderSurface);
+    postWaveformPresented({
+      columnCount,
+      generation,
+      height,
+      rawSamplePlotMode,
+      samplePlotMode,
+      viewEnd,
+      viewStart,
+      visibleSpan,
+      width,
+    }, startedAt);
     return;
   }
 
@@ -546,11 +557,44 @@ async function renderWaveform(request) {
       visibleSampleCount,
     );
     presentRenderSurface(renderSurface);
+    postWaveformPresented({
+      columnCount,
+      generation,
+      height,
+      rawSamplePlotMode,
+      samplePlotMode,
+      viewEnd,
+      viewStart,
+      visibleSpan,
+      width,
+    }, startedAt);
     return;
   }
 
   drawFrame(renderSurface, slice, columnCount, color, false, pixelsPerSample);
   presentRenderSurface(renderSurface);
+  postWaveformPresented({
+    columnCount,
+    generation,
+    height,
+    rawSamplePlotMode,
+    samplePlotMode,
+    viewEnd,
+    viewStart,
+    visibleSpan,
+    width,
+  }, startedAt);
+}
+
+function postWaveformPresented(body, startedAt) {
+  self.postMessage({
+    type: 'waveformPresented',
+    body,
+  });
+  postDebugTimelineEvent(
+    'waveform-worker.waveformPresented.posted',
+    `${(performance.now() - startedAt).toFixed(1)} ms cols=${body?.columnCount ?? 'n/a'}`,
+  );
 }
 
 function drawColumnsCount(columnCount) {

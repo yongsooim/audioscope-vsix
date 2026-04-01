@@ -48,8 +48,6 @@ pub const PffftTransform = enum(c_int) {
     real = 0,
     complex = 1,
 };
-pub const Ebur128State = opaque {};
-pub const ebur128_summary_mode: c_int = 127;
 
 pub extern fn pffft_new_setup(size: c_int, transform: PffftTransform) ?*PffftSetup;
 pub extern fn pffft_destroy_setup(setup: *PffftSetup) void;
@@ -62,13 +60,6 @@ pub extern fn pffft_transform_ordered(
 ) void;
 pub extern fn pffft_aligned_malloc(byte_count: usize) ?*anyopaque;
 pub extern fn pffft_aligned_free(ptr: ?*anyopaque) void;
-pub extern fn ebur128_init(channels: c_uint, samplerate: c_ulong, mode: c_int) ?*Ebur128State;
-pub extern fn ebur128_destroy(st: *?*Ebur128State) void;
-pub extern fn ebur128_add_frames_float(st: *Ebur128State, src: [*]const f32, frames: usize) c_int;
-pub extern fn ebur128_loudness_global(st: *Ebur128State, out: *f64) c_int;
-pub extern fn ebur128_loudness_range(st: *Ebur128State, out: *f64) c_int;
-pub extern fn ebur128_sample_peak(st: *Ebur128State, channel_number: c_uint, out: *f64) c_int;
-pub extern fn ebur128_true_peak(st: *Ebur128State, channel_number: c_uint, out: *f64) c_int;
 
 pub const AllocationHeader = extern struct {
     total_size: usize,
@@ -325,27 +316,6 @@ pub fn isFiniteF32(value: f32) bool {
 pub fn isFiniteF64(value: f64) bool {
     return std.math.isFinite(value);
 }
-
-pub fn castSummaryValue(value: f64) f32 {
-    if (!std.math.isFinite(value)) {
-        return if (value < 0.0) -std.math.inf(f32) else std.math.inf(f32);
-    }
-
-    return @as(f32, @floatCast(value));
-}
-
-pub fn linearToDecibels(value: f64) f32 {
-    if (!std.math.isFinite(value)) {
-        return if (value < 0.0) -std.math.inf(f32) else std.math.inf(f32);
-    }
-
-    if (value <= 0.0) {
-        return -std.math.inf(f32);
-    }
-
-    return @as(f32, @floatCast(20.0 * (@log(value) / @log(@as(f64, 10.0)))));
-}
-
 pub fn approxLog10Positive(value: f32) f32 {
     if (value <= 0.0) return -std.math.inf(f32);
 

@@ -4,7 +4,6 @@ const exportedFunctionNames = [
   'wave_dispose_session',
   'wave_prepare_session',
   'wave_get_pcm_ptr',
-  'wave_measure_loudness_summary',
   'wave_build_waveform_pyramid',
   'wave_extract_waveform_slice',
   'wave_render_spectrogram_tile_rgba',
@@ -27,7 +26,6 @@ export interface WaveCoreModule {
   _wave_dispose_session(): number;
   _wave_extract_waveform_slice(viewStart: number, viewEnd: number, columnCount: number, outputPointer: number): number;
   _wave_get_pcm_ptr(): number;
-  _wave_measure_loudness_summary(outputPointer: number): number;
   _wave_prepare_session(sampleCount: number, sampleRate: number, duration: number): number;
   _wave_render_spectrogram_tile_rgba(
     tileStart: number,

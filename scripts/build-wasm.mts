@@ -26,8 +26,6 @@ const commonCompileArgs = [
   path.join(projectRoot, 'src-wasm', 'freestanding', 'include'),
   '-I',
   path.join(projectRoot, 'src-wasm', 'third_party', 'pffft'),
-  '-I',
-  path.join(projectRoot, 'src-wasm', 'third_party', 'libebur128', 'ebur128'),
 ];
 
 const commonCFlags = [
@@ -42,7 +40,6 @@ const commonCFlags = [
 
 const cSources = [
   path.join(projectRoot, 'src-wasm', 'third_party', 'pffft', 'pffft.c'),
-  path.join(projectRoot, 'src-wasm', 'third_party', 'libebur128', 'ebur128', 'ebur128.c'),
 ];
 
 const variants = [
