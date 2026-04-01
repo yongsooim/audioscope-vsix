@@ -89,18 +89,19 @@ fn computeStableLevelSlicePlan(level: *const core.WaveLevel, start_sample: f64, 
     const block_size_f64 = @as(f64, @floatFromInt(level.block_size));
     const desired_start_block = start_sample / block_size_f64;
     const desired_end_block = end_sample / block_size_f64;
-    const desired_block_span = maxF64(1.0, desired_end_block - desired_start_block);
-    const actual_block_count = core.maxI32(1, @as(i32, @intFromFloat(@ceil(desired_block_span))));
     var actual_start_block = core.maxI32(
         0,
         @as(i32, @intFromFloat(@floor(desired_start_block))),
     );
+    var actual_end_block = core.maxI32(
+        actual_start_block + 1,
+        @as(i32, @intFromFloat(@ceil(desired_end_block))),
+    );
 
-    if (actual_start_block + actual_block_count > level.block_count) {
-        actual_start_block = core.maxI32(0, level.block_count - actual_block_count);
+    if (actual_end_block > level.block_count) {
+        actual_end_block = level.block_count;
+        actual_start_block = core.minI32(actual_start_block, core.maxI32(0, actual_end_block - 1));
     }
-
-    const actual_end_block = core.minI32(level.block_count, actual_start_block + actual_block_count);
 
     return .{
         .actual_end_sample = @as(f64, @floatFromInt(actual_end_block * level.block_size)),
@@ -111,18 +112,22 @@ fn computeStableLevelSlicePlan(level: *const core.WaveLevel, start_sample: f64, 
 }
 
 fn computeStableSampleSlicePlan(start_sample: f64, end_sample: f64, _: i32) StableSampleSlicePlan {
-    const desired_sample_span = maxF64(1.0, end_sample - start_sample);
-    const actual_sample_count = core.maxI32(1, @as(i32, @intFromFloat(@ceil(desired_sample_span))));
     var actual_start_sample_index = core.maxI32(
         0,
         @as(i32, @intFromFloat(@floor(start_sample))),
     );
+    var actual_end_sample_index = core.maxI32(
+        actual_start_sample_index + 1,
+        @as(i32, @intFromFloat(@ceil(end_sample))),
+    );
 
-    if (actual_start_sample_index + actual_sample_count > core.g_session.sample_count) {
-        actual_start_sample_index = core.maxI32(0, core.g_session.sample_count - actual_sample_count);
+    if (actual_end_sample_index > core.g_session.sample_count) {
+        actual_end_sample_index = core.g_session.sample_count;
+        actual_start_sample_index = core.minI32(
+            actual_start_sample_index,
+            core.maxI32(0, actual_end_sample_index - 1),
+        );
     }
-
-    const actual_end_sample_index = core.minI32(core.g_session.sample_count, actual_start_sample_index + actual_sample_count);
 
     return .{
         .actual_end_sample = @as(f64, @floatFromInt(actual_end_sample_index)),

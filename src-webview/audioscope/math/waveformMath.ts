@@ -1,10 +1,10 @@
-import { clamp, formatAxisLabel, getNiceTimeStep } from './audioscopeFormat';
+import { clamp, formatAxisLabel, getNiceTimeStep } from '../core/format';
 import type {
   TimeRange,
   WaveformAxisSnapshot,
   WaveformAxisTick,
   WaveformDisplayWindowMetrics,
-} from './audioscopeTypes';
+} from '../core/types';
 
 export function cloneTimeRange(range: TimeRange): TimeRange {
   return {

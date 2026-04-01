@@ -1,4 +1,4 @@
-import { clamp } from './audioscopeFormat';
+import { clamp } from '../core/format';
 
 export function buildLinearFrequencyTicks(
   minFrequency: number,

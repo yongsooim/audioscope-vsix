@@ -1,5 +1,5 @@
-import { clamp } from './audioscopeFormat';
-import type { TimelineViewportSnapshot, TimeRange } from './audioscopeTypes';
+import { clamp } from '../core/format';
+import type { TimelineViewportSnapshot, TimeRange } from '../core/types';
 
 export function createTimelineViewportSnapshot(
   duration: number,
