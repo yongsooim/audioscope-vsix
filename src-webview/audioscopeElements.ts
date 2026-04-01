@@ -65,6 +65,7 @@ export function createAudioscopeElements() {
     playbackRateMenu: requireElement<HTMLElement>('playback-rate-menu'),
     playbackRateSelect: requireElement<HTMLSelectElement>('playback-rate-select'),
     timeline: requireElement<HTMLInputElement>('timeline'),
+    timelineCurrentMarker: requireElement<HTMLElement>('timeline-current-marker'),
     timelineHoverTooltip: requireElement<HTMLElement>('timeline-hover-tooltip'),
     timeReadout: requireElement<HTMLElement>('time-readout'),
     loudnessSummary: requireElement<HTMLElement>('loudness-summary'),

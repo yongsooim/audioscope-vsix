@@ -1227,6 +1227,7 @@ body {
   inset-block: 4px;
   inset-inline-start: 0;
   z-index: 1;
+  min-width: 1px;
   border-radius: 10px;
   background: linear-gradient(90deg, rgba(79, 140, 255, 0.26) 0%, rgba(191, 219, 254, 0.16) 100%);
   border: 1px solid rgba(191, 219, 254, 0.22);
@@ -1236,7 +1237,24 @@ body {
     0 8px 18px rgba(37, 99, 235, 0.12);
   backdrop-filter: blur(6px);
   pointer-events: none;
-  will-change: transform;
+  will-change: left, width;
+}
+
+.timeline-current-marker {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  z-index: 3;
+  width: 24px;
+  height: 24px;
+  border: 2px solid #0f172a;
+  border-radius: 50%;
+  background: var(--accent-strong);
+  box-shadow:
+    0 4px 14px rgba(29, 78, 216, 0.4),
+    0 0 0 1px rgba(219, 234, 254, 0.08);
+  pointer-events: none;
+  transform: translate3d(-50%, -50%, 0);
 }
 
 .timeline-hover-tooltip {
@@ -1296,12 +1314,11 @@ body {
   height: 24px;
   margin-top: -5px;
   appearance: none;
-  border: 2px solid #0f172a;
+  border: 0;
   border-radius: 50%;
-  background: var(--accent-strong);
-  box-shadow:
-    0 4px 14px rgba(29, 78, 216, 0.4),
-    0 0 0 1px rgba(219, 234, 254, 0.08);
+  background: transparent;
+  box-shadow: none;
+  opacity: 0;
 }
 
 .timeline:focus::-webkit-slider-runnable-track,
@@ -1321,7 +1338,8 @@ body {
   height: 16px;
   border: 1px solid rgba(116, 143, 189, 0.22);
   border-radius: 10px;
-  background: var(--seek-track);
+  background:
+    linear-gradient(90deg, var(--seek-fill-start) 0%, var(--seek-fill-end) var(--seek-progress), var(--seek-track) var(--seek-progress), var(--seek-track) 100%);
   box-shadow:
     inset 0 1px 2px rgba(96, 165, 250, 0.06),
     inset 0 0 0 1px rgba(255, 255, 255, 0.03),
@@ -1331,18 +1349,17 @@ body {
 .timeline::-moz-range-progress {
   height: 16px;
   border-radius: 10px;
-  background: linear-gradient(90deg, #3b82f6 0%, #2563eb 100%);
+  background: transparent;
 }
 
 .timeline::-moz-range-thumb {
   width: 24px;
   height: 24px;
-  border: 2px solid #0f172a;
+  border: 0;
   border-radius: 50%;
-  background: var(--accent-strong);
-  box-shadow:
-    0 4px 14px rgba(29, 78, 216, 0.4),
-    0 0 0 1px rgba(219, 234, 254, 0.08);
+  background: transparent;
+  box-shadow: none;
+  opacity: 0;
 }
 
 .timeline:disabled::-webkit-slider-runnable-track,

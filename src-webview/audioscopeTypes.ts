@@ -59,3 +59,13 @@ export interface WaveformRenderRequest {
   visibleSpan: number;
   width: number;
 }
+
+export interface TimelineViewportSnapshot {
+  currentRatio: number;
+  currentTime: number;
+  duration: number;
+  isPlayable: boolean;
+  viewportEndRatio: number;
+  viewportRange: TimeRange;
+  viewportStartRatio: number;
+}

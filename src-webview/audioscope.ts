@@ -10,6 +10,7 @@ import {
 } from './waveCoreRuntime';
 import { createAudioscopeElements } from './audioscopeElements';
 import { clamp, formatAxisLabel, formatTime } from './audioscopeFormat';
+import { createTimelineViewportSnapshot } from './audioscopeTimelineMath';
 import {
   buildLinearFrequencyTicks as buildLinearFrequencyTicksPure,
   formatFrequencyLabel,
@@ -32,6 +33,7 @@ import {
   snapWaveformRenderRange as snapWaveformRenderRangePure,
 } from './audioscopeWaveformMath';
 import type {
+  TimelineViewportSnapshot,
   TimeRange,
   WaveformAxisRenderOptions,
   WaveformAxisSnapshot,
@@ -3055,11 +3057,16 @@ function renderWaveformUi({ syncSpectrogram = true } = {}) {
   elements.waveClearLoop.tabIndex = 0;
   elements.waveClearLoop.setAttribute('aria-hidden', 'false');
 
-  applyWaveformOverviewThumb();
-  updateWaveformDisplayFromSnapshot(range, {
+  const displayedRange = updateWaveformDisplayFromSnapshot(range, {
     currentTime: getCurrentPlaybackTime(),
     syncHover: true,
     syncSelection: true,
+  });
+  renderTransportTimelineOverview({
+    currentTime: getCurrentPlaybackTime(),
+    displayRange: displayedRange,
+    duration,
+    isPlayable: hasPlaybackTransport() && duration > 0,
   });
   if (syncSpectrogram) {
     scheduleSpectrogramRender();
@@ -3133,40 +3140,50 @@ function renderWaveformAxis(options: WaveformAxisRenderOptions = {}) {
   );
 }
 
-function applyWaveformOverviewThumb(
-  range = getWaveformRange(),
-  {
-    currentTime = getCurrentPlaybackTime(),
-    followPinnedToPlayback = state.followPlayback,
-  }: {
-    currentTime?: number;
-    followPinnedToPlayback?: boolean;
-  } = {},
-) {
-  const duration = getEffectiveDuration();
-  const span = Math.max(0, range.end - range.start);
-  const trackWidth = Math.max(1, elements.waveformOverview.clientWidth);
+function applyTransportTimelineSnapshot(snapshot: TimelineViewportSnapshot) {
+  const viewportStartPercent = snapshot.viewportStartRatio * 100;
+  const viewportWidthPercent = Math.max(0, snapshot.viewportEndRatio - snapshot.viewportStartRatio) * 100;
+  const currentPercent = snapshot.currentRatio * 100;
 
-  if (duration <= 0 || span <= 0) {
-    elements.waveformOverviewThumb.style.width = `${trackWidth}px`;
-    elements.waveformOverviewThumb.style.transform = 'translate3d(0px, 0, 0)';
+  elements.timeline.disabled = !snapshot.isPlayable;
+  elements.timeline.value = String(snapshot.currentRatio);
+  elements.timeline.style.setProperty('--seek-progress', `${currentPercent.toFixed(4)}%`);
+
+  elements.waveformOverviewThumb.style.left = `${viewportStartPercent.toFixed(6)}%`;
+  elements.waveformOverviewThumb.style.width = `${viewportWidthPercent.toFixed(6)}%`;
+  elements.waveformOverviewThumb.style.transform = 'none';
+
+  if (!snapshot.isPlayable || snapshot.duration <= 0) {
+    elements.timelineCurrentMarker.hidden = true;
+    elements.timelineCurrentMarker.style.left = '0%';
     return;
   }
 
-  const normalizedSpan = clamp(span / duration, 0, 1);
-  const widthPx = normalizedSpan >= 0.9999
-    ? trackWidth
-    : Math.min(trackWidth, Math.max(16, normalizedSpan * trackWidth));
-  const maxLeftPx = Math.max(0, trackWidth - widthPx);
-  const rangeCenter = clamp(range.start + (span * 0.5), 0, duration);
-  const targetCenterTime = followPinnedToPlayback && Number.isFinite(currentTime)
-    ? clamp(currentTime, 0, duration)
-    : rangeCenter;
-  const centerPx = (targetCenterTime / duration) * trackWidth;
-  const leftPx = clamp(centerPx - (widthPx * 0.5), 0, maxLeftPx);
+  elements.timelineCurrentMarker.hidden = false;
+  elements.timelineCurrentMarker.style.left = `${currentPercent.toFixed(6)}%`;
+}
 
-  elements.waveformOverviewThumb.style.width = `${widthPx}px`;
-  elements.waveformOverviewThumb.style.transform = `translate3d(${leftPx}px, 0, 0)`;
+function renderTransportTimelineOverview(
+  {
+    currentTime = getCurrentPlaybackTime(),
+    displayRange = getDisplayedWaveformRange(getWaveformRange(currentTime)),
+    duration = getEffectiveDuration(),
+    isPlayable = hasPlaybackTransport() && duration > 0,
+  }: {
+    currentTime?: number;
+    displayRange?: TimeRange;
+    duration?: number;
+    isPlayable?: boolean;
+  } = {},
+) {
+  const snapshot = createTimelineViewportSnapshot(
+    duration,
+    currentTime,
+    displayRange,
+    isPlayable,
+  );
+  applyTransportTimelineSnapshot(snapshot);
+  return snapshot;
 }
 
 function applyWaveformPlaybackTime(timeSeconds, range = getDisplayedWaveformRange(getWaveformRange(timeSeconds))) {
@@ -3257,10 +3274,6 @@ function syncFollowView(
       updateStoredRange: true,
     });
     applyWaveformPlaybackTime(timeSeconds, centeredRange);
-    applyWaveformOverviewThumb(centeredRange, {
-      currentTime: timeSeconds,
-      followPinnedToPlayback: true,
-    });
 
     if (!hasWaveformRenderCoverage(centeredRange, false)) {
       void syncWaveformView({
@@ -3281,10 +3294,6 @@ function syncFollowView(
       syncHover: true,
       syncSelection: true,
       updateStoredRange: true,
-    });
-    applyWaveformOverviewThumb(range, {
-      currentTime: timeSeconds,
-      followPinnedToPlayback: true,
     });
 
     if (!hasWaveformRenderCoverage(range, smoothFollowPlaybackActive)) {
@@ -4943,7 +4952,6 @@ function syncTransport() {
   const currentTime = isPlayable ? getCurrentPlaybackTime() : 0;
   const smoothFollowPlaybackActive = isSmoothFollowPlaybackActive(currentTime, playbackActive);
   const displayRange = getWaveformRange(currentTime, smoothFollowPlaybackActive);
-  const progress = isPlayable && duration > 0 ? (currentTime / duration) : 0;
 
   elements.playToggle.disabled = !hasPlaybackTransport();
   elements.playToggle.textContent = playbackActive ? 'Pause' : 'Play';
@@ -4955,9 +4963,6 @@ function syncTransport() {
     closePlaybackRateMenu();
   }
   syncPlaybackRateControl();
-  elements.timeline.disabled = !isPlayable;
-  elements.timeline.value = String(progress);
-  elements.timeline.style.setProperty('--seek-progress', `${(progress * 100).toFixed(4)}%`);
   elements.timeReadout.textContent = `${formatTime(currentTime)} / ${formatTime(duration)}`;
 
   if (!smoothFollowPlaybackActive) {
@@ -4966,6 +4971,12 @@ function syncTransport() {
     refreshWaveformHoverPresentation({ displayRange: displayedRange });
   }
   syncFollowView(currentTime, displayRange, smoothFollowPlaybackActive);
+  renderTransportTimelineOverview({
+    currentTime,
+    displayRange: getDisplayedWaveformRange(getWaveformRange(currentTime, smoothFollowPlaybackActive)),
+    duration,
+    isPlayable,
+  });
 
   if (playbackActive && !state.playbackFrame) {
     startPlaybackLoop();
