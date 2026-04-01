@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import type { DebugTimelineEventPayload } from './debugTimeline';
 import {
   type EmbeddedExecutableStatus,
   getEmbeddedExecutableStatusSync,
@@ -24,7 +23,6 @@ export interface ExternalToolStatusPayload {
 }
 
 export interface AudioscopePayload {
-  debugTimelineSeed?: DebugTimelineEventPayload[];
   documentUri: string;
   externalTools: ExternalToolStatusPayload;
   fileBacked: boolean;
@@ -120,10 +118,6 @@ export type DecodeFallbackPayload =
       sampleRate: number;
       source: 'ffmpeg';
     };
-
-interface DecodeWithFfmpegOptions {
-  onDebugTimelineEvent?: (event: DebugTimelineEventPayload) => void | Promise<void>;
-}
 
 export type ProbeOpenResult =
   | { kind: 'audio'; metadata: MediaMetadataPayload; toolStatus: ExternalToolStatusPayload }
@@ -593,20 +587,9 @@ export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenRes
   };
 }
 
-export async function decodeWithFfmpeg(
-  resource: vscode.Uri,
-  options: DecodeWithFfmpegOptions = {},
-): Promise<DecodeFallbackPayload> {
+export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFallbackPayload> {
   const preferredTools = await resolvePreferredTools(resource);
   const toolStatus = createToolStatusPayload(true, preferredTools);
-  const emitDebugTimelineEvent = (label: string, detail?: string): void => {
-    void options.onDebugTimelineEvent?.({
-      detail,
-      label,
-      source: 'host',
-      timeMs: Date.now(),
-    });
-  };
 
   if (!toolStatus.fileBacked) {
     throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
@@ -621,21 +604,16 @@ export async function decodeWithFfmpeg(
   }
 
   try {
-    const result = await runEmbeddedFfmpegDecodeToPcm(
-      resource,
-      options.onDebugTimelineEvent,
-    );
+    const result = await runEmbeddedFfmpegDecodeToPcm(resource);
 
     return {
       ...result,
       kind: 'pcm',
     };
   } catch (error) {
-    emitDebugTimelineEvent('host.decodeFallback.ffmpeg.embedded.module.fallback', getExecErrorMessage(error));
     const result = await runEmbeddedFfmpegDecodeToWav(
       resource,
       FFMPEG_DECODE_TIMEOUT_MS,
-      options.onDebugTimelineEvent,
     );
 
     return {

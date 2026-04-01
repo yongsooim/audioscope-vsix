@@ -38,27 +38,12 @@ const surfaceState = {
 
 let analysisState = createEmptyAnalysisState();
 
-function postDebugTimelineEvent(label, detail = '') {
-  self.postMessage({
-    type: 'debugTimelineEvent',
-    body: {
-      event: {
-        detail,
-        label,
-        source: 'waveform-worker',
-        timeMs: Date.now(),
-      },
-    },
-  });
-}
-
 self.onmessage = (event) => {
   const message = event.data ?? {};
 
   switch (message.type) {
     case 'bootstrapRuntime':
       enqueueRequest(async () => {
-        postDebugTimelineEvent('waveform-worker.bootstrapRuntime');
         const runtime = await getRuntime();
         self.postMessage({
           type: 'runtimeReady',
@@ -70,7 +55,6 @@ self.onmessage = (event) => {
       return;
     case 'initCanvas':
       initializeCanvas(message.body);
-      postDebugTimelineEvent('waveform-worker.initCanvas');
       void pumpRenderLoop();
       return;
     case 'resizeCanvas':
@@ -390,7 +374,6 @@ function clearCanvas() {
 }
 
 function attachAudioSession(runtime, options) {
-  postDebugTimelineEvent('waveform-worker.attachAudioSession.start');
   const module = runtime.module;
   const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
@@ -446,32 +429,24 @@ function attachAudioSession(runtime, options) {
       sampleRate,
     },
   });
-  postDebugTimelineEvent('waveform-worker.attachAudioSession.done', `samples=${sampleCount} rate=${sampleRate}`);
 }
 
 function buildWaveformPyramid(runtime) {
-  const startedAt = performance.now();
-  postDebugTimelineEvent('waveform-worker.buildWaveformPyramid.start');
   assertInitialized();
 
   if (analysisState.waveformBuilt) {
     self.postMessage({
       type: 'waveformPyramidReady',
     });
-    postDebugTimelineEvent('waveform-worker.buildWaveformPyramid.done', 'cache-hit');
     return;
   }
 
-  const levelCount = runtime.module._wave_build_waveform_pyramid();
+  runtime.module._wave_build_waveform_pyramid();
   analysisState.waveformBuilt = true;
 
   self.postMessage({
     type: 'waveformPyramidReady',
   });
-  postDebugTimelineEvent(
-    'waveform-worker.buildWaveformPyramid.done',
-    `${(performance.now() - startedAt).toFixed(1)} ms levels=${levelCount}`,
-  );
 }
 async function pumpRenderLoop() {
   if (renderLoopActive) {
@@ -508,7 +483,6 @@ async function pumpRenderLoop() {
 }
 
 async function renderWaveform(request) {
-  const startedAt = performance.now();
   const viewStart = clamp(Number(request?.viewStart) || 0, 0, analysisState.duration);
   const viewEnd = clamp(
     Number(request?.viewEnd) || analysisState.duration,
@@ -609,7 +583,7 @@ async function renderWaveform(request) {
       viewStart: actualViewStart,
       visibleSpan,
       width,
-    }, startedAt);
+    });
     return;
   }
 
@@ -645,7 +619,7 @@ async function renderWaveform(request) {
       viewStart: actualViewStart,
       visibleSpan,
       width,
-    }, startedAt);
+    });
     return;
   }
 
@@ -672,7 +646,7 @@ async function renderWaveform(request) {
     viewStart: actualViewStart,
     visibleSpan,
     width,
-  }, startedAt);
+  });
 }
 
 async function snapshotCommittedSurfaceBitmap() {
@@ -693,7 +667,7 @@ async function snapshotCommittedSurfaceBitmap() {
   return null;
 }
 
-function postWaveformPresented(body, startedAt) {
+function postWaveformPresented(body) {
   const bitmap = body?.bitmap instanceof ImageBitmap ? body.bitmap : null;
   const message = {
     type: 'waveformPresented',
@@ -705,11 +679,6 @@ function postWaveformPresented(body, startedAt) {
   } else {
     self.postMessage(message);
   }
-
-  postDebugTimelineEvent(
-    'waveform-worker.waveformPresented.posted',
-    `${(performance.now() - startedAt).toFixed(1)} ms cols=${body?.columnCount ?? 'n/a'}`,
-  );
 }
 
 function drawColumnsCount(renderSurface, columnCount) {

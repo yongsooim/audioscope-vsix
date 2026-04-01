@@ -9,11 +9,6 @@ import {
   probeAudioOpen,
   type AudioscopePayload,
 } from './externalAudioTools';
-import {
-  createHostDebugTimelineEvent,
-  getExtensionActivatedAtMs,
-  type DebugTimelineEventPayload,
-} from './debugTimeline';
 
 const KNOWN_AUDIO_EXTENSIONS = new Set([
   'wav',
@@ -93,7 +88,6 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken,
   ): Promise<void> {
-    const resolveStartedAtMs = Date.now();
     let externalToolStatusPromise: Promise<Awaited<ReturnType<typeof getExternalToolStatus>>> | null = null;
     const documentRoot = document.uri.with({
       path: path.posix.dirname(document.uri.path),
@@ -107,20 +101,6 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     };
     webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
-    const sendDebugTimelineEventRecord = async (event: DebugTimelineEventPayload, loadToken?: number): Promise<void> => {
-      await webviewPanel.webview.postMessage({
-        type: 'debugTimelineEvent',
-        body: {
-          event: {
-            ...event,
-            loadToken: loadToken ?? event.loadToken,
-          },
-        },
-      });
-    };
-    const sendDebugTimelineEvent = async (label: string, loadToken?: number, detail?: string): Promise<void> => {
-      await sendDebugTimelineEventRecord(createHostDebugTimelineEvent(label, detail, loadToken), loadToken);
-    };
     const getOrStartExternalToolStatus = (): Promise<Awaited<ReturnType<typeof getExternalToolStatus>>> => {
       if (!externalToolStatusPromise) {
         externalToolStatusPromise = getExternalToolStatus(document.uri);
@@ -130,38 +110,11 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     };
     void getOrStartExternalToolStatus();
 
-    const postAudioPayload = async (triggerLabel: string): Promise<void> => {
-      const triggerEvent = createHostDebugTimelineEvent(triggerLabel);
-      const buildStartEvent = createHostDebugTimelineEvent('host.buildPayload.start');
+    const postAudioPayload = async (): Promise<void> => {
       const payload = await this.buildPayload(document, webviewPanel.webview);
-      const buildDoneEvent = createHostDebugTimelineEvent(
-        'host.buildPayload.done',
-        `size=${payload.fileSize ?? 'n/a'} quality=${payload.spectrogramQuality}`,
-      );
-      const loadAudioPostedEvent = createHostDebugTimelineEvent('host.loadAudio.posted');
-      const debugTimelineSeed: DebugTimelineEventPayload[] = [
-        {
-          label: 'host.extension.activate',
-          source: 'host',
-          timeMs: getExtensionActivatedAtMs(),
-        },
-        {
-          label: 'host.resolveCustomEditor.start',
-          source: 'host',
-          timeMs: resolveStartedAtMs,
-        },
-        triggerEvent,
-        buildStartEvent,
-        ...(payload.debugTimelineSeed ?? []),
-        buildDoneEvent,
-        loadAudioPostedEvent,
-      ];
       await webviewPanel.webview.postMessage({
         type: 'loadAudio',
-        body: {
-          ...payload,
-          debugTimelineSeed,
-        },
+        body: payload,
       });
 
       if (!payload.externalTools.resolved) {
@@ -178,17 +131,15 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
 
     webviewPanel.webview.onDidReceiveMessage(async (message) => {
       if (message?.type === 'ready' || message?.type === 'reload') {
-        await postAudioPayload(message.type === 'reload' ? 'host.webview.reload.received' : 'host.webview.ready.received');
+        await postAudioPayload();
         return;
       }
 
       if (message?.type === 'requestMediaMetadata') {
         const loadToken = Number(message.body?.loadToken) || 0;
-        await sendDebugTimelineEvent('host.mediaMetadata.request.start', loadToken);
 
         try {
           const metadata = await getMediaMetadata(document.uri);
-          await sendDebugTimelineEvent('host.mediaMetadata.request.done', loadToken);
           await webviewPanel.webview.postMessage({
             type: 'mediaMetadataReady',
             body: {
@@ -198,11 +149,6 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           });
         } catch (error) {
           const toolStatus = await getExternalToolStatus(document.uri);
-          await sendDebugTimelineEvent(
-            'host.mediaMetadata.request.error',
-            loadToken,
-            error instanceof Error ? error.message : String(error),
-          );
           await webviewPanel.webview.postMessage({
             type: 'mediaMetadataError',
             body: {
@@ -217,19 +163,9 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
 
       if (message?.type === 'requestDecodeFallback') {
         const loadToken = Number(message.body?.loadToken) || 0;
-        await sendDebugTimelineEvent('host.decodeFallback.request.start', loadToken);
 
         try {
-          const fallback = await decodeWithFfmpeg(document.uri, {
-            onDebugTimelineEvent: (event) => {
-              void sendDebugTimelineEventRecord(event, loadToken);
-            },
-          });
-          await sendDebugTimelineEvent(
-            'host.decodeFallback.request.done',
-            loadToken,
-            `bytes=${fallback.byteLength}`,
-          );
+          const fallback = await decodeWithFfmpeg(document.uri);
           await webviewPanel.webview.postMessage({
             type: 'decodeFallbackReady',
             body: {
@@ -239,11 +175,6 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           });
         } catch (error) {
           const toolStatus = await getExternalToolStatus(document.uri);
-          await sendDebugTimelineEvent(
-            'host.decodeFallback.request.error',
-            loadToken,
-            error instanceof Error ? error.message : String(error),
-          );
           await webviewPanel.webview.postMessage({
             type: 'decodeFallbackError',
             body: {
@@ -258,11 +189,9 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
 
       if (message?.type === 'requestLoudnessSummary') {
         const loadToken = Number(message.body?.loadToken) || 0;
-        await sendDebugTimelineEvent('host.loudnessSummary.request.start', loadToken);
 
         try {
           const summary = await getLoudnessSummary(document.uri);
-          await sendDebugTimelineEvent('host.loudnessSummary.request.done', loadToken);
           await webviewPanel.webview.postMessage({
             type: 'loudnessSummaryReady',
             body: {
@@ -271,11 +200,6 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
             },
           });
         } catch (error) {
-          await sendDebugTimelineEvent(
-            'host.loudnessSummary.request.error',
-            loadToken,
-            error instanceof Error ? error.message : String(error),
-          );
           await webviewPanel.webview.postMessage({
             type: 'loudnessSummaryError',
             body: {
@@ -308,17 +232,13 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
   }
 
   private async buildPayload(document: AudioscopeDocument, webview: vscode.Webview): Promise<AudioscopePayload> {
-    const debugTimelineSeed: DebugTimelineEventPayload[] = [];
     let fileSize: number | null = null;
 
     try {
-      debugTimelineSeed.push(createHostDebugTimelineEvent('host.buildPayload.fsStat.start'));
       const stat = await vscode.workspace.fs.stat(document.uri);
       fileSize = stat.size;
-      debugTimelineSeed.push(createHostDebugTimelineEvent('host.buildPayload.fsStat.done', `size=${fileSize}`));
     } catch {
       fileSize = null;
-      debugTimelineSeed.push(createHostDebugTimelineEvent('host.buildPayload.fsStat.error'));
     }
 
     const spectrogramQuality = vscode.workspace
@@ -326,12 +246,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
       .get<'balanced' | 'high' | 'max'>('spectrogramQuality', 'high');
     const externalTools = createInitialExternalToolStatus(document.uri);
 
-    if (!externalTools.resolved) {
-      debugTimelineSeed.push(createHostDebugTimelineEvent('host.buildPayload.externalTools.deferred'));
-    }
-
     return {
-      debugTimelineSeed,
       documentUri: document.uri.toString(),
       externalTools,
       fileExtension: path.posix.extname(document.uri.path).replace(/^\./, '').toLowerCase(),
@@ -537,13 +452,6 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         <div id="playback-rate-menu" class="transport-rate-menu" role="listbox" aria-label="Playback speed"></div>
       </div>
       <div id="status" class="status-overlay" hidden></div>
-      <aside id="debug-timeline-panel" class="debug-timeline-panel" aria-label="audioscope debug timeline" data-collapsed="false">
-        <div class="debug-timeline-header">
-          <div id="debug-timeline-summary" class="debug-timeline-summary">Timeline pending…</div>
-          <button id="debug-timeline-toggle" class="debug-timeline-toggle" type="button" aria-expanded="true">Hide</button>
-        </div>
-        <div id="debug-timeline-list" class="debug-timeline-list"></div>
-      </aside>
     </main>
 
     <script type="module" src="${scriptUri}"></script>

@@ -1,0 +1,80 @@
+function requireElement<T extends HTMLElement>(id: string): T {
+  const element = document.getElementById(id);
+
+  if (!(element instanceof HTMLElement)) {
+    throw new Error(`audioscope is missing required element #${id}.`);
+  }
+
+  return element as T;
+}
+
+export function createAudioscopeElements() {
+  return {
+    viewport: requireElement<HTMLElement>('audioscope-viewport'),
+    wavePanel: requireElement<HTMLElement>('wave-panel'),
+    waveToolbar: requireElement<HTMLElement>('wave-toolbar'),
+    mediaMetadataPanel: requireElement<HTMLElement>('media-metadata-panel'),
+    mediaMetadataSummary: requireElement<HTMLElement>('media-metadata-summary'),
+    mediaMetadataDetail: requireElement<HTMLElement>('media-metadata-detail'),
+    waveToolbarInfo: requireElement<HTMLElement>('wave-toolbar-info'),
+    waveformViewport: requireElement<HTMLElement>('waveform-viewport'),
+    waveformCanvasHost: requireElement<HTMLElement>('waveform-canvas-host'),
+    waveformHitTarget: requireElement<HTMLElement>('waveform-hit-target'),
+    waveformHoverTooltip: requireElement<HTMLElement>('waveform-hover-tooltip'),
+    waveformSampleMarker: document.getElementById('waveform-sample-marker') as HTMLElement | null,
+    waveformSelection: requireElement<HTMLElement>('waveform-selection'),
+    waveformProgress: requireElement<HTMLElement>('waveform-progress'),
+    waveformCursor: requireElement<HTMLElement>('waveform-cursor'),
+    waveformLoopStart: requireElement<HTMLElement>('waveform-loop-start'),
+    waveformLoopEnd: requireElement<HTMLElement>('waveform-loop-end'),
+    waveformAxis: requireElement<HTMLElement>('waveform-axis'),
+    waveformOverview: requireElement<HTMLElement>('waveform-overview'),
+    waveformOverviewThumb: requireElement<HTMLElement>('waveform-overview-thumb'),
+    waveHint: requireElement<HTMLElement>('wave-hint'),
+    waveLoopLabel: requireElement<HTMLElement>('wave-loop-label'),
+    waveZoomChip: requireElement<HTMLElement>('wave-zoom-chip'),
+    waveClearLoop: requireElement<HTMLButtonElement>('wave-clear-loop'),
+    waveZoomOut: requireElement<HTMLButtonElement>('wave-zoom-out'),
+    waveZoomReset: requireElement<HTMLButtonElement>('wave-zoom-reset'),
+    waveZoomIn: requireElement<HTMLButtonElement>('wave-zoom-in'),
+    waveFollow: requireElement<HTMLInputElement>('wave-follow'),
+    viewportSplitter: requireElement<HTMLElement>('viewport-splitter'),
+    spectrogramPanel: requireElement<HTMLElement>('spectrogram-panel'),
+    spectrogramStage: requireElement<HTMLElement>('spectrogram-stage'),
+    spectrogram: requireElement<HTMLCanvasElement>('spectrogram'),
+    spectrogramSelection: requireElement<HTMLElement>('spectrogram-selection'),
+    spectrogramProgress: requireElement<HTMLElement>('spectrogram-progress'),
+    spectrogramCursor: requireElement<HTMLElement>('spectrogram-cursor'),
+    spectrogramLoopStart: requireElement<HTMLElement>('spectrogram-loop-start'),
+    spectrogramLoopEnd: requireElement<HTMLElement>('spectrogram-loop-end'),
+    spectrogramMeta: requireElement<HTMLElement>('spectrogram-meta'),
+    spectrogramTypeSelect: requireElement<HTMLSelectElement>('spectrogram-type-select'),
+    spectrogramFftSelect: requireElement<HTMLSelectElement>('spectrogram-fft-select'),
+    spectrogramOverlapSelect: requireElement<HTMLSelectElement>('spectrogram-overlap-select'),
+    spectrogramScaleSelect: requireElement<HTMLSelectElement>('spectrogram-scale-select'),
+    spectrogramHoverTooltip: requireElement<HTMLElement>('spectrogram-hover-tooltip'),
+    spectrogramAxis: requireElement<HTMLElement>('spectrogram-axis'),
+    spectrogramGuides: requireElement<HTMLElement>('spectrogram-guides'),
+    spectrogramHitTarget: requireElement<HTMLElement>('spectrogram-hit-target'),
+    seekBackward: requireElement<HTMLButtonElement>('seek-backward'),
+    playToggle: requireElement<HTMLButtonElement>('play-toggle'),
+    seekForward: requireElement<HTMLButtonElement>('seek-forward'),
+    playbackRateControl: requireElement<HTMLElement>('playback-rate-control'),
+    playbackRateButton: requireElement<HTMLButtonElement>('playback-rate-button'),
+    playbackRateLayer: requireElement<HTMLElement>('playback-rate-layer'),
+    playbackRateMenu: requireElement<HTMLElement>('playback-rate-menu'),
+    playbackRateSelect: requireElement<HTMLSelectElement>('playback-rate-select'),
+    timeline: requireElement<HTMLInputElement>('timeline'),
+    timelineHoverTooltip: requireElement<HTMLElement>('timeline-hover-tooltip'),
+    timeReadout: requireElement<HTMLElement>('time-readout'),
+    loudnessSummary: requireElement<HTMLElement>('loudness-summary'),
+    loudnessIntegrated: requireElement<HTMLElement>('loudness-integrated'),
+    loudnessRange: requireElement<HTMLElement>('loudness-range'),
+    loudnessSamplePeak: requireElement<HTMLElement>('loudness-sample-peak'),
+    loudnessTruePeak: requireElement<HTMLElement>('loudness-true-peak'),
+    analysisStatus: requireElement<HTMLElement>('analysis-status'),
+    status: requireElement<HTMLElement>('status'),
+  };
+}
+
+export type AudioscopeElements = ReturnType<typeof createAudioscopeElements>;
