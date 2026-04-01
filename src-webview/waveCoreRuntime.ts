@@ -27,7 +27,13 @@ export interface WaveCoreModule {
   _malloc(byteLength: number): number;
   _wave_build_waveform_pyramid(): number;
   _wave_dispose_session(): number;
-  _wave_extract_waveform_slice(viewStart: number, viewEnd: number, columnCount: number, outputPointer: number): number;
+  _wave_extract_waveform_slice(
+    viewStart: number,
+    viewEnd: number,
+    columnCount: number,
+    outputPointer: number,
+    metaOutputPointer: number,
+  ): number;
   _wave_get_pcm_ptr(): number;
   _wave_plan_spectrogram_follow_render(
     displayStart: number,

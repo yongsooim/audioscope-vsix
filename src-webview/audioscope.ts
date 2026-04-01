@@ -1282,9 +1282,6 @@ function renderMediaMetadata() {
   appendMetadataDetailRow(overviewSection, 'Duration', detailSummary?.durationText || null);
   appendMetadataDetailRow(overviewSection, 'Size', detailSummary?.sizeText || null);
 
-  appendMetadataListSection(detailRoot, 'Tags', formatMetadataTags(detail?.tags));
-  appendMetadataListSection(detailRoot, 'Chapters', formatMetadataChapters(detail?.chapters));
-
   const loudnessSection = appendMetadataDetailSection(detailRoot, 'Loudness');
   const loudness = state.loudness ?? createLoudnessSummaryState('idle');
   appendMetadataDetailRow(loudnessSection, 'Integrated', formatLoudnessValue(loudness.status, loudness.integratedLufs, 'LUFS'));
@@ -1297,6 +1294,9 @@ function renderMediaMetadata() {
   appendMetadataDetailRow(loudnessSection, 'True Peak', formatLoudnessValue(loudness.status, loudness.truePeakDbtp, 'dBTP'));
   appendMetadataDetailRow(loudnessSection, 'Note', loudness.status === 'error' ? loudness.message : null);
   appendMetadataDetailRow(loudnessSection, 'Source', formatLoudnessSourceLabel(loudness));
+
+  appendMetadataListSection(detailRoot, 'Tags', formatMetadataTags(detail?.tags));
+  appendMetadataListSection(detailRoot, 'Chapters', formatMetadataChapters(detail?.chapters));
 
   const toolSection = appendMetadataDetailSection(detailRoot, 'Tools');
   appendMetadataDetailRow(toolSection, 'Decode', formatMetadataDecodeSourceLabel());
@@ -2128,10 +2128,12 @@ function createWaveformAxisSnapshot(
   renderRange: TimeRange,
   renderWidth: number,
   viewportWidth = Math.max(1, elements.waveformAxis.clientWidth || getWaveformViewportWidth()),
+  visibleSpan = Math.max(0, Number(renderRange?.end) - Number(renderRange?.start)),
 ): WaveformAxisSnapshot {
   const safeRenderRange = cloneTimeRange(renderRange);
   const safeRenderWidth = Math.max(1, Math.round(renderWidth || 0));
   const span = Math.max(0, safeRenderRange.end - safeRenderRange.start);
+  const safeVisibleSpan = Math.max(0, Number(visibleSpan) || 0);
 
   if (span <= 0 || viewportWidth <= 0) {
     return {
@@ -2143,7 +2145,8 @@ function createWaveformAxisSnapshot(
   }
 
   const tickCount = Math.max(12, Math.min(28, Math.floor(viewportWidth / 48)));
-  const step = getNiceTimeStep(span / tickCount);
+  const tickStepSpan = safeVisibleSpan > 0 ? safeVisibleSpan : span;
+  const step = getNiceTimeStep(tickStepSpan / tickCount);
   const ticks: WaveformAxisTick[] = [];
   const firstTick = Math.ceil(safeRenderRange.start / step) * step;
 
@@ -3073,6 +3076,8 @@ function handleWaveformPresented(body) {
     axisTicks: createWaveformAxisSnapshot(
       { end: body.viewEnd, start: body.viewStart },
       width,
+      getWaveformViewportWidth(),
+      pendingRequest?.visibleSpan ?? Math.max(0, body.viewEnd - body.viewStart),
     ).ticks,
     bitmap,
     columnCount: Math.max(1, Math.round(Number(body.columnCount) || width * WAVEFORM_RENDER_SCALE || 1)),
@@ -3522,7 +3527,7 @@ function renderWaveformAxis(options: WaveformAxisRenderOptions = {}) {
       ticks: snapshot.axisTicks,
       viewportWidth,
     }
-    : createWaveformAxisSnapshot(renderRange, renderWidth, viewportWidth);
+    : createWaveformAxisSnapshot(renderRange, renderWidth, viewportWidth, snapshot.visibleSpan);
 
   state.waveformAxisRenderRange = cloneTimeRange(axisSnapshot.renderRange);
   state.waveformAxisRenderWidth = axisSnapshot.renderWidth;
@@ -4052,6 +4057,56 @@ function pickRepresentativeWaveformSample(samples, startPosition, endPosition) {
   };
 }
 
+function getWaveformRenderableMaxX(renderWidth, renderColumnCount) {
+  return renderColumnCount <= 1
+    ? 0
+    : ((renderColumnCount - 1) * renderWidth) / renderColumnCount;
+}
+
+function getWaveformSampleBucketSize(visibleSampleCount, renderColumnCount) {
+  if (!(visibleSampleCount > 0) || !(renderColumnCount > 0)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.round(visibleSampleCount / renderColumnCount));
+}
+
+function getWaveformSamplePositionAtRenderOffset(
+  renderOffsetX,
+  renderWidth,
+  renderColumnCount,
+  sampleStartPosition,
+  visibleSampleSpan,
+) {
+  const maxRenderableX = getWaveformRenderableMaxX(renderWidth, renderColumnCount);
+
+  if (maxRenderableX <= 0 || visibleSampleSpan <= 0) {
+    return sampleStartPosition;
+  }
+
+  return sampleStartPosition + ((clamp(renderOffsetX, 0, maxRenderableX) / maxRenderableX) * visibleSampleSpan);
+}
+
+function getWaveformMarkerXForSampleIndex(
+  sampleIndex,
+  sampleStartPosition,
+  visibleSampleSpan,
+  renderWidth,
+  renderColumnCount,
+  sourceOffsetPx,
+  viewportWidth,
+) {
+  const maxRenderableX = getWaveformRenderableMaxX(renderWidth, renderColumnCount);
+
+  return clamp(
+    visibleSampleSpan <= 0
+      ? 0
+      : (((sampleIndex - sampleStartPosition) / visibleSampleSpan) * maxRenderableX) - sourceOffsetPx,
+    0,
+    viewportWidth,
+  );
+}
+
 function getWaveformSampleInfoAtClientX(clientX) {
   const samples = state.waveformSamples;
   const sampleRate = Number(state.analysis?.sampleRate);
@@ -4089,23 +4144,24 @@ function getWaveformSampleInfoAtClientX(clientX) {
   const renderOffsetX = clamp(renderMetrics.sourceOffsetPx + offsetX, 0, renderWidth);
 
   if (snapshot.rawSamplePlotMode) {
-    const maxRenderableX = renderColumnCount <= 1
-      ? 0
-      : ((renderColumnCount - 1) * renderWidth) / renderColumnCount;
-    const samplePosition = sampleStartPosition + (
-      maxRenderableX <= 0
-        ? 0
-        : (clamp(renderOffsetX, 0, maxRenderableX) / maxRenderableX) * visibleSampleSpan
+    const samplePosition = getWaveformSamplePositionAtRenderOffset(
+      renderOffsetX,
+      renderWidth,
+      renderColumnCount,
+      sampleStartPosition,
+      visibleSampleSpan,
     );
     const sampleIndex = clamp(Math.round(samplePosition), 0, maxSampleIndex);
     const sampleValue = samples[sampleIndex] ?? 0;
 
     return {
-      markerX: clamp(
-        visibleSampleSpan <= 0
-          ? 0
-          : (((sampleIndex - sampleStartPosition) / visibleSampleSpan) * maxRenderableX) - renderMetrics.sourceOffsetPx,
-        0,
+      markerX: getWaveformMarkerXForSampleIndex(
+        sampleIndex,
+        sampleStartPosition,
+        visibleSampleSpan,
+        renderWidth,
+        renderColumnCount,
+        renderMetrics.sourceOffsetPx,
         renderMetrics.viewportWidth,
       ),
       markerY: getWaveformMarkerY(sampleValue, rect.height, renderMetrics.renderDeviceHeight),
@@ -4117,25 +4173,31 @@ function getWaveformSampleInfoAtClientX(clientX) {
     };
   }
 
-  const columnIndex = clamp(
-    Math.round((renderOffsetX / renderWidth) * renderColumnCount),
-    0,
-    Math.max(0, renderColumnCount - 1),
+  const sampleBucketSize = getWaveformSampleBucketSize(visibleSampleCount, renderColumnCount);
+  const samplePosition = getWaveformSamplePositionAtRenderOffset(
+    renderOffsetX,
+    renderWidth,
+    renderColumnCount,
+    sampleStartPosition,
+    visibleSampleSpan,
   );
-  const columnStartPosition = sampleStartPosition + (columnIndex / renderColumnCount) * visibleSampleCount;
-  const columnEndPosition = sampleStartPosition + ((columnIndex + 1) / renderColumnCount) * visibleSampleCount;
-  const representativeSample = pickRepresentativeWaveformSample(samples, columnStartPosition, columnEndPosition);
+  const bucketIndex = Math.floor(samplePosition / sampleBucketSize);
+  const bucketStartPosition = bucketIndex * sampleBucketSize;
+  const bucketEndPosition = bucketStartPosition + sampleBucketSize;
+  const representativeSample = pickRepresentativeWaveformSample(samples, bucketStartPosition, bucketEndPosition);
 
   if (!representativeSample) {
     return null;
   }
 
   return {
-    markerX: clamp(
-      renderColumnCount <= 1
-        ? 0
-        : ((columnIndex * renderWidth) / renderColumnCount) - renderMetrics.sourceOffsetPx,
-      0,
+    markerX: getWaveformMarkerXForSampleIndex(
+      representativeSample.index,
+      sampleStartPosition,
+      visibleSampleSpan,
+      renderWidth,
+      renderColumnCount,
+      renderMetrics.sourceOffsetPx,
       renderMetrics.viewportWidth,
     ),
     markerY: getWaveformMarkerY(representativeSample.value, rect.height, renderMetrics.renderDeviceHeight),
