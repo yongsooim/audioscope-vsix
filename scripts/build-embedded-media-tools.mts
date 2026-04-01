@@ -50,6 +50,9 @@ const emscriptenExecutableNames =
         emmake: 'emmake',
       };
 
+const speedOptimizedWasmFlags = ['-O3', '-msimd128'];
+const speedOptimizedWasmFlagsJoined = speedOptimizedWasmFlags.join(' ');
+
 const sharedConfigureArgs = [
   '--cc=emcc',
   '--cxx=em++',
@@ -66,7 +69,9 @@ const sharedConfigureArgs = [
   '--disable-network',
   '--disable-autodetect',
   '--disable-iconv',
-  '--enable-small',
+  `--extra-cflags=${speedOptimizedWasmFlagsJoined}`,
+  `--extra-cxxflags=${speedOptimizedWasmFlagsJoined}`,
+  `--extra-ldflags=${speedOptimizedWasmFlagsJoined}`,
   '--disable-runtime-cpudetect',
   '--disable-pthreads',
   '--disable-w32threads',
@@ -181,8 +186,13 @@ async function buildTool(spec: ToolSpec, ffmpegRevision: string, emscripten: Ems
   const buildDir = path.join(buildRoot, spec.buildDirName);
   const stampPath = path.join(buildDir, '.stamp.json');
   const nextStamp = JSON.stringify({
+    browserModuleOutputBaseName: spec.browserModuleOutputBaseName ?? null,
     configureArgs: spec.configureArgs,
+    customExecutableSource: spec.customExecutableSource ?? null,
+    directModuleOutputBaseName: spec.directModuleOutputBaseName ?? null,
+    directModuleSource: spec.directModuleSource ?? null,
     ffmpegRevision,
+    speedOptimizedWasmFlags,
     tool: spec.name,
   });
 
@@ -450,7 +460,7 @@ async function buildCustomExecutable(spec: ToolSpec, buildDir: string, emscripte
   await run(
     emscripten.emcc,
     [
-      '-O3',
+      ...speedOptimizedWasmFlags,
       '-s',
       'ALLOW_MEMORY_GROWTH=1',
       '-s',
@@ -495,7 +505,7 @@ async function buildDirectModule(spec: ToolSpec, buildDir: string, emscripten: E
   await run(
     emscripten.emcc,
     [
-      '-O3',
+      ...speedOptimizedWasmFlags,
       '-s',
       'ALLOW_MEMORY_GROWTH=1',
       '-s',
@@ -554,7 +564,7 @@ async function buildBrowserDirectModule(
   await run(
     emscripten.emcc,
     [
-      '-O3',
+      ...speedOptimizedWasmFlags,
       '-s',
       'ALLOW_MEMORY_GROWTH=1',
       '-s',

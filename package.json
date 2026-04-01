@@ -54,6 +54,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onCommand:audioscope.openActiveFileInAudioscope",
     "onCustomEditor:audioscope.editor"
   ],

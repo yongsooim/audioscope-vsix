@@ -995,6 +995,22 @@ body {
   -ms-overflow-style: none;
 }
 
+#waveform-overview {
+  grid-column: 6;
+  justify-self: stretch;
+  min-width: 0;
+  width: 100%;
+}
+
+#time-readout {
+  grid-column: 5;
+}
+
+#loudness-summary,
+#analysis-status {
+  grid-column: 7;
+}
+
 .transport::-webkit-scrollbar {
   display: none;
 }
@@ -1174,6 +1190,7 @@ body {
   position: relative;
   display: flex;
   align-items: center;
+  justify-self: stretch;
   min-width: 0;
   width: 100%;
   height: 28px;
@@ -1402,7 +1419,7 @@ body {
   }
 
   .transport {
-    grid-template-columns: auto auto auto auto minmax(240px, 1fr) auto auto;
+    grid-template-columns: auto auto auto auto auto minmax(240px, 1fr) auto;
     row-gap: 0;
   }
 
