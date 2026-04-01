@@ -37,11 +37,8 @@ const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.18;
 const WAVEFORM_FOLLOW_LEFT_THRESHOLD_RATIO = 0.25;
 const WAVEFORM_FOLLOW_RIGHT_THRESHOLD_RATIO = 0.75;
 const WAVEFORM_FOLLOW_TARGET_RATIO = 0.5;
-const WAVEFORM_FOLLOW_REQUEST_MIN_INTERVAL_MS = 90;
-const WAVEFORM_AXIS_FOLLOW_RENDER_MIN_INTERVAL_MS = 140;
 const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.25;
 const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.18;
-const SPECTROGRAM_FOLLOW_REQUEST_MIN_INTERVAL_MS = 110;
 const LOOP_SELECTION_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const LOOP_HANDLE_WIDTH_PX = 8;
@@ -240,9 +237,6 @@ const state = {
   waveformRawSamplePlotMode: false,
   waveformAxisRenderRange: { start: 0, end: 0 },
   waveformAxisRenderWidth: 0,
-  lastFollowWaveformRequestAtMs: 0,
-  lastFollowAxisRenderAtMs: 0,
-  lastFollowSpectrogramRequestAtMs: 0,
   playbackFrame: 0,
   spectrogramFrame: 0,
   spectrogramRequestFrame: 0,
@@ -1421,9 +1415,6 @@ async function loadAudioFile(payload) {
   addDebugTimelineEvent('webview.loadAudio.received', payload?.fileName || '');
 
   destroySession();
-  state.lastFollowWaveformRequestAtMs = 0;
-  state.lastFollowAxisRenderAtMs = 0;
-  state.lastFollowSpectrogramRequestAtMs = 0;
   state.externalTools = normalizeExternalToolStatus(payload?.externalTools);
   state.mediaMetadata = {
     ...createMediaMetadataState('pending'),
@@ -2508,17 +2499,9 @@ function handleWaveformWorkerMessage(loadToken, message) {
   }
 }
 
-function scheduleSpectrogramRender({ force = false, followPlayback = false } = {}) {
+function scheduleSpectrogramRender({ force = false } = {}) {
   if (state.spectrogramFrame) {
     return;
-  }
-
-  if (!force && followPlayback && isSmoothFollowPlaybackActive()) {
-    if (!shouldRunFollowUpdate(state.lastFollowSpectrogramRequestAtMs, SPECTROGRAM_FOLLOW_REQUEST_MIN_INTERVAL_MS)) {
-      return;
-    }
-
-    state.lastFollowSpectrogramRequestAtMs = performance.now();
   }
 
   state.spectrogramFrame = window.requestAnimationFrame(() => {
@@ -3336,19 +3319,13 @@ function syncFollowView(timeSeconds, range = getWaveformRange(timeSeconds)) {
   }
 
   if (isSmoothFollowPlaybackActive()) {
-    const now = performance.now();
     commitWaveformDisplayRange(range);
     applyWaveformOverviewThumb(range);
     syncWaveformSelection();
     applyWaveformCanvasTransform(range);
     applyWaveformAxisTransform(range);
 
-    if (
-      hasCommittedWaveformRenderCoverage(range)
-      && !hasWaveformAxisRenderCoverage(range)
-      && (now - state.lastFollowAxisRenderAtMs) >= WAVEFORM_AXIS_FOLLOW_RENDER_MIN_INTERVAL_MS
-    ) {
-      state.lastFollowAxisRenderAtMs = now;
+    if (hasCommittedWaveformRenderCoverage(range) && !hasWaveformAxisRenderCoverage(range)) {
       renderWaveformAxis({
         displayRange: range,
         renderRange: state.waveformRenderRange,
@@ -3357,10 +3334,10 @@ function syncFollowView(timeSeconds, range = getWaveformRange(timeSeconds)) {
     }
 
     if (!hasWaveformRenderCoverage(range)) {
-      void syncWaveformView({ followPlayback: true });
+      void syncWaveformView();
     }
 
-    scheduleSpectrogramRender({ followPlayback: true });
+    scheduleSpectrogramRender();
     return;
   }
 
@@ -3397,7 +3374,7 @@ function syncFollowView(timeSeconds, range = getWaveformRange(timeSeconds)) {
   void syncWaveformView();
 }
 
-async function syncWaveformView({ force = false, followPlayback = false } = {}) {
+async function syncWaveformView({ force = false } = {}) {
   const duration = getEffectiveDuration();
   const { displayRange, height, renderRange, renderWidth } = getWaveformRenderRequestMetrics();
   const visibleSpan = Math.max(0, displayRange.end - displayRange.start);
@@ -3409,14 +3386,6 @@ async function syncWaveformView({ force = false, followPlayback = false } = {}) 
   if (!force && hasWaveformRenderCoverage(displayRange)) {
     applyWaveformCanvasTransform(displayRange);
     return;
-  }
-
-  if (!force && followPlayback && isSmoothFollowPlaybackActive()) {
-    if (!shouldRunFollowUpdate(state.lastFollowWaveformRequestAtMs, WAVEFORM_FOLLOW_REQUEST_MIN_INTERVAL_MS)) {
-      return;
-    }
-
-    state.lastFollowWaveformRequestAtMs = performance.now();
   }
 
   state.waveformRequestGeneration += 1;
@@ -4731,9 +4700,6 @@ function destroySession() {
   state.playbackFrame = 0;
   state.spectrogramFrame = 0;
   state.spectrogramRequestFrame = 0;
-  state.lastFollowWaveformRequestAtMs = 0;
-  state.lastFollowAxisRenderAtMs = 0;
-  state.lastFollowSpectrogramRequestAtMs = 0;
 
   cancelDeferredAnalysis();
   if (state.sourceFetchController) {
@@ -5177,16 +5143,6 @@ function isSmoothFollowPlaybackActive() {
       && Number.isFinite(getCurrentPlaybackTime())
       && !isFollowPlaybackInteractionActive()
   );
-}
-
-function shouldRunFollowUpdate(lastRunAtMs, minIntervalMs) {
-  const now = performance.now();
-
-  if ((now - lastRunAtMs) < minIntervalMs) {
-    return false;
-  }
-
-  return true;
 }
 
 function isRangeBuffered(targetRange, bufferRange, marginRatio = 0) {
