@@ -21,7 +21,7 @@ const commonCompileArgs = [
   '--export-memory',
   '--stack',
   '1048576',
-  '--initial-memory=8388608',
+  '--initial-memory=134217728',
   '-I',
   path.join(projectRoot, 'src-wasm', 'freestanding', 'include'),
   '-I',
@@ -42,7 +42,7 @@ const cSources = [
   path.join(projectRoot, 'src-wasm', 'third_party', 'pffft', 'pffft.c'),
 ];
 
-const variants = [
+const variants = [ 
   {
     artifactName: 'wasm_core_simd.wasm',
     cFlags: [...commonCFlags, '-msimd128'],
