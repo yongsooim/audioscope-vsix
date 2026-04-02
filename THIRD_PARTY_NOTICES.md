@@ -6,15 +6,16 @@ third-party components.
 ## FFmpeg
 
 audioscope distributes embedded FFmpeg WebAssembly binaries built from FFmpeg.
-The FFmpeg source is included as the `src-wasm/third_party/ffmpeg` submodule.
-The exact bundled revision and rebuild notes for this release are documented in
-`FFMPEG_SOURCE.md`.
+The FFmpeg source is vendored in this repository as the
+`src-wasm/third_party/ffmpeg` submodule. The exact bundled revision and
+rebuild notes for this release are documented in `FFMPEG_SOURCE.md`.
 
 Copyright (c) the FFmpeg developers
 
 FFmpeg is licensed under the GNU Lesser General Public License, version 2.1
-or later, for the configuration distributed by this project. The relevant
-license text is available in the FFmpeg source tree under:
+or later, for the configuration distributed by this project. The corresponding
+license texts are included with this distribution and are also present in the
+source repository under the same paths:
 
 - `src-wasm/third_party/ffmpeg/COPYING.LGPLv2.1`
 - `src-wasm/third_party/ffmpeg/COPYING.LGPLv3`

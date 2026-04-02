@@ -45,7 +45,9 @@
     "CHANGELOG.md",
     "FFMPEG_SOURCE.md",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "src-wasm/third_party/ffmpeg/COPYING.LGPLv2.1",
+    "src-wasm/third_party/ffmpeg/COPYING.LGPLv3"
   ],
   "engines": {
     "vscode": "^1.100.0"
@@ -54,7 +56,6 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished",
     "onCommand:audioscope.openActiveFileInAudioscope",
     "onCustomEditor:audioscope.editor"
   ],
