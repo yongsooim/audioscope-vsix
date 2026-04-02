@@ -1,9 +1,9 @@
 import * as vscode from 'vscode';
-import type { DebugTimelineEventPayload } from './debugTimeline';
 import {
   type EmbeddedExecutableStatus,
   getEmbeddedExecutableStatusSync,
   runEmbeddedFfmpegDecodeToPcm,
+  runEmbeddedFfmpegMeasureLoudness,
   runEmbeddedFfmpegDecodeToWav,
   runEmbeddedFfprobe,
 } from './embeddedMediaTools';
@@ -23,7 +23,6 @@ export interface ExternalToolStatusPayload {
 }
 
 export interface AudioscopePayload {
-  debugTimelineSeed?: DebugTimelineEventPayload[];
   documentUri: string;
   externalTools: ExternalToolStatusPayload;
   fileBacked: boolean;
@@ -87,6 +86,21 @@ export interface MediaMetadataPayload {
   toolStatus: ExternalToolStatusPayload;
 }
 
+export interface LoudnessSummaryPayload {
+  channelCount: number | null;
+  channelLayout: string | null;
+  channelMode: string;
+  integratedLufs: number | null;
+  integratedThresholdLufs: number | null;
+  loudnessRangeLu: number | null;
+  lraHighLufs: number | null;
+  lraLowLufs: number | null;
+  rangeThresholdLufs: number | null;
+  samplePeakDbfs: number | null;
+  source: 'FFmpeg ebur128';
+  truePeakDbtp: number | null;
+}
+
 export type DecodeFallbackPayload =
   | {
       audioBuffer: ArrayBuffer;
@@ -104,10 +118,6 @@ export type DecodeFallbackPayload =
       sampleRate: number;
       source: 'ffmpeg';
     };
-
-interface DecodeWithFfmpegOptions {
-  onDebugTimelineEvent?: (event: DebugTimelineEventPayload) => void | Promise<void>;
-}
 
 export type ProbeOpenResult =
   | { kind: 'audio'; metadata: MediaMetadataPayload; toolStatus: ExternalToolStatusPayload }
@@ -502,6 +512,45 @@ export async function getMediaMetadata(resource: vscode.Uri): Promise<MediaMetad
   return metadata;
 }
 
+export async function getLoudnessSummary(resource: vscode.Uri): Promise<LoudnessSummaryPayload> {
+  const preferredTools = await resolvePreferredTools(resource);
+  const toolStatus = createToolStatusPayload(true, preferredTools);
+
+  if (!toolStatus.fileBacked) {
+    throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
+  }
+
+  if (!toolStatus.ffmpegAvailable) {
+    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
+  }
+
+  if (!toolStatus.canDecodeFallback) {
+    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
+  }
+
+  const summary = await runEmbeddedFfmpegMeasureLoudness(resource, FFMPEG_DECODE_TIMEOUT_MS);
+
+  return {
+    ...summary,
+    channelCount: typeof summary.channelCount === 'number' && Number.isFinite(summary.channelCount)
+      ? Math.max(0, Math.trunc(summary.channelCount))
+      : null,
+    channelLayout: typeof summary.channelLayout === 'string' && summary.channelLayout.trim().length > 0
+      ? summary.channelLayout.trim()
+      : null,
+    channelMode: 'source layout',
+    integratedLufs: parseNumberValue(summary.integratedLufs),
+    integratedThresholdLufs: parseNumberValue(summary.integratedThresholdLufs),
+    loudnessRangeLu: parseNumberValue(summary.loudnessRangeLu),
+    lraHighLufs: parseNumberValue(summary.lraHighLufs),
+    lraLowLufs: parseNumberValue(summary.lraLowLufs),
+    rangeThresholdLufs: parseNumberValue(summary.rangeThresholdLufs),
+    samplePeakDbfs: parseNumberValue(summary.samplePeakDbfs),
+    source: 'FFmpeg ebur128',
+    truePeakDbtp: parseNumberValue(summary.truePeakDbtp),
+  };
+}
+
 export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenResult> {
   const toolStatus = await getExternalToolStatus(resource);
 
@@ -538,20 +587,9 @@ export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenRes
   };
 }
 
-export async function decodeWithFfmpeg(
-  resource: vscode.Uri,
-  options: DecodeWithFfmpegOptions = {},
-): Promise<DecodeFallbackPayload> {
+export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFallbackPayload> {
   const preferredTools = await resolvePreferredTools(resource);
   const toolStatus = createToolStatusPayload(true, preferredTools);
-  const emitDebugTimelineEvent = (label: string, detail?: string): void => {
-    void options.onDebugTimelineEvent?.({
-      detail,
-      label,
-      source: 'host',
-      timeMs: Date.now(),
-    });
-  };
 
   if (!toolStatus.fileBacked) {
     throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
@@ -566,21 +604,16 @@ export async function decodeWithFfmpeg(
   }
 
   try {
-    const result = await runEmbeddedFfmpegDecodeToPcm(
-      resource,
-      options.onDebugTimelineEvent,
-    );
+    const result = await runEmbeddedFfmpegDecodeToPcm(resource);
 
     return {
       ...result,
       kind: 'pcm',
     };
   } catch (error) {
-    emitDebugTimelineEvent('host.decodeFallback.ffmpeg.embedded.module.fallback', getExecErrorMessage(error));
     const result = await runEmbeddedFfmpegDecodeToWav(
       resource,
       FFMPEG_DECODE_TIMEOUT_MS,
-      options.onDebugTimelineEvent,
     );
 
     return {

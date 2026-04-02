@@ -1,9 +1,7 @@
 import * as vscode from 'vscode';
-import { noteExtensionActivated } from './debugTimeline';
 import { AudioscopeEditorProvider } from './audioscopeEditor';
 
 export function activate(context: vscode.ExtensionContext): void {
-  noteExtensionActivated();
   context.subscriptions.push(AudioscopeEditorProvider.register(context));
   void maybeOpenBundledSample(context);
 }

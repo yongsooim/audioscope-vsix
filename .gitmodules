@@ -1,9 +1,6 @@
 [submodule "src-wasm/third_party/pffft"]
 	path = src-wasm/third_party/pffft
 	url = https://bitbucket.org/jpommier/pffft.git
-[submodule "src-wasm/third_party/libebur128"]
-	path = src-wasm/third_party/libebur128
-	url = https://github.com/jiixyj/libebur128.git
 [submodule "src-wasm/third_party/ffmpeg"]
 	path = src-wasm/third_party/ffmpeg
 	url = https://github.com/FFmpeg/FFmpeg.git

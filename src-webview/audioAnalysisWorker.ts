@@ -31,7 +31,6 @@ const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_ROW_BLOCK_SIZE = 32;
-const LOUDNESS_SUMMARY_OUTPUT_LENGTH = 4;
 const MAX_TILE_CACHE_ENTRIES = 24;
 const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
 const ANALYSIS_TYPE_CODES = {
@@ -232,6 +231,12 @@ self.onmessage = (event) => {
       pendingVisibleRequest = message.body ?? null;
       paintSpectrogramDisplay();
       void pumpVisibleLoop();
+      return;
+    case 'updateVisibleDisplayRange':
+      if (message.body) {
+        updateCurrentDisplayRange(message.body);
+      }
+      paintSpectrogramDisplay();
       return;
     case 'cancelGeneration':
       cancelGeneration(message.body?.generation);
@@ -508,23 +513,6 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
     },
   });
 
-  try {
-    const loudnessSummary = computeLoudnessSummary(runtime);
-    self.postMessage({
-      type: 'loudnessSummaryReady',
-      body: {
-        ...loudnessSummary,
-        channelMode: 'mono-downmix',
-        source: 'libebur128',
-      },
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    self.postMessage({
-      type: 'loudnessSummaryError',
-      body: { message },
-    });
-  }
 }
 
 function updateCurrentDisplayRange(request: SpectrogramRequest | null): void {
@@ -1228,33 +1216,6 @@ function ensureSpectrogramOutputCapacity(module: WaveCoreModule, byteLength: num
 
   analysisState.spectrogramOutputPointer = module._malloc(byteLength);
   analysisState.spectrogramOutputCapacity = byteLength;
-}
-
-function computeLoudnessSummary(runtime: WaveCoreRuntime) {
-  const module = runtime.module;
-  const byteLength = LOUDNESS_SUMMARY_OUTPUT_LENGTH * Float32Array.BYTES_PER_ELEMENT;
-  const outputPointer = module._malloc(byteLength);
-
-  if (!outputPointer) {
-    throw new Error('Failed to allocate loudness summary buffer.');
-  }
-
-  try {
-    if (!module._wave_measure_loudness_summary(outputPointer)) {
-      throw new Error('Failed to measure loudness summary.');
-    }
-
-    const output = getHeapF32View(module, outputPointer, LOUDNESS_SUMMARY_OUTPUT_LENGTH);
-
-    return {
-      integratedLufs: output[0],
-      loudnessRangeLu: output[1],
-      samplePeakDbfs: output[2],
-      truePeakDbtp: output[3],
-    };
-  } finally {
-    module._free(outputPointer);
-  }
 }
 
 function getHeapF32View(module: WaveCoreModule, pointer: number, length: number): Float32Array {

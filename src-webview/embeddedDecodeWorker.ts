@@ -2,20 +2,6 @@ let decodeModulePromise = null;
 let decodeModuleScriptUrl = '';
 let decodeModuleWasmUrl = '';
 
-function postDebugTimelineEvent(label, detail = '') {
-  self.postMessage({
-    type: 'debugTimelineEvent',
-    body: {
-      event: {
-        detail,
-        label,
-        source: 'decode-worker',
-        timeMs: Date.now(),
-      },
-    },
-  });
-}
-
 function readErrorMessage(module) {
   const pointer = module._wave_get_last_error_ptr?.() ?? 0;
   const length = module._wave_get_last_error_length?.() ?? 0;
@@ -33,7 +19,6 @@ async function ensureDecodeModule() {
   }
 
   if (!decodeModulePromise) {
-    postDebugTimelineEvent('decode-worker.module.load.start', decodeModuleScriptUrl);
     decodeModulePromise = import(decodeModuleScriptUrl)
       .then(async (moduleRecord) => {
         const createModule = typeof moduleRecord?.default === 'function'
@@ -48,7 +33,6 @@ async function ensureDecodeModule() {
           locateFile: () => decodeModuleWasmUrl,
           noInitialRun: true,
         });
-        postDebugTimelineEvent('decode-worker.module.load.done');
         return module;
       })
       .catch((error) => {
@@ -116,7 +100,6 @@ async function handleDecodeRequest(body) {
     throw new Error('Embedded decode worker did not receive audio bytes.');
   }
 
-  postDebugTimelineEvent('decode-worker.decode.start', `bytes=${inputBytes.byteLength}`);
   module.FS.writeFile(virtualInputPath, new Uint8Array(inputBytes));
 
   const pathPointer = module._malloc(virtualInputPath.length + 1);
@@ -148,9 +131,6 @@ async function handleDecodeRequest(body) {
   const channelByteLength = Math.max(0, module._wave_get_output_channel_byte_length());
   const channelBuffers = [];
 
-  postDebugTimelineEvent('decode-worker.decode.done', `channels=${numberOfChannels} frames=${frameCount} rate=${sampleRate}`);
-  postDebugTimelineEvent('decode-worker.copyout.start', `bytes=${channelByteLength * numberOfChannels}`);
-
   for (let channelIndex = 0; channelIndex < numberOfChannels; channelIndex += 1) {
     const pointer = module._wave_get_output_channel_ptr(channelIndex);
 
@@ -161,8 +141,6 @@ async function handleDecodeRequest(body) {
     const copiedBytes = module.HEAPU8.slice(pointer, pointer + channelByteLength);
     channelBuffers.push(copiedBytes.buffer);
   }
-
-  postDebugTimelineEvent('decode-worker.copyout.done', `bytes=${channelByteLength * numberOfChannels}`);
 
   try {
     module.FS.unlink(virtualInputPath);

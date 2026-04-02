@@ -4,7 +4,6 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import type { DebugTimelineEventPayload } from './debugTimeline';
 
 const EMBEDDED_TOOL_DIRECTORY = path.resolve(__dirname, '..', 'dist', 'embedded-tools');
 const EMBEDDED_MANIFEST_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'manifest.json');
@@ -89,8 +88,23 @@ export interface EmbeddedPcmDecodePayload {
   source: 'ffmpeg';
 }
 
+export interface EmbeddedLoudnessSummaryPayload {
+  channelCount: number | null;
+  channelLayout: string | null;
+  integratedLufs: number | null;
+  integratedThresholdLufs: number | null;
+  loudnessRangeLu: number | null;
+  lraHighLufs: number | null;
+  lraLowLufs: number | null;
+  rangeThresholdLufs: number | null;
+  samplePeakDbfs: number | null;
+  truePeakDbtp: number | null;
+}
+
 const DIRECT_DECODE_MODULE_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffdecode_module.js');
 const DIRECT_DECODE_WASM_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffdecode_module.wasm');
+const LOUDNESS_EXECUTABLE_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffloudness');
+const LOUDNESS_EXECUTABLE_WASM_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffloudness.wasm');
 
 let directDecodeModulePromise: Promise<DirectDecodeModule> | null = null;
 let directDecodeQueue = Promise.resolve();
@@ -181,6 +195,10 @@ function getExecErrorMessage(error: unknown): string {
 
 function hasDirectDecodeModule(): boolean {
   return fs.existsSync(DIRECT_DECODE_MODULE_PATH) && fs.existsSync(DIRECT_DECODE_WASM_PATH);
+}
+
+function hasLoudnessExecutable(): boolean {
+  return fs.existsSync(LOUDNESS_EXECUTABLE_PATH) && fs.existsSync(LOUDNESS_EXECUTABLE_WASM_PATH);
 }
 
 async function loadDirectDecodeModule(): Promise<DirectDecodeModule> {
@@ -293,7 +311,6 @@ export async function runEmbeddedFfprobe(resource: vscode.Uri, timeout: number):
 export async function runEmbeddedFfmpegDecodeToWav(
   resource: vscode.Uri,
   timeout: number,
-  onDebugTimelineEvent?: (event: DebugTimelineEventPayload) => void | Promise<void>,
 ): Promise<{ audioBuffer: ArrayBuffer; byteLength: number; mimeType: 'audio/wav' }> {
   const toolStatus = getEmbeddedExecutableStatusSync('ffmpeg');
 
@@ -301,19 +318,9 @@ export async function runEmbeddedFfmpegDecodeToWav(
     throw new Error('ffmpeg.wasm is unavailable.');
   }
 
-  const emitDebugTimelineEvent = (label: string, detail?: string): void => {
-    void onDebugTimelineEvent?.({
-      detail,
-      label,
-      source: 'host',
-      timeMs: Date.now(),
-    });
-  };
   const resourceHandle = await prepareResourceHandle(resource);
   const outputPath = path.join(resourceHandle.tempDirectoryPath, 'output.wav');
   const virtualInputPath = `/input${path.extname(resourceHandle.inputPath) || '.bin'}`;
-
-  emitDebugTimelineEvent('host.decodeFallback.ffmpeg.embedded.spawn.start', toolStatus.path);
 
   try {
     await execFileAsync(
@@ -334,7 +341,6 @@ export async function runEmbeddedFfmpegDecodeToWav(
     );
 
     const wavBuffer = await fsp.readFile(outputPath);
-    emitDebugTimelineEvent('host.decodeFallback.ffmpeg.embedded.output.ready', `bytes=${wavBuffer.byteLength}`);
     const arrayBuffer = wavBuffer.buffer.slice(
       wavBuffer.byteOffset,
       wavBuffer.byteOffset + wavBuffer.byteLength,
@@ -346,8 +352,45 @@ export async function runEmbeddedFfmpegDecodeToWav(
       mimeType: 'audio/wav',
     };
   } catch (error) {
-    emitDebugTimelineEvent('host.decodeFallback.ffmpeg.embedded.error', getExecErrorMessage(error));
     throw error;
+  } finally {
+    await resourceHandle.cleanup();
+  }
+}
+
+export async function runEmbeddedFfmpegMeasureLoudness(
+  resource: vscode.Uri,
+  timeout: number,
+): Promise<EmbeddedLoudnessSummaryPayload> {
+  if (!hasLoudnessExecutable()) {
+    throw new Error('ffloudness.wasm is unavailable.');
+  }
+
+  const resourceHandle = await prepareResourceHandle(resource);
+  const virtualInputPath = `/input${path.extname(resourceHandle.inputPath) || '.bin'}`;
+
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [
+        '-e',
+        EMBEDDED_TOOL_RUNNER_SOURCE,
+        LOUDNESS_EXECUTABLE_PATH,
+        resourceHandle.inputPath,
+        '',
+        virtualInputPath,
+        JSON.stringify([
+          virtualInputPath,
+        ]),
+      ],
+      timeout,
+    );
+
+    try {
+      return JSON.parse(stdout) as EmbeddedLoudnessSummaryPayload;
+    } catch (error) {
+      throw new Error(`ffloudness returned invalid JSON: ${getExecErrorMessage(error)}`);
+    }
   } finally {
     await resourceHandle.cleanup();
   }
@@ -355,26 +398,15 @@ export async function runEmbeddedFfmpegDecodeToWav(
 
 export async function runEmbeddedFfmpegDecodeToPcm(
   resource: vscode.Uri,
-  onDebugTimelineEvent?: (event: DebugTimelineEventPayload) => void | Promise<void>,
 ): Promise<EmbeddedPcmDecodePayload> {
   if (!hasDirectDecodeModule()) {
     throw new Error('Direct FFmpeg decode module is unavailable.');
   }
 
   return enqueueDirectDecodeTask(async () => {
-    const emitDebugTimelineEvent = (label: string, detail?: string): void => {
-      void onDebugTimelineEvent?.({
-        detail,
-        label,
-        source: 'host',
-        timeMs: Date.now(),
-      });
-    };
     const resourceHandle = await prepareResourceHandle(resource);
     const module = await loadDirectDecodeModule();
     const virtualInputPath = `/input${path.extname(resourceHandle.inputPath) || '.bin'}`;
-
-    emitDebugTimelineEvent('host.decodeFallback.ffmpeg.embedded.module.start', DIRECT_DECODE_MODULE_PATH);
 
     try {
       module.FS.writeFile(virtualInputPath, await fsp.readFile(resourceHandle.inputPath));
@@ -406,11 +438,6 @@ export async function runEmbeddedFfmpegDecodeToPcm(
         channelBuffers.push(copiedBytes.buffer);
       }
 
-      emitDebugTimelineEvent(
-        'host.decodeFallback.ffmpeg.embedded.module.ready',
-        `channels=${channelCount} frames=${frameCount} rate=${sampleRate}`,
-      );
-
       return {
         byteLength: channelBuffers.reduce((total, buffer) => total + buffer.byteLength, 0),
         channelBuffers,
@@ -420,7 +447,6 @@ export async function runEmbeddedFfmpegDecodeToPcm(
         source: 'ffmpeg',
       };
     } catch (error) {
-      emitDebugTimelineEvent('host.decodeFallback.ffmpeg.embedded.module.error', getExecErrorMessage(error));
       throw error;
     } finally {
       try {
