@@ -13,7 +13,10 @@ interface AudioscopeViewportControllerDeps {
   getWaveformRange: () => { start: number; end: number };
   splitterFallbackSizePx: number;
   state: any;
-  updateWaveformViewRange: (updater: (current: { start: number; end: number }) => { start: number; end: number }) => void;
+  updateWaveformViewRange: (
+    updater: (current: { start: number; end: number }) => { start: number; end: number },
+    options?: { animateZoom?: boolean },
+  ) => void;
   viewportRatioMax: number;
   viewportRatioMin: number;
   viewportSplitStep: number;
@@ -312,6 +315,8 @@ export function createAudioscopeViewportController({
         start: nextStart,
         end: nextStart + nextSpan,
       };
+    }, {
+      animateZoom: intent === 'zoom' && verticalMagnitude > 0.01,
     });
   }
 

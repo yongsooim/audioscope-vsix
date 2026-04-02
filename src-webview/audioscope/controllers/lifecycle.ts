@@ -7,6 +7,7 @@ import type { AudioscopeElements } from '../core/elements';
 
 interface AudioscopeLifecycleDeps {
   cancelDeferredAnalysis: () => void;
+  cancelWaveformZoomAnimation: () => void;
   embeddedMediaToolsGuidance: string;
   elements: AudioscopeElements;
   hideSpectrogramHoverTooltip: () => void;
@@ -24,6 +25,7 @@ interface AudioscopeLifecycleDeps {
 
 export function createAudioscopeLifecycleController({
   cancelDeferredAnalysis,
+  cancelWaveformZoomAnimation,
   embeddedMediaToolsGuidance,
   elements,
   hideSpectrogramHoverTooltip,
@@ -65,6 +67,8 @@ export function createAudioscopeLifecycleController({
   }
 
   function disposeWaveformRenderer() {
+    cancelWaveformZoomAnimation();
+
     if (state.waveformWorker) {
       state.waveformWorker.postMessage({ type: 'dispose' });
       state.waveformWorker.terminate();
@@ -95,6 +99,7 @@ export function createAudioscopeLifecycleController({
     window.cancelAnimationFrame(state.waveformFrame);
     window.cancelAnimationFrame(state.spectrogramFrame);
     window.cancelAnimationFrame(state.spectrogramRequestFrame);
+    cancelWaveformZoomAnimation();
     state.playbackFrame = 0;
     state.waveformFrame = 0;
     state.spectrogramFrame = 0;
