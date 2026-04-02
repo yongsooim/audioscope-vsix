@@ -105,6 +105,7 @@ For the bundled FFmpeg revision and rebuild notes used by the embedded media too
 - VS Code `1.100.0` or later
 - Runtime use does not require a system `ffmpeg` or `ffprobe`
 - Building from source requires `bun`, `zig` `0.15+`, and an Emscripten toolchain (`emcc`, `emconfigure`, `emmake`)
+- Building from source also requires initializing the bundled `pffft` and `FFmpeg` git submodules
 - The embedded media tool build can resolve Emscripten from `PATH`, `EMSCRIPTEN_ROOT`, `EMSDK`, or common Homebrew/emSDK install locations
 
 ## Settings
@@ -125,16 +126,19 @@ git submodule update --init --recursive
 bun run compile
 ```
 
+`git submodule update --init --recursive` fetches the bundled `pffft` and `FFmpeg` sources used by the WebAssembly builds.
+
 `bun run compile` requires `bun`, `zig` `0.15+`, and Emscripten. It produces:
 
+- `out/` extension host output
 - `dist/webview/` webview bundles
 - `dist/wasm/wasm_core_simd.wasm`
 - `dist/wasm/wasm_core_fallback.wasm`
-- `dist/embedded-tools/` embedded `ffmpeg` / `ffprobe` WebAssembly artifacts and manifest
+- `dist/embedded-tools/` embedded `ffmpeg` / `ffprobe` launchers, decode and loudness helpers, and the build manifest
 
 Open this folder in VS Code and press `F5` to launch the Extension Development Host.
 
-In development mode, `exampleFiles/sample-tone.wav` opens automatically in `audioscope`, and the performance timeline panel is visible for debugging. To disable the sample-open behavior, set `audioscope.openSampleOnStartupInDevelopment` to `false`.
+In development mode, `exampleFiles/sample-tone.wav` opens automatically in `audioscope`. To disable that behavior, set `audioscope.openSampleOnStartupInDevelopment` to `false`.
 
 ## Release
 
