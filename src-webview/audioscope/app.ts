@@ -58,6 +58,7 @@ import type {
   TimeRange,
   WaveformAxisRenderOptions,
   WaveformAxisSnapshot,
+  WaveformAxisTick,
   WaveformDisplaySnapshot,
   WaveformDisplayWindowMetrics,
   WaveformRenderRequest,
@@ -1179,11 +1180,7 @@ function handleWaveformWorkerMessage(loadToken, message) {
   }
 
   if (message?.type === 'waveformPyramidReady') {
-    if (state.waveformDisplaySnapshot) {
-      void syncWaveformView();
-    } else {
-      void syncWaveformView({ force: true });
-    }
+    void syncWaveformView({ force: true });
     return;
   }
 
@@ -1941,11 +1938,55 @@ function renderWaveformUi(
   }
 }
 
+function getWaveformAxisTickTransform(align: WaveformAxisTick['align']) {
+  if (align === 'start') {
+    return 'translateX(0)';
+  }
+
+  if (align === 'end') {
+    return 'translateX(-100%)';
+  }
+
+  return 'translateX(-50%)';
+}
+
+function createWaveformAxisTickElement() {
+  const tickElement = document.createElement('div');
+  tickElement.className = 'waveform-axis-tick';
+
+  const topMark = document.createElement('div');
+  topMark.className = 'waveform-axis-mark';
+
+  const label = document.createElement('div');
+  label.className = 'waveform-axis-label';
+
+  const bottomMark = document.createElement('div');
+  bottomMark.className = 'waveform-axis-mark';
+
+  tickElement.append(topMark, label, bottomMark);
+  return tickElement;
+}
+
+function getOrCreateWaveformAxisContent() {
+  const existing = elements.waveformAxis.firstElementChild;
+
+  if (existing instanceof HTMLElement && existing.classList.contains('waveform-axis-content')) {
+    return existing;
+  }
+
+  const axisContent = document.createElement('div');
+  axisContent.className = 'waveform-axis-content';
+  elements.waveformAxis.replaceChildren(axisContent);
+  return axisContent;
+}
+
 function renderWaveformAxis(options: WaveformAxisRenderOptions = {}) {
-  elements.waveformAxis.replaceChildren();
   const snapshot = state.waveformDisplaySnapshot;
 
   if (!snapshot) {
+    if (elements.waveformAxis.firstElementChild) {
+      elements.waveformAxis.replaceChildren();
+    }
     state.waveformAxisRenderRange = { start: 0, end: 0 };
     state.waveformAxisRenderWidth = 0;
     return;
@@ -1970,38 +2011,40 @@ function renderWaveformAxis(options: WaveformAxisRenderOptions = {}) {
   state.waveformAxisRenderRange = cloneTimeRange(axisSnapshot.renderRange);
   state.waveformAxisRenderWidth = axisSnapshot.renderWidth;
 
-  const axisContent = document.createElement('div');
-  axisContent.className = 'waveform-axis-content';
+  const axisContent = getOrCreateWaveformAxisContent();
   axisContent.style.width = `${axisSnapshot.renderWidth}px`;
+  const tickElements = Array.from(axisContent.children)
+    .filter((child): child is HTMLElement => child instanceof HTMLElement);
 
-  axisSnapshot.ticks.forEach((tick) => {
-    const transform =
-      tick.align === 'start'
-        ? 'translateX(0)'
-        : tick.align === 'end'
-          ? 'translateX(-100%)'
-          : 'translateX(-50%)';
-
-    const tickElement = document.createElement('div');
-    tickElement.className = 'waveform-axis-tick';
-    tickElement.style.left = `${tick.positionRatio * 100}%`;
-    tickElement.style.transform = transform;
-
-    const mark = document.createElement('div');
-    mark.className = 'waveform-axis-mark';
-
-    const label = document.createElement('div');
-    label.className = 'waveform-axis-label';
-    label.textContent = tick.label;
-
-    const bottomMark = document.createElement('div');
-    bottomMark.className = 'waveform-axis-mark';
-
-    tickElement.append(mark, label, bottomMark);
+  while (tickElements.length < axisSnapshot.ticks.length) {
+    const tickElement = createWaveformAxisTickElement();
     axisContent.append(tickElement);
+    tickElements.push(tickElement);
+  }
+
+  while (tickElements.length > axisSnapshot.ticks.length) {
+    tickElements.pop()?.remove();
+  }
+
+  axisSnapshot.ticks.forEach((tick, index) => {
+    const tickElement = tickElements[index];
+    const left = `${tick.positionRatio * 100}%`;
+    const transform = getWaveformAxisTickTransform(tick.align);
+
+    if (tickElement.style.left !== left) {
+      tickElement.style.left = left;
+    }
+
+    if (tickElement.style.transform !== transform) {
+      tickElement.style.transform = transform;
+    }
+
+    const label = tickElement.children[1];
+    if (label instanceof HTMLElement && label.textContent !== tick.label) {
+      label.textContent = tick.label;
+    }
   });
 
-  elements.waveformAxis.append(axisContent);
   applyWaveformAxisTransform(
     options.displayRange ?? snapshot.displayRange ?? getWaveformRange(),
     options.displayMetrics ?? null,
