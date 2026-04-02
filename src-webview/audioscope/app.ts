@@ -116,7 +116,6 @@ const LOOP_SELECTION_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const LOOP_HANDLE_WIDTH_PX = 8;
 const LOOP_WRAP_EPSILON_SECONDS = 1 / 120;
-const WAVEFORM_SAMPLE_DETAIL_MAX_SAMPLES_PER_RENDER_PIXEL = 1;
 
 const QUALITY_PRESETS = {
   balanced: {
@@ -924,7 +923,6 @@ async function startAnalysis(loadToken, payload, monoSamplesOverride = null) {
         sessionVersion,
       },
     }, [waveformWorkerSamples.buffer]);
-    waveformWorker.postMessage({ type: 'buildWaveformPyramid' });
 
     analysisWorker.postMessage({
       type: 'attachAudioSession',
@@ -950,7 +948,9 @@ async function startAnalysis(loadToken, payload, monoSamplesOverride = null) {
     ensureWaveformViewRange();
     renderWaveformUi();
     renderSpectrogramScale();
-    void syncWaveformView({ force: true });
+    await requestWaveformViewRender({ force: true });
+    // Let the first waveform paint happen without waiting on pyramid construction.
+    waveformWorker.postMessage({ type: 'buildWaveformPyramid' });
     requestOverviewSpectrogram({ force: true });
     scheduleSpectrogramRender({ force: true });
   } catch (error) {
@@ -1551,8 +1551,7 @@ function handleWaveformPresented(body) {
   };
   const displayMetrics = getWaveformSnapshotDisplayMetrics(nextSnapshot, desiredDisplayRange);
   updateWaveformDisplaySnapshotWindow(desiredDisplayRange, nextSnapshot, displayMetrics);
-
-  if (!doesWaveformRenderCandidatePhysicallyCoverDisplay(
+  const coversDesiredDisplay = doesWaveformRenderCandidatePhysicallyCoverDisplay(
     {
       end: nextSnapshot.renderRange.end,
       height: nextSnapshot.renderHeight,
@@ -1566,7 +1565,10 @@ function handleWaveformPresented(body) {
       height: height,
       renderWidth: getWaveformRenderRequestMetrics(desiredDisplayRange).renderWidth,
     },
-  )) {
+  );
+  const allowInitialPartialSnapshot = !state.waveformDisplaySnapshot;
+
+  if (!coversDesiredDisplay && !allowInitialPartialSnapshot) {
     if (!hasWaveformRenderCoverage(desiredDisplayRange)) {
       void syncWaveformView({ force: true });
     }
@@ -1601,6 +1603,10 @@ function handleWaveformPresented(body) {
     displayMetrics: renderedDisplayMetrics,
     displayRange: renderedDisplayMetrics?.displayRange ?? renderedDisplayRange,
   });
+
+  if (!coversDesiredDisplay && allowInitialPartialSnapshot) {
+    void syncWaveformView({ force: true });
+  }
 }
 
 function renderSpectrogramScale() {
@@ -2192,8 +2198,13 @@ function doesWaveformSnapshotPhysicallyCoverDisplay(
     return false;
   }
 
-  return snapshot.renderRange.start <= (displayRange.start + SPECTROGRAM_RANGE_EPSILON_SECONDS)
-    && snapshot.renderRange.end >= (displayRange.end - SPECTROGRAM_RANGE_EPSILON_SECONDS);
+  const toleranceSeconds = getWaveformRenderCoverageToleranceSeconds({
+    displaySpan: Math.max(0, displayRange.end - displayRange.start),
+    renderWidth: snapshot.renderWidth,
+  });
+
+  return snapshot.renderRange.start <= (displayRange.start + toleranceSeconds)
+    && snapshot.renderRange.end >= (displayRange.end - toleranceSeconds);
 }
 
 function cancelWaveformZoomAnimation({ clearPending = true } = {}) {
@@ -3592,6 +3603,25 @@ function isWaveformDisplaySpanCompatible(candidateVisibleSpan, displaySpan) {
   return Math.abs(candidateVisibleSpan - displaySpan) <= tolerance;
 }
 
+function getWaveformRenderDimensionTolerancePx(requestedPixels) {
+  const safePixels = Math.max(1, Math.round(Number(requestedPixels) || 0));
+  return Math.min(8, Math.max(2, Math.round(safePixels * 0.01)));
+}
+
+function getWaveformRenderCoverageToleranceSeconds({ displaySpan, renderWidth }) {
+  const safeDisplaySpan = Math.max(0, Number(displaySpan) || 0);
+  const safeRenderWidth = Math.max(1, Math.round(Number(renderWidth) || 0));
+  const sampleRate = Number(state.analysis?.sampleRate);
+  const sampleTolerance = Number.isFinite(sampleRate) && sampleRate > 0
+    ? 1 / sampleRate
+    : 0;
+  const pixelTolerance = safeDisplaySpan > 0 && safeRenderWidth > 0
+    ? safeDisplaySpan / safeRenderWidth
+    : 0;
+
+  return Math.max(SPECTROGRAM_RANGE_EPSILON_SECONDS, sampleTolerance, pixelTolerance);
+}
+
 function getCommittedWaveformRenderCandidate() {
   const snapshot = state.waveformDisplaySnapshot;
 
@@ -3615,10 +3645,13 @@ function getPendingWaveformRenderCandidate() {
 }
 
 function doesWaveformRenderCandidateMatchDisplay(candidate, displayRange, { height, renderWidth, displaySpan }) {
+  const heightTolerance = getWaveformRenderDimensionTolerancePx(height);
+  const widthTolerance = getWaveformRenderDimensionTolerancePx(renderWidth);
+
   if (
     !candidate
-    || Math.abs((candidate.height ?? height) - height) > 1
-    || (candidate.width ?? 0) < (renderWidth - 1)
+    || Math.abs((candidate.height ?? height) - height) > heightTolerance
+    || (candidate.width ?? 0) < (renderWidth - widthTolerance)
     || !isWaveformDisplaySpanCompatible(candidate.visibleSpan, displaySpan)
   ) {
     return false;
@@ -3632,8 +3665,10 @@ function doesWaveformRenderCandidatePhysicallyCoverDisplay(candidate, displayRan
     return false;
   }
 
-  return candidate.start <= (displayRange.start + SPECTROGRAM_RANGE_EPSILON_SECONDS)
-    && candidate.end >= (displayRange.end - SPECTROGRAM_RANGE_EPSILON_SECONDS);
+  const toleranceSeconds = getWaveformRenderCoverageToleranceSeconds(metrics);
+
+  return candidate.start <= (displayRange.start + toleranceSeconds)
+    && candidate.end >= (displayRange.end - toleranceSeconds);
 }
 
 function shouldDeferWaveformFollowRenderRequest(displayRange, metrics) {

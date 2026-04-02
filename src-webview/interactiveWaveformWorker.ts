@@ -16,6 +16,9 @@ const RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 0.9;
 const RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 1.15;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
 const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
+const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
+const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
+const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
 const WAVEFORM_RUNTIME_VARIANT = 'waveform-worker-pending';
 let requestQueue = Promise.resolve();
 let renderLoopActive = false;
@@ -61,6 +64,7 @@ self.onmessage = (event) => {
       enqueueRequest(async () => {
         const runtime = await getRuntime();
         attachAudioSession(runtime, message.body);
+        void pumpRenderLoop();
       });
       return;
     case 'buildWaveformPyramid':
@@ -350,8 +354,9 @@ async function pumpRenderLoop() {
           continue;
         }
 
-        if (!analysisState.initialized || !hasRenderableWaveformData(analysisState.waveformData)) {
-          continue;
+        if (!isRenderReady()) {
+          pendingRenderRequest = request;
+          break;
         }
 
         await renderWaveform(request);
@@ -814,6 +819,21 @@ function drawRawSamplePlot(renderSurface, samples, color, pixelsPerSample, sampl
   context.stroke();
 
   if (pixelsPerSample >= SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE) {
+    if (shouldDrawRawSampleMarkers(pixelsPerSample)) {
+      drawRawSampleMarkers(
+        context,
+        samples,
+        sampleStartPosition,
+        visibleSampleSpan,
+        drawColumns,
+        midY,
+        amplitudeHeight,
+        chartTop,
+        chartBottom,
+      );
+      return;
+    }
+
     const pointSize = Math.max(1.5, surfaceState.renderScale * 1.1);
     context.beginPath();
 
@@ -832,6 +852,50 @@ function drawRawSamplePlot(renderSurface, samples, color, pixelsPerSample, sampl
 
     context.fill();
   }
+}
+
+function shouldDrawRawSampleMarkers(pixelsPerSample) {
+  return getCssPixelsPerSample(pixelsPerSample) >= RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE;
+}
+
+function getCssPixelsPerSample(pixelsPerSample) {
+  return pixelsPerSample / Math.max(1, surfaceState.renderScale);
+}
+
+function drawRawSampleMarkers(
+  context,
+  samples,
+  sampleStartPosition,
+  visibleSampleSpan,
+  drawColumns,
+  midY,
+  amplitudeHeight,
+  chartTop,
+  chartBottom,
+) {
+  const maxSampleIndex = Math.max(0, samples.length - 1);
+  const firstSampleIndex = Math.max(0, Math.ceil(sampleStartPosition));
+  const lastSampleIndex = Math.min(maxSampleIndex, Math.floor(sampleStartPosition + visibleSampleSpan));
+
+  if (lastSampleIndex < firstSampleIndex) {
+    return;
+  }
+
+  const radius = Math.max(1, RAW_SAMPLE_MARKER_RADIUS_CSS_PX * surfaceState.renderScale);
+  context.save();
+  context.fillStyle = RAW_SAMPLE_MARKER_FILL;
+  context.beginPath();
+
+  for (let sampleIndex = firstSampleIndex; sampleIndex <= lastSampleIndex; sampleIndex += 1) {
+    const x = getRenderableSampleX(sampleIndex, sampleStartPosition, visibleSampleSpan, drawColumns);
+    const sampleValue = clamp(samples[sampleIndex] ?? 0, -1, 1);
+    const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
+    context.moveTo(x + radius, y);
+    context.arc(x, y, radius, 0, Math.PI * 2);
+  }
+
+  context.fill();
+  context.restore();
 }
 
 function getRepresentativeSampleValue(slice, columnIndex) {
@@ -952,6 +1016,16 @@ function readWaveformSliceMeta(module, pointer) {
 
 function hasRenderableWaveformData(waveformData) {
   return Boolean(analysisState.waveformPcmPointer && analysisState.sampleCount > 0);
+}
+
+function hasRenderableSurface() {
+  return Boolean(surfaceState.canvas && surfaceState.context);
+}
+
+function isRenderReady() {
+  return hasRenderableSurface()
+    && analysisState.initialized
+    && hasRenderableWaveformData(analysisState.waveformData);
 }
 
 function hasSampleWaveformData(waveformData) {
