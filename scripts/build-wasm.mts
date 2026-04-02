@@ -21,7 +21,7 @@ const commonCompileArgs = [
   '--export-memory',
   '--stack',
   '1048576',
-  '--initial-memory=134217728',
+  '--initial-memory=8388608',
   '-I',
   path.join(projectRoot, 'src-wasm', 'freestanding', 'include'),
   '-I',
