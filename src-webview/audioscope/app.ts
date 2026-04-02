@@ -31,6 +31,11 @@ import { createAudioscopeLifecycleController } from './controllers/lifecycle';
 import { createAudioscopeLoadController } from './controllers/load';
 import { createAudioscopeTransportLoopController } from './controllers/transportLoop';
 import { createAudioscopeViewportController } from './controllers/viewport';
+import {
+  WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
+  WAVEFORM_BOTTOM_PADDING_PX,
+  WAVEFORM_TOP_PADDING_PX,
+} from '../waveformGeometry';
 import { createTimelineViewportSnapshot } from './math/timelineMath';
 import {
   buildLinearFrequencyTicks as buildLinearFrequencyTicksPure,
@@ -92,6 +97,7 @@ const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. R
 const WAVEFORM_COLOR = '#8ccadd';
 const WAVEFORM_RENDER_SCALE = DISPLAY_PIXEL_RATIO;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
+const WAVEFORM_MAX_ZOOM_PIXELS_PER_SAMPLE = 8;
 const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
 const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const WAVEFORM_FOLLOW_LEFT_THRESHOLD_RATIO = 0.25;
@@ -110,9 +116,6 @@ const LOOP_SELECTION_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const LOOP_HANDLE_WIDTH_PX = 8;
 const LOOP_WRAP_EPSILON_SECONDS = 1 / 120;
-const WAVEFORM_TOP_PADDING_PX = 10;
-const WAVEFORM_BOTTOM_PADDING_PX = 10;
-const WAVEFORM_AMPLITUDE_HEIGHT_RATIO = 0.38;
 const WAVEFORM_SAMPLE_DETAIL_MAX_SAMPLES_PER_RENDER_PIXEL = 1;
 
 const QUALITY_PRESETS = {
@@ -3819,7 +3822,7 @@ function getMinVisibleDuration(duration) {
   if (Number.isFinite(sampleRate) && sampleRate > 0) {
     return Math.min(
       duration,
-      Math.max(1 / sampleRate, viewportColumns / sampleRate),
+      Math.max(1 / sampleRate, viewportColumns / (sampleRate * WAVEFORM_MAX_ZOOM_PIXELS_PER_SAMPLE)),
     );
   }
 

@@ -1,8 +1,12 @@
+import {
+  WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
+  WAVEFORM_BOTTOM_PADDING_PX as BOTTOM_PADDING,
+  WAVEFORM_TOP_PADDING_PX as TOP_PADDING,
+} from './waveformGeometry';
+
 const MIN_LEVEL_BLOCK_SIZE = 16;
 const LEVEL_SCALE_FACTOR = 4;
 const MIN_LEVEL_BUCKETS = 512;
-const TOP_PADDING = 10;
-const BOTTOM_PADDING = 10;
 const SYMMETRIC_ENVELOPE_GAIN = 0.76;
 const CENTER_LINE_ALPHA = 0.14;
 const LINE_BLEND_START_SAMPLES_PER_PIXEL = 6;
@@ -224,7 +228,7 @@ export function renderInteractiveWaveform(
     SYMMETRIC_BLEND_START_SAMPLES_PER_PIXEL,
     samplesPerColumn,
   );
-  const amplitudeHeight = chartHeight * lerp(0.48, 0.38, symmetricBlend);
+  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
 
   ctx.fillStyle = color;
   ctx.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;

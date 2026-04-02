@@ -1,8 +1,11 @@
 import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from './waveCoreRuntime';
 import { resizeInteractiveWaveformSurface } from './interactiveWaveformRenderer';
+import {
+  WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
+  WAVEFORM_BOTTOM_PADDING_PX as BOTTOM_PADDING,
+  WAVEFORM_TOP_PADDING_PX as TOP_PADDING,
+} from './waveformGeometry';
 
-const TOP_PADDING = 10;
-const BOTTOM_PADDING = 10;
 const CENTER_LINE_ALPHA = 0.14;
 const SYMMETRIC_ENVELOPE_GAIN = 0.76;
 const SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 24;
@@ -534,7 +537,7 @@ function drawFrame(renderSurface, slice, columnCount, color, samplePlotMode, pix
   const chartBottom = Math.max(chartTop + 1, Math.round((surfaceState.height - BOTTOM_PADDING) * surfaceState.renderScale));
   const chartHeight = Math.max(1, chartBottom - chartTop);
   const midY = chartTop + chartHeight * 0.5;
-  const amplitudeHeight = chartHeight * 0.38;
+  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
 
   context.imageSmoothingEnabled = true;
   context.setTransform(1, 0, 0, 1, 0, 0);
@@ -683,7 +686,7 @@ function drawRepresentativeSamplePlot(renderSurface, samples, color, pixelsPerSa
   const chartBottom = Math.max(chartTop + 1, Math.round((surfaceState.height - BOTTOM_PADDING) * surfaceState.renderScale));
   const chartHeight = Math.max(1, chartBottom - chartTop);
   const midY = chartTop + chartHeight * 0.5;
-  const amplitudeHeight = chartHeight * 0.38;
+  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
 
   context.imageSmoothingEnabled = true;
   context.setTransform(1, 0, 0, 1, 0, 0);
@@ -774,7 +777,7 @@ function drawRawSamplePlot(renderSurface, samples, color, pixelsPerSample, sampl
   const chartBottom = Math.max(chartTop + 1, Math.round((surfaceState.height - BOTTOM_PADDING) * surfaceState.renderScale));
   const chartHeight = Math.max(1, chartBottom - chartTop);
   const midY = chartTop + chartHeight * 0.5;
-  const amplitudeHeight = chartHeight * 0.38;
+  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
   const maxSampleIndex = Math.max(0, samples.length - 1);
 
   context.imageSmoothingEnabled = true;
