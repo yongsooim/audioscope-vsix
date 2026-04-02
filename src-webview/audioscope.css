@@ -136,7 +136,8 @@ body {
   min-height: min(216px, calc(100vh - 24px));
   max-height: calc(100vh - 24px);
   padding: 10px 12px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: scroll;
   border: 1px solid rgba(191, 219, 254, 0.18);
   border-radius: 12px;
   background: rgb(3, 6, 12);
@@ -146,11 +147,13 @@ body {
   opacity: 0;
   pointer-events: none;
   transition: opacity 140ms ease;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.72) rgba(10, 16, 29, 0.56);
 }
 
 .media-metadata-detail::-webkit-scrollbar {
+  -webkit-appearance: none;
   width: 10px;
 }
 

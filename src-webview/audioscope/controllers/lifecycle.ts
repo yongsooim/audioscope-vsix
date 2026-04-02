@@ -16,7 +16,6 @@ interface AudioscopeLifecycleDeps {
   renderMediaMetadata: () => void;
   renderSpectrogramMeta: () => void;
   renderWaveformUi: () => void;
-  replaceWaveformBitmap: (bitmap: ImageBitmap | null) => void;
   resetSpectrogramCanvasTransform: () => void;
   setWaveformDisplaySnapshot: (snapshot: any) => void;
   state: any;
@@ -34,7 +33,6 @@ export function createAudioscopeLifecycleController({
   renderMediaMetadata,
   renderSpectrogramMeta,
   renderWaveformUi,
-  replaceWaveformBitmap,
   resetSpectrogramCanvasTransform,
   setWaveformDisplaySnapshot,
   state,
@@ -82,10 +80,8 @@ export function createAudioscopeLifecycleController({
       state.waveformWorkerBootstrapUrl = null;
     }
 
-    replaceWaveformBitmap(null);
-    state.waveformDisplaySnapshot = null;
+    setWaveformDisplaySnapshot(null);
     state.waveformCanvas = null;
-    state.waveformCanvasContext = null;
     state.waveformPendingRequest = null;
     syncWaveformLegacyStateFromSnapshot(null);
     elements.waveformCanvasHost.replaceChildren();

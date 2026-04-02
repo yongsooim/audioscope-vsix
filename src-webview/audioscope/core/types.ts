@@ -26,7 +26,6 @@ export interface WaveformAxisSnapshot {
 
 export interface WaveformDisplaySnapshot {
   axisTicks: WaveformAxisTick[];
-  bitmap: ImageBitmap | null;
   columnCount: number;
   displayOffsetPx: number;
   displayRange: TimeRange;
@@ -55,6 +54,8 @@ export interface WaveformRenderRequest {
   end: number;
   generation: number;
   height: number;
+  rawSamplePlotMode?: boolean;
+  samplePlotMode?: boolean;
   start: number;
   visibleSpan: number;
   width: number;

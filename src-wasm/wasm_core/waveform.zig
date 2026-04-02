@@ -85,6 +85,7 @@ fn writeWaveformSliceMeta(meta_output_ptr: usize, start_seconds: f64, end_second
     output[1] = end_seconds;
 }
 
+
 fn computeStableLevelSlicePlan(level: *const core.WaveLevel, start_sample: f64, end_sample: f64, _: i32) StableLevelSlicePlan {
     const block_size_f64 = @as(f64, @floatFromInt(level.block_size));
     const desired_start_block = start_sample / block_size_f64;

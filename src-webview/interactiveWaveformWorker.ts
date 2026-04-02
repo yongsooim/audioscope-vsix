@@ -14,7 +14,6 @@ const RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 1.15;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
 const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
 const WAVEFORM_RUNTIME_VARIANT = 'waveform-worker-pending';
-
 let requestQueue = Promise.resolve();
 let renderLoopActive = false;
 let pendingRenderRequest = null;
@@ -22,13 +21,7 @@ let latestRequestedGeneration = 0;
 let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 
 const surfaceState = {
-  backCanvas: null,
-  backContext: null,
   canvas: null,
-  committedCanvas: null,
-  committedContext: null,
-  committedHeight: 0,
-  committedWidth: 0,
   context: null,
   width: 0,
   height: 0,
@@ -91,14 +84,8 @@ self.onmessage = (event) => {
     case 'dispose':
       pendingRenderRequest = null;
       latestRequestedGeneration = 0;
-      surfaceState.backContext = null;
-      surfaceState.backCanvas = null;
       surfaceState.context = null;
       surfaceState.canvas = null;
-      surfaceState.committedCanvas = null;
-      surfaceState.committedContext = null;
-      surfaceState.committedWidth = 0;
-      surfaceState.committedHeight = 0;
       analysisState = createEmptyAnalysisState();
       return;
     default:
@@ -151,9 +138,6 @@ function initializeCanvas(options) {
     resizeDisplaySurface();
     surfaceState.context = surfaceState.canvas.getContext('2d');
   }
-
-  ensureBackBuffer(surfaceState.width, surfaceState.height, surfaceState.renderScale);
-  ensureCommittedBuffer(surfaceState.width, surfaceState.height, surfaceState.renderScale);
   clearCanvas();
 }
 
@@ -251,110 +235,8 @@ function restoreDisplayedSurfaceSnapshot(snapshot) {
   }
 }
 
-function ensureBackBuffer(width = surfaceState.width, height = surfaceState.height, renderScale = surfaceState.renderScale) {
-  if (typeof OffscreenCanvas !== 'function') {
-    surfaceState.backCanvas = null;
-    surfaceState.backContext = null;
-    return;
-  }
-
-  if (
-    !(surfaceState.backCanvas instanceof OffscreenCanvas)
-  ) {
-    surfaceState.backCanvas = new OffscreenCanvas(1, 1);
-    surfaceState.backContext = surfaceState.backCanvas.getContext('2d');
-  }
-
-  resizeSurface(surfaceState.backCanvas, width, height, renderScale);
-}
-
-function ensureCommittedBuffer(width = surfaceState.width, height = surfaceState.height, renderScale = surfaceState.renderScale) {
-  if (typeof OffscreenCanvas !== 'function') {
-    surfaceState.committedCanvas = null;
-    surfaceState.committedContext = null;
-    surfaceState.committedWidth = 0;
-    surfaceState.committedHeight = 0;
-    return;
-  }
-
-  if (!(surfaceState.committedCanvas instanceof OffscreenCanvas)) {
-    surfaceState.committedCanvas = new OffscreenCanvas(1, 1);
-    surfaceState.committedContext = surfaceState.committedCanvas.getContext('2d');
-  }
-
-  resizeSurface(surfaceState.committedCanvas, width, height, renderScale);
-  surfaceState.committedWidth = width;
-  surfaceState.committedHeight = height;
-}
-
-function getRenderSurface() {
-  if (surfaceState.backCanvas && surfaceState.backContext) {
-    return {
-      canvas: surfaceState.backCanvas,
-      context: surfaceState.backContext,
-    };
-  }
-
-  if (surfaceState.canvas && surfaceState.context) {
-    return {
-      canvas: surfaceState.canvas,
-      context: surfaceState.context,
-    };
-  }
-
-  return null;
-}
-
-function getCommittedSurface() {
-  if (surfaceState.committedCanvas && surfaceState.committedContext) {
-    return {
-      canvas: surfaceState.committedCanvas,
-      context: surfaceState.committedContext,
-    };
-  }
-
-  return null;
-}
-
-function commitRenderSurface(renderSurface, width, height) {
-  if (!renderSurface) {
-    return;
-  }
-
-  if (renderSurface.canvas === surfaceState.backCanvas && surfaceState.backContext) {
-    const previousCommittedCanvas = surfaceState.committedCanvas;
-    const previousCommittedContext = surfaceState.committedContext;
-    surfaceState.committedCanvas = surfaceState.backCanvas;
-    surfaceState.committedContext = surfaceState.backContext;
-    surfaceState.backCanvas = previousCommittedCanvas;
-    surfaceState.backContext = previousCommittedContext;
-    surfaceState.committedWidth = width;
-    surfaceState.committedHeight = height;
-    return;
-  }
-
-  ensureCommittedBuffer(width, height, surfaceState.renderScale);
-  if (!surfaceState.committedCanvas || !surfaceState.committedContext) {
-    return;
-  }
-
-  surfaceState.committedContext.save();
-  surfaceState.committedContext.setTransform(1, 0, 0, 1, 0, 0);
-  surfaceState.committedContext.globalCompositeOperation = 'copy';
-  surfaceState.committedContext.drawImage(renderSurface.canvas, 0, 0);
-  surfaceState.committedContext.restore();
-  surfaceState.committedWidth = width;
-  surfaceState.committedHeight = height;
-}
-
 function clearCanvas() {
   const surfaces = [
-    surfaceState.backCanvas && surfaceState.backContext
-      ? { canvas: surfaceState.backCanvas, context: surfaceState.backContext }
-      : null,
-    surfaceState.committedCanvas && surfaceState.committedContext
-      ? { canvas: surfaceState.committedCanvas, context: surfaceState.committedContext }
-      : null,
     surfaceState.canvas && surfaceState.context
       ? { canvas: surfaceState.canvas, context: surfaceState.context }
       : null,
@@ -368,9 +250,6 @@ function clearCanvas() {
     surface.context.setTransform(1, 0, 0, 1, 0, 0);
     surface.context.clearRect(0, 0, surface.canvas.width, surface.canvas.height);
   }
-
-  surfaceState.committedWidth = 0;
-  surfaceState.committedHeight = 0;
 }
 
 function attachAudioSession(runtime, options) {
@@ -517,7 +396,7 @@ async function renderWaveform(request) {
   surfaceState.height = height;
   surfaceState.renderScale = renderScale;
   surfaceState.color = color;
-  ensureBackBuffer(width, height, renderScale);
+  resizeDisplaySurface();
 
   let slice = null;
   let actualViewStart = viewStart;
@@ -546,7 +425,12 @@ async function renderWaveform(request) {
     return;
   }
 
-  const renderSurface = getRenderSurface();
+  const renderSurface = surfaceState.canvas && surfaceState.context
+    ? {
+      canvas: surfaceState.canvas,
+      context: surfaceState.context,
+    }
+    : null;
 
   if (!renderSurface) {
     return;
@@ -564,16 +448,7 @@ async function renderWaveform(request) {
     if (generation !== latestRequestedGeneration) {
       return;
     }
-    commitRenderSurface(renderSurface, width, height);
-    const bitmap = await snapshotCommittedSurfaceBitmap();
-    if (generation !== latestRequestedGeneration) {
-      if (bitmap && typeof bitmap.close === 'function') {
-        bitmap.close();
-      }
-      return;
-    }
     postWaveformPresented({
-      bitmap,
       columnCount,
       generation,
       height,
@@ -600,16 +475,7 @@ async function renderWaveform(request) {
     if (generation !== latestRequestedGeneration) {
       return;
     }
-    commitRenderSurface(renderSurface, width, height);
-    const bitmap = await snapshotCommittedSurfaceBitmap();
-    if (generation !== latestRequestedGeneration) {
-      if (bitmap && typeof bitmap.close === 'function') {
-        bitmap.close();
-      }
-      return;
-    }
     postWaveformPresented({
-      bitmap,
       columnCount,
       generation,
       height,
@@ -627,16 +493,8 @@ async function renderWaveform(request) {
   if (generation !== latestRequestedGeneration) {
     return;
   }
-  commitRenderSurface(renderSurface, width, height);
-  const bitmap = await snapshotCommittedSurfaceBitmap();
-  if (generation !== latestRequestedGeneration) {
-    if (bitmap && typeof bitmap.close === 'function') {
-      bitmap.close();
-    }
-    return;
-  }
+
   postWaveformPresented({
-    bitmap,
     columnCount,
     generation,
     height,
@@ -649,36 +507,11 @@ async function renderWaveform(request) {
   });
 }
 
-async function snapshotCommittedSurfaceBitmap() {
-  const committedSurface = getCommittedSurface();
-
-  if (!committedSurface) {
-    return null;
-  }
-
-  if (typeof committedSurface.canvas.transferToImageBitmap === 'function') {
-    return committedSurface.canvas.transferToImageBitmap();
-  }
-
-  if (typeof createImageBitmap === 'function') {
-    return createImageBitmap(committedSurface.canvas);
-  }
-
-  return null;
-}
-
 function postWaveformPresented(body) {
-  const bitmap = body?.bitmap instanceof ImageBitmap ? body.bitmap : null;
-  const message = {
+  self.postMessage({
     type: 'waveformPresented',
     body,
-  };
-
-  if (bitmap) {
-    self.postMessage(message, [bitmap]);
-  } else {
-    self.postMessage(message);
-  }
+  });
 }
 
 function drawColumnsCount(renderSurface, columnCount) {

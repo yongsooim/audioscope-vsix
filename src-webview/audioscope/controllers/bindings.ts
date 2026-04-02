@@ -43,7 +43,6 @@ interface AudioscopeBindingsDeps {
   resetSpectrogramCanvasTransform: () => void;
   resetViewportSplit: () => void;
   resetWaveformZoom: () => void;
-  resizeWaveformCanvasSurface: (width: number, height: number) => void;
   scheduleSpectrogramRender: (options?: { force?: boolean }) => void;
   seekBy: (deltaSeconds: number) => void;
   setFollowPlaybackEnabled: (enabled: boolean) => void;
@@ -106,7 +105,6 @@ export function createAudioscopeBindingsController({
   resetSpectrogramCanvasTransform,
   resetViewportSplit,
   resetWaveformZoom,
-  resizeWaveformCanvasSurface,
   scheduleSpectrogramRender,
   seekBy,
   setFollowPlaybackEnabled,
@@ -535,7 +533,16 @@ export function createAudioscopeBindingsController({
       state.observedSpectrogramPixelWidth = pixelWidth;
       state.observedSpectrogramPixelHeight = pixelHeight;
       state.observedOverviewWidth = overviewWidth;
-      resizeWaveformCanvasSurface(width, height);
+
+      if (state.waveformWorker && waveformViewportResized) {
+        state.waveformWorker.postMessage({
+          type: 'resizeCanvas',
+          body: {
+            height,
+            width,
+          },
+        });
+      }
 
       if (state.analysisWorker && spectrogramSurfaceResized) {
         state.analysisWorker.postMessage({
