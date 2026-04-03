@@ -38,12 +38,15 @@ const WEBGPU_OVERVIEW_TILE_SUBMIT_BATCH_SIZE = 4;
 const WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE = 8;
 const WEBGPU_LINEAR_WORKGROUP_SIZE = 64;
 const WEBGPU_STFT_PARAM_ENTRIES_PER_SLOT = 32;
+const WEBGPU_SCALOGRAM_FFT_PARAM_ENTRY_COUNT = 32;
 const WEBGPU_STFT_SCRATCH_SLOT_COUNT = WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE;
 const MAX_TILE_CACHE_ENTRIES = 24;
 const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
 const ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR = true;
 const ENABLE_EXPERIMENTAL_WEBGPU_SPECTROGRAM_COMPUTE = true;
+const ENABLE_EXPERIMENTAL_WEBGPU_SCALOGRAM_FFT = true;
 const WEBGPU_TILE_TEXTURE_FORMAT = 'rgba8unorm';
+const SCALOGRAM_FFT_MAX_INPUT_SAMPLES = 131072;
 const LOW_FREQUENCY_ENHANCEMENT_MAX_FREQUENCY = 1200;
 const MIXED_FREQUENCY_PIVOT_HZ = 1000;
 const MIXED_FREQUENCY_PIVOT_RATIO = 0.5;
@@ -678,6 +681,166 @@ fn renderScalogramTexture(
 }
 `;
 
+const WEBGPU_SCALOGRAM_FFT_SHADER = /* wgsl */`
+const TWO_PI: f32 = 6.283185307179586;
+
+struct FftParams {
+  header0: vec4<u32>,
+};
+
+@group(0) @binding(0) var<uniform> params: FftParams;
+@group(0) @binding(1) var<storage, read> sourceSpectrum: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> targetSpectrum: array<vec2<f32>>;
+
+fn complexMul(left: vec2<f32>, right: vec2<f32>) -> vec2<f32> {
+  return vec2<f32>(
+    (left.x * right.x) - (left.y * right.y),
+    (left.x * right.y) + (left.y * right.x),
+  );
+}
+
+@compute @workgroup_size(64)
+fn runScalogramFftStage(
+  @builtin(global_invocation_id) globalId: vec3<u32>,
+  @builtin(num_workgroups) numWorkgroups: vec3<u32>,
+) {
+  let fftSize = params.header0.x;
+  let stageIndex = params.header0.y;
+  let inverseFlag = params.header0.z;
+  let q = 1u << stageIndex;
+  let l = fftSize >> (stageIndex + 1u);
+  let butterflyIndex = globalId.x + (globalId.y * numWorkgroups.x * 64u);
+  let totalButterflies = fftSize / 2u;
+
+  if (butterflyIndex >= totalButterflies || l == 0u) {
+    return;
+  }
+
+  let j = butterflyIndex / l;
+  let k = butterflyIndex % l;
+  let evenIndex = (2u * j * l) + k;
+  let oddIndex = evenIndex + l;
+  let outputEvenIndex = (j * l) + k;
+  let outputOddIndex = ((j + q) * l) + k;
+  let direction = select(-1.0, 1.0, inverseFlag != 0u);
+  let angle = (direction * TWO_PI * f32(j)) / f32(2u * q);
+  let twiddle = vec2<f32>(cos(angle), sin(angle));
+  let evenValue = sourceSpectrum[evenIndex];
+  let oddValue = sourceSpectrum[oddIndex];
+  let twiddledOdd = complexMul(oddValue, twiddle);
+
+  targetSpectrum[outputEvenIndex] = evenValue + twiddledOdd;
+  targetSpectrum[outputOddIndex] = evenValue - twiddledOdd;
+}
+`;
+
+const WEBGPU_SCALOGRAM_FFT_MULTIPLY_SHADER = /* wgsl */`
+const TWO_PI: f32 = 6.283185307179586;
+const MORLET_OMEGA0: f32 = 6.0;
+
+struct ComputeParams {
+  header0: vec4<u32>,
+  timing: vec4<f32>,
+};
+
+struct ScalogramFftRow {
+  scaleSeconds: f32,
+  normalization: f32,
+  frequency: f32,
+  pad0: f32,
+};
+
+@group(0) @binding(0) var<uniform> params: ComputeParams;
+@group(0) @binding(1) var<storage, read> sourceSpectrum: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> rowParams: array<ScalogramFftRow>;
+@group(0) @binding(3) var<storage, read_write> targetSpectrum: array<vec2<f32>>;
+
+@compute @workgroup_size(64)
+fn multiplyScalogramWavelet(
+  @builtin(global_invocation_id) globalId: vec3<u32>,
+  @builtin(num_workgroups) numWorkgroups: vec3<u32>,
+) {
+  let fftSize = params.header0.x;
+  let rowIndex = params.header0.y;
+  let binIndex = globalId.x + (globalId.y * numWorkgroups.x * 64u);
+
+  if (binIndex >= fftSize) {
+    return;
+  }
+
+  let halfFftSize = fftSize / 2u;
+  if (binIndex == 0u || binIndex >= halfFftSize) {
+    targetSpectrum[binIndex] = vec2<f32>(0.0, 0.0);
+    return;
+  }
+
+  let row = rowParams[rowIndex];
+  let frequencyHz = (f32(binIndex) * params.timing.x) / f32(fftSize);
+  let response = exp(-0.5 * pow((row.scaleSeconds * TWO_PI * frequencyHz) - MORLET_OMEGA0, 2.0));
+  targetSpectrum[binIndex] = sourceSpectrum[binIndex] * response;
+}
+`;
+
+const WEBGPU_SCALOGRAM_FFT_RENDER_SHADER = /* wgsl */`
+${WEBGPU_PALETTE_SHADER_HELPERS}
+
+struct ComputeParams {
+  header0: vec4<u32>,
+  header1: vec4<u32>,
+  timing: vec4<f32>,
+  padding1: vec4<f32>,
+};
+
+struct ScalogramFftRow {
+  scaleSeconds: f32,
+  normalization: f32,
+  frequency: f32,
+  pad0: f32,
+};
+
+@group(0) @binding(0) var<uniform> params: ComputeParams;
+@group(0) @binding(1) var<storage, read> timeDomain: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> rowParams: array<ScalogramFftRow>;
+@group(0) @binding(3) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(64)
+fn renderScalogramFftRow(@builtin(global_invocation_id) globalId: vec3<u32>) {
+  let columnIndex = globalId.x;
+  let fftSize = params.header0.x;
+  let columnCount = params.header0.y;
+  let rowCount = params.header0.z;
+  let rowIndex = params.header0.w;
+  let inputSampleCount = params.header1.x;
+  let inputStartSample = params.header1.y;
+
+  if (columnIndex >= columnCount) {
+    return;
+  }
+
+  var centerRatio = 0.5;
+  if (columnCount > 1u) {
+    centerRatio = (f32(columnIndex) + 0.5) / f32(columnCount);
+  }
+
+  let centerTime = params.timing.x + (centerRatio * params.timing.y);
+  let sampleIndex = i32(round(centerTime * params.timing.z)) - i32(inputStartSample);
+  let row = rowParams[rowIndex];
+  var power = 0.0;
+
+  if (sampleIndex >= 0 && u32(sampleIndex) < inputSampleCount && u32(sampleIndex) < fftSize) {
+    let coefficient = timeDomain[u32(sampleIndex)] * params.timing.w;
+    power = dot(coefficient, coefficient) / max(row.normalization, 1e-8);
+  }
+
+  let targetRow = i32((rowCount - 1u) - rowIndex);
+  textureStore(
+    outputTexture,
+    vec2<i32>(i32(columnIndex), targetRow),
+    paletteColor(normalizePowerForAnalysis(power, ANALYSIS_TYPE_SCALOGRAM, params.padding1.x, params.padding1.y, params.padding1.z)),
+  );
+}
+`;
+
 interface CanvasInitOptions {
   offscreenCanvas?: OffscreenCanvas;
   pixelHeight?: number;
@@ -838,6 +1001,12 @@ interface ScalogramKernelResource {
   tapBuffer: any;
 }
 
+interface ScalogramFftResource {
+  key: string;
+  maxSupportSamples: number;
+  rowBuffer: any;
+}
+
 interface WebGpuStftScratchSlot {
   baseInputBindGroup: any;
   basePingBuffer: any;
@@ -871,6 +1040,19 @@ interface WebGpuStftComputeState {
 }
 
 interface WebGpuScalogramComputeState {
+  fftBindGroupLayout: any;
+  fftMultiplyBindGroupLayout: any;
+  fftMultiplyPipeline: any;
+  fftParamBuffer: any;
+  fftParamStride: number;
+  fftPipeline: any;
+  fftRenderBindGroupLayout: any;
+  fftRenderPipeline: any;
+  fftResources: Map<string, ScalogramFftResource>;
+  fftScratchFftSize: number;
+  fftSourceBuffer: any;
+  fftScratchPingBuffer: any;
+  fftScratchPongBuffer: any;
   kernelResources: Map<string, ScalogramKernelResource>;
   paramBuffer: any;
   paramStride: number;
@@ -1278,6 +1460,37 @@ function destroyScalogramKernelResources(computeState: WebGpuScalogramComputeSta
   computeState.kernelResources.clear();
 }
 
+function destroyScalogramFftResources(computeState: WebGpuScalogramComputeState | null): void {
+  if (!computeState) {
+    return;
+  }
+
+  for (const resource of computeState.fftResources.values()) {
+    if (resource.rowBuffer && typeof resource.rowBuffer.destroy === 'function') {
+      resource.rowBuffer.destroy();
+    }
+  }
+
+  computeState.fftResources.clear();
+}
+
+function destroyScalogramFftScratchBuffers(computeState: WebGpuScalogramComputeState | null): void {
+  if (!computeState) {
+    return;
+  }
+
+  for (const buffer of [computeState.fftSourceBuffer, computeState.fftScratchPingBuffer, computeState.fftScratchPongBuffer]) {
+    if (buffer && typeof buffer.destroy === 'function') {
+      buffer.destroy();
+    }
+  }
+
+  computeState.fftSourceBuffer = null;
+  computeState.fftScratchPingBuffer = null;
+  computeState.fftScratchPongBuffer = null;
+  computeState.fftScratchFftSize = 0;
+}
+
 function destroyWebGpuStftScratchSlots(computeState: WebGpuStftComputeState | null): void {
   if (!computeState) {
     return;
@@ -1330,7 +1543,9 @@ function destroyWebGpuScalogramComputeState(computeState: WebGpuScalogramCompute
   }
 
   destroyScalogramKernelResources(computeState);
-  for (const buffer of [computeState.paramBuffer, computeState.pcmBuffer]) {
+  destroyScalogramFftResources(computeState);
+  destroyScalogramFftScratchBuffers(computeState);
+  for (const buffer of [computeState.paramBuffer, computeState.pcmBuffer, computeState.fftParamBuffer]) {
     if (buffer && typeof buffer.destroy === 'function') {
       buffer.destroy();
     }
@@ -1338,6 +1553,7 @@ function destroyWebGpuScalogramComputeState(computeState: WebGpuScalogramCompute
   computeState.paramBuffer = null;
   computeState.pcmBuffer = null;
   computeState.pcmSampleCount = 0;
+  computeState.fftParamBuffer = null;
 }
 
 function resetWebGpuComputeSessionResources(): void {
@@ -1356,6 +1572,8 @@ function resetWebGpuComputeSessionResources(): void {
   }
 
   destroyScalogramKernelResources(webGpu.scalogramCompute);
+  destroyScalogramFftResources(webGpu.scalogramCompute);
+  destroyScalogramFftScratchBuffers(webGpu.scalogramCompute);
   if (webGpu.scalogramCompute?.pcmBuffer && typeof webGpu.scalogramCompute.pcmBuffer.destroy === 'function') {
     webGpu.scalogramCompute.pcmBuffer.destroy();
     webGpu.scalogramCompute.pcmBuffer = null;
@@ -2923,6 +3141,95 @@ function getScalogramKernelResource(
   return resource;
 }
 
+function buildScalogramFftCacheKey(plan: RenderRequestPlan): string {
+  return [
+    `rows${plan.rowCount}`,
+    `sr${analysisState.sampleRate}`,
+    `min${analysisState.minFrequency}`,
+    `max${analysisState.maxFrequency}`,
+    'fft',
+  ].join(':');
+}
+
+function getScalogramFftResource(
+  plan: RenderRequestPlan,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuScalogramComputeState,
+): ScalogramFftResource | null {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return null;
+  }
+
+  const cacheKey = buildScalogramFftCacheKey(plan);
+  const cached = computeState.fftResources.get(cacheKey) ?? null;
+  if (cached) {
+    return cached;
+  }
+
+  const rowCount = Math.max(1, plan.rowCount);
+  const sampleRate = analysisState.sampleRate;
+  const minFrequency = Math.max(1, analysisState.minFrequency);
+  const maxFrequency = Math.max(minFrequency * 1.01, analysisState.maxFrequency);
+  const rowData = new Float32Array(rowCount * 4);
+  const twoPi = Math.PI * 2;
+  let maxSupportSamples = 0;
+
+  for (let row = 0; row < rowCount; row += 1) {
+    const frequency = getScalogramFrequencyForRow(row, rowCount, minFrequency, maxFrequency);
+    const safeFrequency = Math.max(1, frequency);
+    const scaleSeconds = 6 / (twoPi * safeFrequency);
+    const supportSamples = Math.min(
+      4096,
+      Math.max(24, Math.ceil(scaleSeconds * 3 * sampleRate)),
+    );
+    const stride = Math.max(1, Math.trunc(supportSamples / 96));
+    const tapCount = Math.floor((supportSamples * 2) / stride) + 1;
+    const phaseStep = (twoPi * frequency * stride) / sampleRate;
+    const stepCos = Math.cos(phaseStep);
+    const stepSin = Math.sin(phaseStep);
+    const initialPhase = (twoPi * frequency * -supportSamples) / sampleRate;
+    let phaseCos = Math.cos(initialPhase);
+    let phaseSin = Math.sin(initialPhase);
+    let normalization = 0;
+    let offsetValue = -supportSamples;
+
+    for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
+      const time = offsetValue / sampleRate;
+      const normalizedTime = time / scaleSeconds;
+      const gaussian = Math.exp(-0.5 * normalizedTime * normalizedTime);
+      const normWeight = gaussian * gaussian;
+
+      normalization += normWeight;
+
+      const nextPhaseCos = (phaseCos * stepCos) - (phaseSin * stepSin);
+      phaseSin = (phaseSin * stepCos) + (phaseCos * stepSin);
+      phaseCos = nextPhaseCos;
+      offsetValue += stride;
+    }
+
+    maxSupportSamples = Math.max(maxSupportSamples, supportSamples);
+    const offset = row * 4;
+    rowData[offset] = scaleSeconds;
+    rowData[offset + 1] = normalization;
+    rowData[offset + 2] = frequency;
+    rowData[offset + 3] = 0;
+  }
+
+  const resource: ScalogramFftResource = {
+    key: cacheKey,
+    maxSupportSamples,
+    rowBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, rowData),
+  };
+  computeState.fftResources.set(cacheKey, resource);
+  return resource;
+}
+
+function nextPowerOfTwo(value: number): number {
+  const safeValue = Math.max(1, Math.ceil(value));
+  return 2 ** Math.ceil(Math.log2(safeValue));
+}
+
 function canUseWebGpuNativeCompute(plan: RenderRequestPlan): boolean {
   return ENABLE_EXPERIMENTAL_WEBGPU_SPECTROGRAM_COMPUTE
     && surfaceState.backend === 'webgpu'
@@ -3021,6 +3328,135 @@ function createScalogramComputeParamsData(
   view.setFloat32(52, plan.minDecibels, true);
   view.setFloat32(56, plan.maxDecibels, true);
   return buffer;
+}
+
+function createScalogramFftStageParamsData(
+  fftSize: number,
+  stageIndex: number,
+  inverse: boolean,
+): ArrayBuffer {
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, fftSize, true);
+  view.setUint32(4, stageIndex, true);
+  view.setUint32(8, inverse ? 1 : 0, true);
+  return buffer;
+}
+
+function createScalogramFftMultiplyParamsData(
+  fftSize: number,
+  rowIndex: number,
+  sampleRate: number,
+): ArrayBuffer {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, fftSize, true);
+  view.setUint32(4, rowIndex, true);
+  view.setFloat32(16, sampleRate, true);
+  return buffer;
+}
+
+function createScalogramFftRenderParamsData(
+  plan: RenderRequestPlan,
+  {
+    columnCount,
+    fftSize,
+    inputSampleCount,
+    inputStartSample,
+    rowIndex,
+    tileSpan,
+    tileStart,
+  }: {
+    columnCount: number;
+    fftSize: number;
+    inputSampleCount: number;
+    inputStartSample: number;
+    rowIndex: number;
+    tileSpan: number;
+    tileStart: number;
+  },
+): ArrayBuffer {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, fftSize, true);
+  view.setUint32(4, columnCount, true);
+  view.setUint32(8, plan.rowCount, true);
+  view.setUint32(12, rowIndex, true);
+  view.setUint32(16, inputSampleCount, true);
+  view.setUint32(20, Math.max(0, inputStartSample), true);
+  view.setFloat32(32, tileStart, true);
+  view.setFloat32(36, tileSpan, true);
+  view.setFloat32(40, analysisState.sampleRate, true);
+  view.setFloat32(44, 1 / Math.max(1, fftSize), true);
+  view.setFloat32(48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
+  view.setFloat32(52, plan.minDecibels, true);
+  view.setFloat32(56, plan.maxDecibels, true);
+  return buffer;
+}
+
+function ensureWebGpuScalogramFftScratchBuffers(
+  fftSize: number,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuScalogramComputeState,
+): boolean {
+  if (computeState.fftScratchFftSize === fftSize
+    && computeState.fftScratchPingBuffer
+    && computeState.fftScratchPongBuffer) {
+    return true;
+  }
+
+  destroyScalogramFftScratchBuffers(computeState);
+
+  try {
+    const globals = getWebGpuGlobals();
+    if (!globals) {
+      return false;
+    }
+
+    const byteLength = fftSize * Float32Array.BYTES_PER_ELEMENT * 2;
+    computeState.fftSourceBuffer = webGpu.device.createBuffer({
+      size: byteLength,
+      usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.STORAGE,
+    });
+    computeState.fftScratchPingBuffer = webGpu.device.createBuffer({
+      size: byteLength,
+      usage: globals.bufferUsage.STORAGE,
+    });
+    computeState.fftScratchPongBuffer = webGpu.device.createBuffer({
+      size: byteLength,
+      usage: globals.bufferUsage.STORAGE,
+    });
+    computeState.fftScratchFftSize = fftSize;
+    return true;
+  } catch {
+    destroyScalogramFftScratchBuffers(computeState);
+    return false;
+  }
+}
+
+function createScalogramFftInputData(
+  fftSize: number,
+  inputEndSample: number,
+  inputStartSample: number,
+): Float32Array {
+  const data = new Float32Array(fftSize * 2);
+  const samples = analysisState.samples;
+  if (!samples) {
+    return data;
+  }
+
+  const clampedStart = clamp(inputStartSample, 0, analysisState.sampleCount);
+  const clampedEnd = clamp(inputEndSample, clampedStart, analysisState.sampleCount);
+  let sourceIndex = clampedStart;
+  let targetIndex = 0;
+
+  while (sourceIndex < clampedEnd && targetIndex < fftSize) {
+    data[targetIndex * 2] = samples[sourceIndex] ?? 0;
+    sourceIndex += 1;
+    targetIndex += 1;
+  }
+
+  return data;
 }
 
 function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftComputeState | null {
@@ -3222,11 +3658,90 @@ function initializeWebGpuScalogramCompute(webGpu: WebGpuCompositorState): WebGpu
   }
 
   try {
+    const fftModule = webGpu.device.createShaderModule({ code: WEBGPU_SCALOGRAM_FFT_SHADER });
+    const multiplyModule = webGpu.device.createShaderModule({ code: WEBGPU_SCALOGRAM_FFT_MULTIPLY_SHADER });
+    const fftRenderModule = webGpu.device.createShaderModule({ code: WEBGPU_SCALOGRAM_FFT_RENDER_SHADER });
     const renderModule = webGpu.device.createShaderModule({ code: WEBGPU_SCALOGRAM_RENDER_SHADER });
     const paramStride = 256;
     const paramBuffer = webGpu.device.createBuffer({
       size: paramStride,
       usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM,
+    });
+    const fftParamStride = 256;
+    const fftParamBuffer = webGpu.device.createBuffer({
+      size: fftParamStride * WEBGPU_SCALOGRAM_FFT_PARAM_ENTRY_COUNT,
+      usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM,
+    });
+    const fftBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+    const fftMultiplyBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          buffer: { type: 'storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+    const fftRenderBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          storageTexture: {
+            access: 'write-only',
+            format: WEBGPU_TILE_TEXTURE_FORMAT as any,
+            viewDimension: '2d',
+          },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
     });
     const renderBindGroupLayout = webGpu.device.createBindGroupLayout({
       entries: [
@@ -3263,6 +3778,43 @@ function initializeWebGpuScalogramCompute(webGpu: WebGpuCompositorState): WebGpu
     });
 
     webGpu.scalogramCompute = {
+      fftBindGroupLayout,
+      fftMultiplyBindGroupLayout,
+      fftMultiplyPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'multiplyScalogramWavelet',
+          module: multiplyModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [fftMultiplyBindGroupLayout],
+        }),
+      }),
+      fftParamBuffer,
+      fftParamStride,
+      fftPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'runScalogramFftStage',
+          module: fftModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [fftBindGroupLayout],
+        }),
+      }),
+      fftRenderBindGroupLayout,
+      fftRenderPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'renderScalogramFftRow',
+          module: fftRenderModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [fftRenderBindGroupLayout],
+        }),
+      }),
+      fftResources: new Map(),
+      fftScratchFftSize: 0,
+      fftSourceBuffer: null,
+      fftScratchPingBuffer: null,
+      fftScratchPongBuffer: null,
       kernelResources: new Map(),
       paramBuffer,
       paramStride,
@@ -3612,27 +4164,53 @@ async function renderStftTileWithWebGpu(
   }
 }
 
-async function renderScalogramTileWithWebGpu(
+function shouldUseFftBasedScalogramTile(
+  tileStart: number,
+  tileEnd: number,
+  fftResource: ScalogramFftResource,
+): {
+  fftSize: number;
+  inputEndSample: number;
+  inputSampleCount: number;
+  inputStartSample: number;
+} | null {
+  if (!ENABLE_EXPERIMENTAL_WEBGPU_SCALOGRAM_FFT || analysisState.sampleRate <= 0) {
+    return null;
+  }
+
+  const inputStartSample = clamp(
+    Math.floor(tileStart * analysisState.sampleRate) - fftResource.maxSupportSamples,
+    0,
+    analysisState.sampleCount,
+  );
+  const inputEndSample = clamp(
+    Math.ceil(tileEnd * analysisState.sampleRate) + fftResource.maxSupportSamples + 1,
+    inputStartSample,
+    analysisState.sampleCount,
+  );
+  const inputSampleCount = Math.max(1, inputEndSample - inputStartSample);
+  const fftSize = nextPowerOfTwo(inputSampleCount);
+
+  if (fftSize > SCALOGRAM_FFT_MAX_INPUT_SAMPLES) {
+    return null;
+  }
+
+  return {
+    fftSize,
+    inputEndSample,
+    inputSampleCount,
+    inputStartSample,
+  };
+}
+
+async function renderScalogramTileDirectWithWebGpu(
   plan: RenderRequestPlan,
   tileRecord: TileRecord,
   tileStart: number,
   tileEnd: number,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuScalogramComputeState,
 ): Promise<boolean> {
-  const webGpu = surfaceState.webGpu;
-  if (!webGpu) {
-    return false;
-  }
-
-  const computeState = initializeWebGpuScalogramCompute(webGpu);
-  if (!computeState) {
-    markAnalysisTypeWebGpuFallback(plan, 'Scalogram WebGPU compute initialization failed.');
-    return false;
-  }
-  if (!ensureWebGpuPcmBuffer(webGpu, computeState)) {
-    markAnalysisTypeWebGpuFallback(plan, 'Scalogram WebGPU buffers are unavailable.');
-    return false;
-  }
-
   const kernelResource = getScalogramKernelResource(plan, webGpu, computeState);
   if (!kernelResource) {
     return false;
@@ -3680,6 +4258,232 @@ async function renderScalogramTileWithWebGpu(
     markAnalysisTypeWebGpuFallback(plan, error instanceof Error ? error.message : 'Scalogram GPU compute failed.');
     return false;
   }
+}
+
+async function renderScalogramTileWithFftWebGpu(
+  plan: RenderRequestPlan,
+  tileRecord: TileRecord,
+  tileStart: number,
+  tileEnd: number,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuScalogramComputeState,
+): Promise<boolean> {
+  const fftResource = getScalogramFftResource(plan, webGpu, computeState);
+  if (!fftResource) {
+    return false;
+  }
+
+  const fftWindow = shouldUseFftBasedScalogramTile(tileStart, tileEnd, fftResource);
+  if (!fftWindow) {
+    return false;
+  }
+
+  if (!ensureTileGpuResources(tileRecord, webGpu, { requiresStorage: true, uploadIfDirty: false })) {
+    return false;
+  }
+  if (!ensureWebGpuScalogramFftScratchBuffers(fftWindow.fftSize, webGpu, computeState)) {
+    return false;
+  }
+
+  try {
+    const inputData = createScalogramFftInputData(
+      fftWindow.fftSize,
+      fftWindow.inputEndSample,
+      fftWindow.inputStartSample,
+    );
+    webGpu.device.queue.writeBuffer(
+      computeState.fftSourceBuffer,
+      0,
+      inputData.buffer,
+      inputData.byteOffset,
+      inputData.byteLength,
+    );
+
+    const stageCount = getFftStageCount(fftWindow.fftSize);
+    const [fftDispatchX, fftDispatchY] = getLinearComputeDispatchSize(
+      fftWindow.fftSize / 2,
+      webGpu.device,
+    );
+    const [columnDispatchX, columnDispatchY] = getLinearComputeDispatchSize(
+      tileRecord.columnCount,
+      webGpu.device,
+    );
+
+    const forwardEncoder = webGpu.device.createCommandEncoder();
+    const forwardPass = forwardEncoder.beginComputePass();
+    forwardPass.setPipeline(computeState.fftPipeline);
+    let forwardSourceBuffer = computeState.fftSourceBuffer;
+    let forwardTargetBuffer = computeState.fftScratchPingBuffer;
+
+    for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+      const paramOffset = computeState.fftParamStride * stageIndex;
+      writeBufferAtOffset(
+        computeState.fftParamBuffer,
+        paramOffset,
+        createScalogramFftStageParamsData(fftWindow.fftSize, stageIndex, false),
+      );
+      const bindGroup = webGpu.device.createBindGroup({
+        layout: computeState.fftBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 16 } },
+          { binding: 1, resource: { buffer: forwardSourceBuffer } },
+          { binding: 2, resource: { buffer: forwardTargetBuffer } },
+        ],
+      });
+      forwardPass.setBindGroup(0, bindGroup, [paramOffset]);
+      forwardPass.dispatchWorkgroups(fftDispatchX, fftDispatchY);
+
+      const nextSourceBuffer = forwardTargetBuffer;
+      forwardTargetBuffer = nextSourceBuffer === computeState.fftScratchPingBuffer
+        ? computeState.fftScratchPongBuffer
+        : computeState.fftScratchPingBuffer;
+      forwardSourceBuffer = nextSourceBuffer;
+    }
+
+    forwardPass.end();
+    webGpu.device.queue.submit([forwardEncoder.finish()]);
+    const sourceSpectrumBuffer = forwardSourceBuffer;
+
+    for (let rowIndex = 0; rowIndex < plan.rowCount; rowIndex += 1) {
+      const multiplyParamOffset = 0;
+      writeBufferAtOffset(
+        computeState.fftParamBuffer,
+        multiplyParamOffset,
+        createScalogramFftMultiplyParamsData(fftWindow.fftSize, rowIndex, analysisState.sampleRate),
+      );
+
+      for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+        const paramOffset = computeState.fftParamStride * (1 + stageIndex);
+        writeBufferAtOffset(
+          computeState.fftParamBuffer,
+          paramOffset,
+          createScalogramFftStageParamsData(fftWindow.fftSize, stageIndex, true),
+        );
+      }
+
+      const renderParamOffset = computeState.fftParamStride * (1 + stageCount);
+      writeBufferAtOffset(
+        computeState.fftParamBuffer,
+        renderParamOffset,
+        createScalogramFftRenderParamsData(plan, {
+          columnCount: tileRecord.columnCount,
+          fftSize: fftWindow.fftSize,
+          inputSampleCount: fftWindow.inputSampleCount,
+          inputStartSample: fftWindow.inputStartSample,
+          rowIndex,
+          tileSpan: Math.max((1 / analysisState.sampleRate), tileEnd - tileStart),
+          tileStart,
+        }),
+      );
+
+      const rowEncoder = webGpu.device.createCommandEncoder();
+      const rowPass = rowEncoder.beginComputePass();
+
+      const multiplyBindGroup = webGpu.device.createBindGroup({
+        layout: computeState.fftMultiplyBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 32 } },
+          { binding: 1, resource: { buffer: sourceSpectrumBuffer } },
+          { binding: 2, resource: { buffer: fftResource.rowBuffer } },
+          { binding: 3, resource: { buffer: computeState.fftSourceBuffer } },
+        ],
+      });
+      rowPass.setPipeline(computeState.fftMultiplyPipeline);
+      rowPass.setBindGroup(0, multiplyBindGroup, [multiplyParamOffset]);
+      rowPass.dispatchWorkgroups(fftDispatchX, fftDispatchY);
+
+      rowPass.setPipeline(computeState.fftPipeline);
+      let inverseSourceBuffer = computeState.fftSourceBuffer;
+      let inverseTargetBuffer = sourceSpectrumBuffer === computeState.fftScratchPingBuffer
+        ? computeState.fftScratchPongBuffer
+        : computeState.fftScratchPingBuffer;
+
+      for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+        const paramOffset = computeState.fftParamStride * (1 + stageIndex);
+        const bindGroup = webGpu.device.createBindGroup({
+          layout: computeState.fftBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 16 } },
+            { binding: 1, resource: { buffer: inverseSourceBuffer } },
+            { binding: 2, resource: { buffer: inverseTargetBuffer } },
+          ],
+        });
+        rowPass.setBindGroup(0, bindGroup, [paramOffset]);
+        rowPass.dispatchWorkgroups(fftDispatchX, fftDispatchY);
+
+        const nextSourceBuffer = inverseTargetBuffer;
+        inverseTargetBuffer = nextSourceBuffer === computeState.fftScratchPingBuffer
+          ? computeState.fftSourceBuffer
+          : computeState.fftScratchPingBuffer;
+        inverseSourceBuffer = nextSourceBuffer;
+      }
+
+      const renderBindGroup = webGpu.device.createBindGroup({
+        layout: computeState.fftRenderBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 64 } },
+          { binding: 1, resource: { buffer: inverseSourceBuffer } },
+          { binding: 2, resource: { buffer: fftResource.rowBuffer } },
+          { binding: 3, resource: tileRecord.gpuTextureView },
+        ],
+      });
+      rowPass.setPipeline(computeState.fftRenderPipeline);
+      rowPass.setBindGroup(0, renderBindGroup, [renderParamOffset]);
+      rowPass.dispatchWorkgroups(columnDispatchX, columnDispatchY);
+      rowPass.end();
+      webGpu.device.queue.submit([rowEncoder.finish()]);
+    }
+
+    tileRecord.gpuDirty = false;
+    tileRecord.renderedColumns = tileRecord.columnCount;
+    tileRecord.complete = true;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function renderScalogramTileWithWebGpu(
+  plan: RenderRequestPlan,
+  tileRecord: TileRecord,
+  tileStart: number,
+  tileEnd: number,
+): Promise<boolean> {
+  const webGpu = surfaceState.webGpu;
+  if (!webGpu) {
+    return false;
+  }
+
+  const computeState = initializeWebGpuScalogramCompute(webGpu);
+  if (!computeState) {
+    markAnalysisTypeWebGpuFallback(plan, 'Scalogram WebGPU compute initialization failed.');
+    return false;
+  }
+  if (!ensureWebGpuPcmBuffer(webGpu, computeState)) {
+    markAnalysisTypeWebGpuFallback(plan, 'Scalogram WebGPU buffers are unavailable.');
+    return false;
+  }
+
+  const fftRendered = await renderScalogramTileWithFftWebGpu(
+    plan,
+    tileRecord,
+    tileStart,
+    tileEnd,
+    webGpu,
+    computeState,
+  );
+  if (fftRendered) {
+    return true;
+  }
+
+  return renderScalogramTileDirectWithWebGpu(
+    plan,
+    tileRecord,
+    tileStart,
+    tileEnd,
+    webGpu,
+    computeState,
+  );
 }
 
 async function renderTileWithWebGpu(
