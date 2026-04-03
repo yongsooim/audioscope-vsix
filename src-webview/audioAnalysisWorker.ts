@@ -33,6 +33,8 @@ const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_ROW_BLOCK_SIZE = 32;
 const MAX_TILE_CACHE_ENTRIES = 24;
 const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
+const ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR = true;
+const WEBGPU_TILE_TEXTURE_FORMAT = 'rgba8unorm';
 const ANALYSIS_TYPE_CODES = {
   spectrogram: 0,
   mel: 1,
@@ -53,6 +55,107 @@ type QualityPreset = 'balanced' | 'high' | 'max';
 type AnalysisType = 'mel' | 'scalogram' | 'spectrogram';
 type FrequencyScale = 'linear' | 'log' | 'mixed';
 type LayerKind = 'overview' | 'visible';
+type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
+
+const WEBGPU_BACKGROUND_SHADER = /* wgsl */`
+struct VertexOutput {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn backgroundVs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+  var positions = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, 1.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(1.0, -1.0),
+  );
+  var uvs = array<vec2<f32>, 6>(
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(1.0, 0.0),
+    vec2<f32>(0.0, 1.0),
+    vec2<f32>(0.0, 1.0),
+    vec2<f32>(1.0, 0.0),
+    vec2<f32>(1.0, 1.0),
+  );
+
+  var output: VertexOutput;
+  output.position = vec4<f32>(positions[vertexIndex], 0.0, 1.0);
+  output.uv = uvs[vertexIndex];
+  return output;
+}
+
+fn mixColor(startColor: vec3<f32>, endColor: vec3<f32>, t: f32) -> vec3<f32> {
+  return startColor + ((endColor - startColor) * t);
+}
+
+@fragment
+fn backgroundFs(input: VertexOutput) -> @location(0) vec4<f32> {
+  let topColor = vec3<f32>(23.0 / 255.0, 17.0 / 255.0, 39.0 / 255.0);
+  let middleColor = vec3<f32>(13.0 / 255.0, 11.0 / 255.0, 25.0 / 255.0);
+  let bottomColor = vec3<f32>(4.0 / 255.0, 5.0 / 255.0, 12.0 / 255.0);
+  let y = clamp(input.uv.y, 0.0, 1.0);
+  var color = bottomColor;
+  if (y <= 0.46) {
+    color = mixColor(topColor, middleColor, y / 0.46);
+  } else {
+    color = mixColor(middleColor, bottomColor, (y - 0.46) / 0.54);
+  }
+
+  return vec4<f32>(color, 1.0);
+}
+`;
+
+const WEBGPU_TILE_SHADER = /* wgsl */`
+struct TileUniforms {
+  destLeft: f32,
+  destRight: f32,
+  uvStart: f32,
+  uvEnd: f32,
+};
+
+struct VertexOutput {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@group(0) @binding(0) var<uniform> tileUniforms: TileUniforms;
+@group(0) @binding(1) var tileSampler: sampler;
+@group(0) @binding(2) var tileTexture: texture_2d<f32>;
+
+@vertex
+fn tileVs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+  var positions = array<vec2<f32>, 6>(
+    vec2<f32>(tileUniforms.destLeft, 1.0),
+    vec2<f32>(tileUniforms.destRight, 1.0),
+    vec2<f32>(tileUniforms.destLeft, -1.0),
+    vec2<f32>(tileUniforms.destLeft, -1.0),
+    vec2<f32>(tileUniforms.destRight, 1.0),
+    vec2<f32>(tileUniforms.destRight, -1.0),
+  );
+  var uvs = array<vec2<f32>, 6>(
+    vec2<f32>(tileUniforms.uvStart, 0.0),
+    vec2<f32>(tileUniforms.uvEnd, 0.0),
+    vec2<f32>(tileUniforms.uvStart, 1.0),
+    vec2<f32>(tileUniforms.uvStart, 1.0),
+    vec2<f32>(tileUniforms.uvEnd, 0.0),
+    vec2<f32>(tileUniforms.uvEnd, 1.0),
+  );
+
+  var output: VertexOutput;
+  output.position = vec4<f32>(positions[vertexIndex], 0.0, 1.0);
+  output.uv = uvs[vertexIndex];
+  return output;
+}
+
+@fragment
+fn tileFs(input: VertexOutput) -> @location(0) vec4<f32> {
+  return textureSample(tileTexture, tileSampler, input.uv);
+}
+`;
 
 interface CanvasInitOptions {
   offscreenCanvas?: OffscreenCanvas;
@@ -102,6 +205,11 @@ interface TileRecord {
   columnCount: number;
   complete: boolean;
   context: OffscreenCanvasRenderingContext2D | null;
+  gpuBindGroup: any;
+  gpuDirty: boolean;
+  gpuTexture: any;
+  gpuTextureView: any;
+  gpuUniformBuffer: any;
   imageData: ImageData;
   renderedColumns: number;
   rowCount: number;
@@ -176,6 +284,17 @@ interface AnalysisWorkerState {
   visible: LayerState;
 }
 
+interface WebGpuCompositorState {
+  bindGroupLayout: any;
+  canvasContext: any;
+  canvasFormat: string;
+  compositorCanvas: OffscreenCanvas;
+  device: any;
+  backgroundPipeline: any;
+  sampler: any;
+  tilePipeline: any;
+}
+
 let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 let requestQueue = Promise.resolve();
 let overviewRenderLoopActive = false;
@@ -184,10 +303,14 @@ let pendingOverviewRequest: SpectrogramRequest | null = null;
 let pendingVisibleRequest: SpectrogramRequest | null = null;
 
 const surfaceState = {
+  backend: 'uninitialized' as SurfaceBackend,
   canvas: null as OffscreenCanvas | null,
   context: null as OffscreenCanvasRenderingContext2D | null,
   pixelWidth: 0,
   pixelHeight: 0,
+  webGpu: null as WebGpuCompositorState | null,
+  webGpuInitPromise: null as Promise<void> | null,
+  webGpuPresentSerial: 0,
 };
 
 let analysisState: AnalysisWorkerState = createEmptyAnalysisState();
@@ -252,8 +375,10 @@ self.onmessage = (event) => {
     case 'dispose':
       pendingOverviewRequest = null;
       pendingVisibleRequest = null;
+      destroyWebGpuCompositor();
       surfaceState.canvas = null;
       surfaceState.context = null;
+      surfaceState.backend = 'uninitialized';
       analysisState = createEmptyAnalysisState();
       return;
     default:
@@ -300,6 +425,10 @@ function createEmptyAnalysisState(): AnalysisWorkerState {
 }
 
 function clearTileCache(): void {
+  for (const tileRecord of analysisState.tileCache.values()) {
+    destroyTileGpuResources(tileRecord);
+  }
+
   analysisState.tileCache.clear();
   analysisState.tileCacheBytes = 0;
 }
@@ -356,6 +485,7 @@ function pruneTileCache(): void {
 
     analysisState.tileCache.delete(cacheKey);
     analysisState.tileCacheBytes = Math.max(0, analysisState.tileCacheBytes - tileRecord.byteLength);
+    destroyTileGpuResources(tileRecord);
   }
 }
 
@@ -414,6 +544,275 @@ function getScalogramHopSamples(quality: QualityPreset): number {
   return SCALOGRAM_HOP_SAMPLES_BY_QUALITY[quality] ?? SCALOGRAM_HOP_SAMPLES_BY_QUALITY.high;
 }
 
+function getWebGpuGlobals() {
+  const webGpuScope = globalThis as typeof globalThis & {
+    GPUBufferUsage?: Record<string, number>;
+    GPUShaderStage?: Record<string, number>;
+    GPUTextureUsage?: Record<string, number>;
+    navigator?: Navigator & {
+      gpu?: {
+        getPreferredCanvasFormat?: () => string;
+        requestAdapter?: (options?: { powerPreference?: 'high-performance' | 'low-power' }) => Promise<any>;
+      };
+    };
+  };
+  const gpu = webGpuScope.navigator?.gpu;
+  const bufferUsage = webGpuScope.GPUBufferUsage;
+  const shaderStage = webGpuScope.GPUShaderStage;
+  const textureUsage = webGpuScope.GPUTextureUsage;
+
+  if (!gpu || !bufferUsage || !shaderStage || !textureUsage) {
+    return null;
+  }
+
+  return {
+    bufferUsage,
+    gpu,
+    shaderStage,
+    textureUsage,
+  };
+}
+
+function destroyTileGpuResources(tileRecord: TileRecord): void {
+  if (tileRecord.gpuTexture && typeof tileRecord.gpuTexture.destroy === 'function') {
+    tileRecord.gpuTexture.destroy();
+  }
+  if (tileRecord.gpuUniformBuffer && typeof tileRecord.gpuUniformBuffer.destroy === 'function') {
+    tileRecord.gpuUniformBuffer.destroy();
+  }
+
+  tileRecord.gpuTexture = null;
+  tileRecord.gpuTextureView = null;
+  tileRecord.gpuBindGroup = null;
+  tileRecord.gpuUniformBuffer = null;
+  tileRecord.gpuDirty = true;
+}
+
+function destroyWebGpuCompositor(): void {
+  for (const tileRecord of analysisState.tileCache.values()) {
+    destroyTileGpuResources(tileRecord);
+  }
+
+  surfaceState.webGpu = null;
+  surfaceState.webGpuInitPromise = null;
+  if (surfaceState.backend === 'webgpu' || surfaceState.backend === 'initializing') {
+    surfaceState.backend = 'uninitialized';
+  }
+}
+
+function initialize2dSurface(): void {
+  if (!surfaceState.canvas) {
+    surfaceState.context = null;
+    surfaceState.backend = 'uninitialized';
+    return;
+  }
+
+  surfaceState.canvas.width = Math.max(1, surfaceState.pixelWidth);
+  surfaceState.canvas.height = Math.max(1, surfaceState.pixelHeight);
+  surfaceState.context = surfaceState.canvas.getContext('2d', { alpha: false });
+  if (surfaceState.backend !== 'webgpu') {
+    surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+  }
+}
+
+async function validateWebGpuPresentation(device: any, canvasFormat: string): Promise<boolean> {
+  const probeCanvas = new OffscreenCanvas(1, 1);
+  const probeContext = probeCanvas.getContext('2d', { alpha: false });
+  if (!probeContext) {
+    return false;
+  }
+
+  const validationCanvas = new OffscreenCanvas(1, 1);
+  const validationContext = (validationCanvas.getContext('webgpu') as any) ?? null;
+  if (!validationContext) {
+    return false;
+  }
+
+  validationContext.configure({
+    alphaMode: 'opaque',
+    device,
+    format: canvasFormat,
+  });
+
+  const commandEncoder = device.createCommandEncoder();
+  const renderPass = commandEncoder.beginRenderPass({
+    colorAttachments: [
+      {
+        clearValue: { a: 1, b: 1, g: 0, r: 1 },
+        loadOp: 'clear',
+        storeOp: 'store',
+        view: validationContext.getCurrentTexture().createView(),
+      },
+    ],
+  });
+  renderPass.end();
+  device.queue.submit([commandEncoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+
+  const imageSource = typeof createImageBitmap === 'function'
+    ? await createImageBitmap(validationCanvas)
+    : validationCanvas;
+  try {
+    probeContext.drawImage(imageSource, 0, 0, 1, 1);
+  } finally {
+    if (imageSource instanceof ImageBitmap) {
+      imageSource.close();
+    }
+  }
+
+  const pixel = probeContext.getImageData(0, 0, 1, 1).data;
+  return pixel[0] >= 200 && pixel[1] <= 50 && pixel[2] >= 200;
+}
+
+async function initializeWebGpuCompositor(): Promise<void> {
+  if (
+    !ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR
+    || surfaceState.webGpu
+    || surfaceState.webGpuInitPromise
+    || !surfaceState.canvas
+  ) {
+    return;
+  }
+
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    initialize2dSurface();
+    return;
+  }
+
+  surfaceState.backend = 'initializing';
+  surfaceState.webGpuInitPromise = (async () => {
+    try {
+      const adapter = await globals.gpu.requestAdapter?.({ powerPreference: 'high-performance' });
+      if (!adapter) {
+        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+        return;
+      }
+
+      const device = await adapter.requestDevice();
+      const canvasFormat = globals.gpu.getPreferredCanvasFormat?.() || 'bgra8unorm';
+      if (!(await validateWebGpuPresentation(device, canvasFormat))) {
+        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+        return;
+      }
+
+      const backgroundModule = device.createShaderModule({ code: WEBGPU_BACKGROUND_SHADER });
+      const tileModule = device.createShaderModule({ code: WEBGPU_TILE_SHADER });
+      const bindGroupLayout = device.createBindGroupLayout({
+        entries: [
+          {
+            binding: 0,
+            buffer: { type: 'uniform' },
+            visibility: globals.shaderStage.VERTEX,
+          },
+          {
+            binding: 1,
+            sampler: { type: 'filtering' },
+            visibility: globals.shaderStage.FRAGMENT,
+          },
+          {
+            binding: 2,
+            texture: { sampleType: 'float' },
+            visibility: globals.shaderStage.FRAGMENT,
+          },
+        ],
+      });
+      const sampler = device.createSampler({
+        magFilter: 'linear',
+        minFilter: 'linear',
+      });
+      const backgroundPipeline = device.createRenderPipeline({
+        fragment: {
+          entryPoint: 'backgroundFs',
+          module: backgroundModule,
+          targets: [{ format: canvasFormat }],
+        },
+        layout: 'auto',
+        primitive: { topology: 'triangle-list' },
+        vertex: {
+          entryPoint: 'backgroundVs',
+          module: backgroundModule,
+        },
+      });
+      const tilePipeline = device.createRenderPipeline({
+        fragment: {
+          entryPoint: 'tileFs',
+          module: tileModule,
+          targets: [{ format: canvasFormat }],
+        },
+        layout: device.createPipelineLayout({
+          bindGroupLayouts: [bindGroupLayout],
+        }),
+        primitive: { topology: 'triangle-list' },
+        vertex: {
+          entryPoint: 'tileVs',
+          module: tileModule,
+        },
+      });
+
+      const compositorCanvas = new OffscreenCanvas(
+        Math.max(1, surfaceState.pixelWidth),
+        Math.max(1, surfaceState.pixelHeight),
+      );
+      const canvasContext = (compositorCanvas.getContext('webgpu') as any) ?? null;
+      if (!canvasContext) {
+        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+        return;
+      }
+
+      canvasContext.configure({
+        alphaMode: 'opaque',
+        device,
+        format: canvasFormat,
+      });
+
+      surfaceState.webGpu = {
+        backgroundPipeline,
+        bindGroupLayout,
+        canvasContext,
+        canvasFormat,
+        compositorCanvas,
+        device,
+        sampler,
+        tilePipeline,
+      };
+      surfaceState.backend = 'webgpu';
+      void device.lost.then(() => {
+        if (surfaceState.webGpu?.device !== device) {
+          return;
+        }
+
+        destroyWebGpuCompositor();
+        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+        paintSpectrogramDisplay();
+      });
+      paintSpectrogramDisplay();
+    } catch {
+      destroyWebGpuCompositor();
+      surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+      paintSpectrogramDisplay();
+    } finally {
+      surfaceState.webGpuInitPromise = null;
+    }
+  })();
+
+  await surfaceState.webGpuInitPromise;
+}
+
+function resizeWebGpuSurface(): void {
+  if (!surfaceState.webGpu) {
+    return;
+  }
+
+  surfaceState.webGpu.compositorCanvas.width = Math.max(1, surfaceState.pixelWidth);
+  surfaceState.webGpu.compositorCanvas.height = Math.max(1, surfaceState.pixelHeight);
+  surfaceState.webGpu.canvasContext.configure({
+    alphaMode: 'opaque',
+    device: surfaceState.webGpu.device,
+    format: surfaceState.webGpu.canvasFormat,
+  });
+}
+
 function initializeCanvas(options: CanvasInitOptions | undefined): void {
   if (options?.offscreenCanvas) {
     surfaceState.canvas = options.offscreenCanvas;
@@ -426,9 +825,12 @@ function initializeCanvas(options: CanvasInitOptions | undefined): void {
     return;
   }
 
-  surfaceState.canvas.width = surfaceState.pixelWidth;
-  surfaceState.canvas.height = surfaceState.pixelHeight;
-  surfaceState.context = surfaceState.canvas.getContext('2d', { alpha: false });
+  initialize2dSurface();
+
+  if (ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR) {
+    void initializeWebGpuCompositor();
+  }
+
   paintSpectrogramDisplay();
 }
 
@@ -444,6 +846,18 @@ function resizeCanvas(options: CanvasInitOptions | undefined): void {
   surfaceState.canvas.height = surfaceState.pixelHeight;
   analysisState.currentDisplayRange.pixelWidth = surfaceState.pixelWidth;
   analysisState.currentDisplayRange.pixelHeight = surfaceState.pixelHeight;
+  if (surfaceState.backend === 'webgpu') {
+    resizeWebGpuSurface();
+  }
+
+  initialize2dSurface();
+
+  if (surfaceState.backend === 'uninitialized' && ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR) {
+    void initializeWebGpuCompositor();
+  } else if (surfaceState.backend === 'uninitialized') {
+    initialize2dSurface();
+  }
+
   paintSpectrogramDisplay();
 }
 
@@ -494,8 +908,7 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
   analysisState.runtimeVariant = runtime.variant;
 
   if (isNewAudioSession) {
-    analysisState.tileCache.clear();
-    analysisState.tileCacheBytes = 0;
+    clearTileCache();
     analysisState.generationStatus.clear();
     analysisState.overview = createEmptyLayerState('overview');
     analysisState.visible = createEmptyLayerState('visible');
@@ -811,6 +1224,11 @@ function createTileRecord({
     columnCount: TILE_COLUMN_COUNT,
     complete: false,
     context,
+    gpuBindGroup: null,
+    gpuDirty: true,
+    gpuTexture: null,
+    gpuTextureView: null,
+    gpuUniformBuffer: null,
     imageData,
     renderedColumns: 0,
     rowCount,
@@ -845,6 +1263,7 @@ function drawTileChunk(
     }
   }
 
+  tileRecord.gpuDirty = true;
   tileRecord.context.putImageData(tileRecord.imageData, 0, 0, columnOffset, 0, columnCount, rowCount);
 }
 
@@ -939,15 +1358,18 @@ async function renderTile(
 }
 
 function paintSpectrogramDisplay(): void {
+  const displayRange = analysisState.currentDisplayRange;
   const context = surfaceState.context;
+
+  if (context && surfaceState.webGpu && paintSpectrogramDisplayWithWebGpu(displayRange, context)) {
+    return;
+  }
 
   if (!context) {
     return;
   }
 
   drawBackground(context, surfaceState.pixelWidth, surfaceState.pixelHeight);
-
-  const displayRange = analysisState.currentDisplayRange;
 
   if (!(displayRange.end > displayRange.start)) {
     return;
@@ -968,6 +1390,95 @@ function paintSpectrogramDisplay(): void {
   }
 }
 
+function paintSpectrogramDisplayWithWebGpu(
+  displayRange: AnalysisWorkerState['currentDisplayRange'],
+  context: OffscreenCanvasRenderingContext2D,
+): boolean {
+  const webGpu = surfaceState.webGpu;
+
+  if (!webGpu) {
+    return false;
+  }
+
+  try {
+    const currentTexture = webGpu.canvasContext.getCurrentTexture();
+    const commandEncoder = webGpu.device.createCommandEncoder();
+    const renderPass = commandEncoder.beginRenderPass({
+      colorAttachments: [
+        {
+          clearValue: { a: 1, b: 0, g: 0, r: 0 },
+          loadOp: 'clear',
+          storeOp: 'store',
+          view: currentTexture.createView(),
+        },
+      ],
+    });
+
+    renderPass.setPipeline(webGpu.backgroundPipeline);
+    renderPass.draw(6);
+
+    if (displayRange.end > displayRange.start) {
+      if (analysisState.overview.plan) {
+        paintLayerWithWebGpu(renderPass, webGpu, analysisState.overview.plan, displayRange);
+      }
+
+      if (analysisState.visible.plan) {
+        paintLayerWithWebGpu(renderPass, webGpu, analysisState.visible.plan, displayRange);
+      }
+    }
+
+    renderPass.end();
+    webGpu.device.queue.submit([commandEncoder.finish()]);
+    const presentSerial = surfaceState.webGpuPresentSerial + 1;
+    surfaceState.webGpuPresentSerial = presentSerial;
+    const width = Math.max(1, surfaceState.pixelWidth);
+    const height = Math.max(1, surfaceState.pixelHeight);
+    void webGpu.device.queue.onSubmittedWorkDone()
+      .then(async () => {
+        if (
+          surfaceState.webGpu !== webGpu
+          || surfaceState.webGpuPresentSerial !== presentSerial
+        ) {
+          return;
+        }
+
+        const imageSource = typeof createImageBitmap === 'function'
+          ? await createImageBitmap(webGpu.compositorCanvas)
+          : webGpu.compositorCanvas;
+        try {
+          if (
+            surfaceState.webGpu !== webGpu
+            || surfaceState.webGpuPresentSerial !== presentSerial
+          ) {
+            return;
+          }
+
+          context.setTransform(1, 0, 0, 1, 0, 0);
+          context.clearRect(0, 0, width, height);
+          context.drawImage(imageSource, 0, 0, width, height);
+        } finally {
+          if (imageSource instanceof ImageBitmap) {
+            imageSource.close();
+          }
+        }
+      })
+      .catch(() => {
+        if (surfaceState.webGpu !== webGpu) {
+          return;
+        }
+
+        destroyWebGpuCompositor();
+        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+        paintSpectrogramDisplay();
+      });
+    return true;
+  } catch {
+    destroyWebGpuCompositor();
+    surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+    return false;
+  }
+}
+
 function drawBackground(context: OffscreenCanvasRenderingContext2D, width: number, height: number): void {
   context.setTransform(1, 0, 0, 1, 0, 0);
   context.clearRect(0, 0, width, height);
@@ -979,6 +1490,136 @@ function drawBackground(context: OffscreenCanvasRenderingContext2D, width: numbe
 
   context.fillStyle = background;
   context.fillRect(0, 0, width, height);
+}
+
+function ensureTileGpuResources(tileRecord: TileRecord, webGpu: WebGpuCompositorState): boolean {
+  const globals = getWebGpuGlobals();
+
+  if (!globals) {
+    return false;
+  }
+
+  const width = Math.max(1, tileRecord.columnCount);
+  const height = Math.max(1, tileRecord.rowCount);
+  if (!tileRecord.gpuTexture || !tileRecord.gpuUniformBuffer || !tileRecord.gpuBindGroup) {
+    destroyTileGpuResources(tileRecord);
+    tileRecord.gpuUniformBuffer = webGpu.device.createBuffer({
+      size: Float32Array.BYTES_PER_ELEMENT * 4,
+      usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM,
+    });
+    tileRecord.gpuTexture = webGpu.device.createTexture({
+      format: WEBGPU_TILE_TEXTURE_FORMAT,
+      size: { depthOrArrayLayers: 1, height, width },
+      usage: globals.textureUsage.COPY_DST | globals.textureUsage.TEXTURE_BINDING,
+    });
+    tileRecord.gpuTextureView = tileRecord.gpuTexture.createView();
+    tileRecord.gpuBindGroup = webGpu.device.createBindGroup({
+      entries: [
+        {
+          binding: 0,
+          resource: { buffer: tileRecord.gpuUniformBuffer },
+        },
+        {
+          binding: 1,
+          resource: webGpu.sampler,
+        },
+        {
+          binding: 2,
+          resource: tileRecord.gpuTextureView,
+        },
+      ],
+      layout: webGpu.bindGroupLayout,
+    });
+    tileRecord.gpuDirty = true;
+  }
+
+  if (tileRecord.gpuDirty) {
+    webGpu.device.queue.writeTexture(
+      { texture: tileRecord.gpuTexture },
+      tileRecord.imageData.data,
+      {
+        bytesPerRow: width * 4,
+        rowsPerImage: height,
+      },
+      {
+        depthOrArrayLayers: 1,
+        height,
+        width,
+      },
+    );
+    tileRecord.gpuDirty = false;
+  }
+
+  return true;
+}
+
+function paintLayerWithWebGpu(
+  renderPass: any,
+  webGpu: WebGpuCompositorState,
+  plan: RenderRequestPlan | null,
+  displayRange: AnalysisWorkerState['currentDisplayRange'],
+): void {
+  if (!plan) {
+    return;
+  }
+
+  const span = Math.max(1e-6, displayRange.end - displayRange.start);
+  const destinationWidth = Math.max(1, surfaceState.pixelWidth);
+
+  renderPass.setPipeline(webGpu.tilePipeline);
+
+  for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
+    const cacheKey = buildTileCacheKey(plan, tileIndex);
+    const tile = getTileRecord(cacheKey);
+
+    if (!tile || !ensureTileGpuResources(tile, webGpu) || !tile.gpuBindGroup || !tile.gpuUniformBuffer) {
+      continue;
+    }
+
+    const tileSpan = Math.max(1e-6, tile.tileEnd - tile.tileStart);
+    const overlapStart = Math.max(displayRange.start, tile.tileStart);
+    const availableColumns = tile.complete ? tile.columnCount : Math.max(0, tile.renderedColumns ?? 0);
+    if (availableColumns <= 0) {
+      continue;
+    }
+    const availableTileEnd = tile.tileStart + ((availableColumns / tile.columnCount) * tileSpan);
+    const overlapEnd = Math.min(displayRange.end, availableTileEnd);
+
+    if (overlapEnd <= overlapStart) {
+      continue;
+    }
+
+    const sourceStartRatio = (overlapStart - tile.tileStart) / tileSpan;
+    const sourceEndRatio = (overlapEnd - tile.tileStart) / tileSpan;
+    const destinationStartRatio = (overlapStart - displayRange.start) / span;
+    const destinationEndRatio = (overlapEnd - displayRange.start) / span;
+    const sourceX = clamp(Math.floor(sourceStartRatio * tile.columnCount), 0, Math.max(0, tile.columnCount - 1));
+    if (sourceX >= availableColumns) {
+      continue;
+    }
+    const sourceWidth = Math.max(
+      1,
+      Math.min(
+        availableColumns - sourceX,
+        Math.ceil((sourceEndRatio - sourceStartRatio) * tile.columnCount),
+      ),
+    );
+    const destinationX = Math.floor(destinationStartRatio * destinationWidth);
+    const destinationWidthPx = Math.max(
+      1,
+      Math.ceil((destinationEndRatio - destinationStartRatio) * destinationWidth),
+    );
+    const uniforms = new Float32Array([
+      ((destinationX / destinationWidth) * 2) - 1,
+      (((destinationX + destinationWidthPx) / destinationWidth) * 2) - 1,
+      sourceX / tile.columnCount,
+      (sourceX + sourceWidth) / tile.columnCount,
+    ]);
+
+    webGpu.device.queue.writeBuffer(tile.gpuUniformBuffer, 0, uniforms);
+    renderPass.setBindGroup(0, tile.gpuBindGroup);
+    renderPass.draw(6);
+  }
 }
 
 function paintLayer(
