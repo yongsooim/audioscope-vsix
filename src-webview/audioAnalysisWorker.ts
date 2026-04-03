@@ -29,6 +29,7 @@ const QUALITY_PRESETS = {
 
 const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
+const SPECTROGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_ROW_BLOCK_SIZE = 32;
 const MAX_TILE_CACHE_ENTRIES = 24;
@@ -1902,7 +1903,9 @@ async function renderTile(
   const cacheKey = typeof options.cacheKey === 'string' ? options.cacheKey : buildTileCacheKey(plan, tileIndex);
   const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
   const onChunkReady = typeof options.onChunkReady === 'function' ? options.onChunkReady : null;
-  const chunkColumnCount = plan.analysisType === 'scalogram' ? SCALOGRAM_COLUMN_CHUNK_SIZE : TILE_COLUMN_COUNT;
+  const chunkColumnCount = plan.analysisType === 'scalogram'
+    ? SCALOGRAM_COLUMN_CHUNK_SIZE
+    : SPECTROGRAM_COLUMN_CHUNK_SIZE;
   const existingTile = options.existingTile;
   const tileRecord = existingTile ?? createTileRecord({
     cacheKey,
@@ -2337,6 +2340,7 @@ function destroyGpuBuffers(buffers: any[]): void {
 function canUseWebGpuSpectrogramCompute(plan: RenderRequestPlan): boolean {
   return ENABLE_EXPERIMENTAL_WEBGPU_SPECTROGRAM_COMPUTE
     && plan.analysisType === 'spectrogram'
+    && plan.requestKind === 'overview'
     && plan.fftSize > 0
     && plan.fftSize <= MAX_WEBGPU_COMPUTE_FFT_SIZE
     && analysisState.sampleRate > 0
