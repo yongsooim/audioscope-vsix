@@ -23,6 +23,7 @@ export interface ExternalToolStatusPayload {
 }
 
 export interface AudioscopePayload {
+  audioBytes: ArrayBuffer | null;
   documentUri: string;
   externalTools: ExternalToolStatusPayload;
   fileBacked: boolean;

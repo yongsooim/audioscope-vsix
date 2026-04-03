@@ -7,10 +7,14 @@ interface AudioscopeViewportControllerDeps {
   elements: AudioscopeElements;
   getCurrentPlaybackTime: () => number;
   getEffectiveDuration: () => number;
+  getInteractiveWaveformRange: () => { start: number; end: number };
   getMinVisibleDuration: (duration: number) => number;
-  getTimeAtViewportClientX: (clientX: number, targetElement: HTMLElement) => number;
+  getTimeAtViewportClientX: (
+    clientX: number,
+    targetElement: HTMLElement,
+    range?: { start: number; end: number },
+  ) => number;
   getViewportPointerRatio: (clientX: number, targetElement: HTMLElement) => number;
-  getWaveformRange: () => { start: number; end: number };
   splitterFallbackSizePx: number;
   state: any;
   updateWaveformViewRange: (
@@ -29,10 +33,10 @@ export function createAudioscopeViewportController({
   elements,
   getCurrentPlaybackTime,
   getEffectiveDuration,
+  getInteractiveWaveformRange,
   getMinVisibleDuration,
   getTimeAtViewportClientX,
   getViewportPointerRatio,
-  getWaveformRange,
   splitterFallbackSizePx,
   state,
   updateWaveformViewRange,
@@ -249,7 +253,7 @@ export function createAudioscopeViewportController({
 
   function handleSharedViewportWheel(event, targetElement) {
     const duration = getEffectiveDuration();
-    const range = getWaveformRange();
+    const range = getInteractiveWaveformRange();
     const span = range.end - range.start;
     const rect = targetElement.getBoundingClientRect();
     const width = rect.width;
@@ -276,7 +280,7 @@ export function createAudioscopeViewportController({
     const currentPlaybackTime = getCurrentPlaybackTime();
     const anchorTime = shouldPreserveFollowZoom && Number.isFinite(currentPlaybackTime)
       ? clamp(currentPlaybackTime, 0, duration)
-      : getTimeAtViewportClientX(event.clientX, targetElement);
+      : getTimeAtViewportClientX(event.clientX, targetElement, range);
 
     if (intent === 'pan' && horizontalMagnitude > 0.01) {
       disableFollowPlayback();

@@ -303,7 +303,7 @@ export async function runEmbeddedFfprobe(resource: vscode.Uri, timeout: number):
     );
 
     return stdout;
-  } finally {
+} finally {
     await resourceHandle.cleanup();
   }
 }

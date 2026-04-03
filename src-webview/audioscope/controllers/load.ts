@@ -450,21 +450,33 @@ export function createAudioscopeLoadController({
     return transport;
   }
 
+  function getHostSuppliedAudioBytes(payload) {
+    return payload?.audioBytes instanceof ArrayBuffer
+      ? payload.audioBytes
+      : null;
+  }
+
   async function loadDecodedAudioSource(loadToken, payload) {
     const controller = new AbortController();
     state.sourceFetchController = controller;
 
     try {
       setAnalysisStatus('Loading audio…');
+      let audioData = getHostSuppliedAudioBytes(payload);
+      let responseContentType = null;
 
-      const response = await fetch(payload.sourceUri, { signal: controller.signal });
+      if (!(audioData instanceof ArrayBuffer)) {
+        const response = await fetch(payload.sourceUri, { signal: controller.signal });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        responseContentType = response.headers.get('content-type');
+        audioData = await response.arrayBuffer();
       }
 
-      let audioData = await response.arrayBuffer();
-      resolvePlayableAudioMimeType(payload, response.headers.get('content-type'));
+      resolvePlayableAudioMimeType(payload, responseContentType);
       let sourceKind = 'native';
 
       if (loadToken !== state.loadToken) {
