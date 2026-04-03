@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("./core.zig");
+const mfcc = @import("./mfcc.zig");
 
 const palette_lut_size: usize = 1024;
 const palette_lut = buildPaletteLut();
@@ -328,6 +329,10 @@ fn getBandLayoutResource(
             resource.mel_bands = core.allocator.alloc(core.MelBand, @as(usize, @intCast(row_count))) catch return null;
             createMelBands(resource.mel_bands, fft_size, core.g_session.sample_rate, min_frequency, max_frequency);
         },
+        .mfcc => {
+            resource.mel_bands = core.allocator.alloc(core.MelBand, @as(usize, @intCast(row_count))) catch return null;
+            createMelBands(resource.mel_bands, fft_size, core.g_session.sample_rate, min_frequency, max_frequency);
+        },
         .spectrogram => {
             resource.band_ranges = core.allocator.alloc(core.BandRange, @as(usize, @intCast(row_count))) catch return null;
             switch (frequency_scale) {
@@ -517,6 +522,7 @@ fn computeMelBandPower(power_spectrum: []const f32, band: core.MelBand, fft_size
 fn displayMinDbForAnalysisType(analysis_type: core.AnalysisType) f32 {
     return switch (analysis_type) {
         .mel => mel_display_min_db,
+        .mfcc => core.min_db,
         .scalogram => scalogram_display_min_db,
         .spectrogram => core.min_db,
     };
@@ -525,6 +531,7 @@ fn displayMinDbForAnalysisType(analysis_type: core.AnalysisType) f32 {
 fn displayGammaForAnalysisType(analysis_type: core.AnalysisType) f32 {
     return switch (analysis_type) {
         .mel => mel_display_gamma,
+        .mfcc => 1.0,
         .scalogram => scalogram_display_gamma,
         .spectrogram => 1.0,
     };
@@ -781,6 +788,20 @@ fn renderStftDerivedTile(
             writePowerSpectrum(resource, low_power_spectrum);
         }
 
+        if (analysis_type == .mfcc) {
+            mfcc.writeColumn(
+                power_spectrum,
+                layout.mel_bands,
+                fft_size,
+                core.g_session.sample_rate,
+                distribution_gamma,
+                output,
+                output_width,
+                @as(usize, @intCast(column_index)),
+            );
+            continue;
+        }
+
         var row: i32 = 0;
         while (row < row_count) : (row += 1) {
             const normalized = switch (analysis_type) {
@@ -800,6 +821,7 @@ fn renderStftDerivedTile(
                     const active_power = if (use_low_band) low_power_spectrum else power_spectrum;
                     break :blk normalizePowerForDisplay(computeBandMeanPower(active_power, active_range), .spectrogram, distribution_gamma, min_db, max_db);
                 },
+                .mfcc => 0.0,
                 .scalogram => 0.0,
             };
 
@@ -923,7 +945,7 @@ pub export fn wave_render_spectrogram_tile_rgba(
             max_db,
             output_ptr,
         ),
-        .mel, .spectrogram => if (fft_size > 0)
+        .mel, .mfcc, .spectrogram => if (fft_size > 0)
             renderStftDerivedTile(
                 analysis_type,
                 frequency_scale,

@@ -363,7 +363,7 @@ function clearFatalStatus(): void {
 }
 
 function normalizeSpectrogramAnalysisType(value: unknown): SpectrogramAnalysisType {
-  return value === 'mel' || value === 'scalogram' ? value : 'spectrogram';
+  return value === 'mel' || value === 'mfcc' || value === 'scalogram' ? value : 'spectrogram';
 }
 
 function normalizeSpectrogramColormapDistribution(value: unknown): SpectrogramColormapDistribution {
@@ -376,6 +376,10 @@ function getDefaultSpectrogramDbWindow(analysisType: SpectrogramAnalysisType): {
 } {
   if (analysisType === 'mel') {
     return { minDecibels: -92, maxDecibels: 0 };
+  }
+
+  if (analysisType === 'mfcc') {
+    return { minDecibels: -80, maxDecibels: 0 };
   }
 
   if (analysisType === 'scalogram') {
@@ -1158,6 +1162,7 @@ function renderSpectrogramMeta(): void {
   const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
   const supportsScale = analysisType === 'spectrogram';
   const supportsMelBands = analysisType === 'mel';
+  const supportsDbWindow = analysisType !== 'mfcc';
   const isScalogram = analysisType === 'scalogram';
   const dbWindow = normalizeSpectrogramDbWindow(
     state.spectrogramConfig.minDecibels,
@@ -1180,10 +1185,13 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramOverlapControl.hidden = isScalogram;
   elements.spectrogramScaleControl.hidden = !supportsScale;
   elements.spectrogramMelBandsControl.hidden = !supportsMelBands;
+  elements.spectrogramDbRangeControl.hidden = !supportsDbWindow;
   elements.spectrogramFftSelect.disabled = isScalogram;
   elements.spectrogramOverlapSelect.disabled = isScalogram;
   elements.spectrogramScaleSelect.disabled = !supportsScale;
   elements.spectrogramMelBandsSelect.disabled = !supportsMelBands;
+  elements.spectrogramMinDbSlider.disabled = !supportsDbWindow;
+  elements.spectrogramMaxDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMinDbSlider.value = String(dbWindow.minDecibels);
   elements.spectrogramMaxDbSlider.value = String(dbWindow.maxDecibels);
   const rangeStartPercent = ((dbWindow.minDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.min)

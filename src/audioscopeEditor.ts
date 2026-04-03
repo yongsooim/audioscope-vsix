@@ -404,6 +404,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                   <select id="spectrogram-type-select" class="spectrogram-control-select" aria-label="Spectrogram analysis type">
                     <option value="spectrogram" selected>Spectrogram</option>
                     <option value="mel">Mel-Spectrogram</option>
+                    <option value="mfcc">MFCC</option>
                     <option value="scalogram">Scalogram</option>
                   </select>
                 </label>

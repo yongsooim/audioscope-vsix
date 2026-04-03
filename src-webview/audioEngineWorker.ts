@@ -50,6 +50,7 @@ const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
 const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
 const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
 const ROW_BUCKET_SIZE = 16;
+const MFCC_COEFFICIENT_COUNT = 20;
 const LIBROSA_DEFAULT_MEL_BAND_COUNT = 256;
 const MEL_BAND_COUNT_OPTIONS = [128, 256, 512];
 const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
@@ -75,6 +76,7 @@ const ANALYSIS_TYPE_CODES: Record<SpectrogramAnalysisType, number> = {
   spectrogram: 0,
   mel: 1,
   scalogram: 2,
+  mfcc: 3,
 };
 
 const FREQUENCY_SCALE_CODES: Record<SpectrogramFrequencyScale, number> = {
@@ -575,6 +577,9 @@ function getDefaultSpectrogramDbWindow(analysisType: SpectrogramAnalysisType): {
   if (analysisType === 'mel') {
     return { minDecibels: -92, maxDecibels: 0 };
   }
+  if (analysisType === 'mfcc') {
+    return { minDecibels: -80, maxDecibels: 0 };
+  }
   if (analysisType === 'scalogram') {
     return { minDecibels: -72, maxDecibels: 0 };
   }
@@ -635,7 +640,7 @@ function handleSpectrogramConfig(config: {
   minDecibels: number;
   overlapRatio: number;
 }): void {
-  const nextAnalysisType = config.analysisType === 'mel' || config.analysisType === 'scalogram'
+  const nextAnalysisType = config.analysisType === 'mel' || config.analysisType === 'mfcc' || config.analysisType === 'scalogram'
     ? config.analysisType
     : 'spectrogram';
   const nextColormapDistribution = config.colormapDistribution === 'contrast' || config.colormapDistribution === 'soft'
@@ -1470,7 +1475,9 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
   const rowOversample = analysisType === 'scalogram' ? 1 : VISIBLE_ROW_OVERSAMPLE;
   const rowCount = analysisType === 'mel'
     ? normalizeMelBandCount(state.spectrogramConfig.melBandCount)
-    : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
+    : analysisType === 'mfcc'
+      ? MFCC_COEFFICIENT_COUNT
+      : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
@@ -1925,6 +1932,18 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
     0,
     state.session.durationFrames,
   );
+  if (state.spectrogramConfig.analysisType === 'mfcc') {
+    const coefficient = getMfccCoefficientAtPosition(clamp01(pointerRatioY));
+    return {
+      label: `${formatAxisLabel(frame / sampleRate)} • MFCC C${coefficient}`,
+      markerVisible: false,
+      markerXRatio: ratioX,
+      markerYRatio: clamp01(pointerRatioY),
+      requestId,
+      surface: 'spectrogram',
+    };
+  }
+
   const frequency = getSpectrogramFrequencyAtPosition(clamp01(pointerRatioY));
   return {
     label: `${formatAxisLabel(frame / sampleRate)} • ${formatFrequencyLabel(frequency)}`,
@@ -1934,6 +1953,19 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
     requestId,
     surface: 'spectrogram',
   };
+}
+
+function getMfccCoefficientAtPosition(positionRatio: number): number {
+  if (MFCC_COEFFICIENT_COUNT <= 1) {
+    return 0;
+  }
+
+  const normalized = 1 - clamp01(positionRatio);
+  return clamp(
+    Math.round(normalized * (MFCC_COEFFICIENT_COUNT - 1)),
+    0,
+    MFCC_COEFFICIENT_COUNT - 1,
+  );
 }
 
 function getSpectrogramFrequencyAtPosition(positionRatio: number): number {
@@ -1965,6 +1997,18 @@ function getActiveSpectrogramAxisMode(): SpectrogramAnalysisType | SpectrogramFr
 }
 
 function buildFrequencyTicks(): FrequencyTickUi[] {
+  if (state.spectrogramConfig.analysisType === 'mfcc') {
+    const tickRows = [MFCC_COEFFICIENT_COUNT - 1, 15, 10, 5, 0]
+      .filter((row, index, rows) => row >= 0 && row < MFCC_COEFFICIENT_COUNT && rows.indexOf(row) === index);
+
+    return tickRows.map((row, index) => ({
+      edge: index === 0 ? 'top' : index === tickRows.length - 1 ? 'bottom' : 'middle',
+      frequency: row,
+      label: `C${row}`,
+      positionRatio: MFCC_COEFFICIENT_COUNT <= 1 ? 1 : 1 - (row / (MFCC_COEFFICIENT_COUNT - 1)),
+    }));
+  }
+
   const minFrequency = state.session.minFrequency;
   const maxFrequency = state.session.maxFrequency;
   const axisMode = getActiveSpectrogramAxisMode();

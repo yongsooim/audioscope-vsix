@@ -1,5 +1,5 @@
 export type WaveformPlotMode = 'envelope' | 'raw' | 'sample';
-export type SpectrogramAnalysisType = 'mel' | 'scalogram' | 'spectrogram';
+export type SpectrogramAnalysisType = 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
 export type SpectrogramColormapDistribution = 'balanced' | 'contrast' | 'soft';
 export type SpectrogramFrequencyScale = 'linear' | 'log' | 'mixed';
 export type SurfaceKind = 'spectrogram' | 'waveform';

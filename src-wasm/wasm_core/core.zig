@@ -33,6 +33,7 @@ pub const AnalysisType = enum(i32) {
     spectrogram = 0,
     mel = 1,
     scalogram = 2,
+    mfcc = 3,
 };
 
 pub const FrequencyScale = enum(i32) {
@@ -366,6 +367,7 @@ pub fn decodeAnalysisType(value: i32) AnalysisType {
     return switch (value) {
         1 => .mel,
         2 => .scalogram,
+        3 => .mfcc,
         else => .spectrogram,
     };
 }
