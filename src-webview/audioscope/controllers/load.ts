@@ -624,7 +624,8 @@ export function createAudioscopeLoadController({
     setAnalysisStatus('Preparing playback…');
     state.audioTransport = createPlaybackTransport(loadToken);
     state.playbackSession = null;
-    state.waveformViewRange = { start: 0, end: 0 };
+    state.waveformViewport.targetRange = { start: 0, end: 0 };
+    state.waveformViewport.presentedRange = { start: 0, end: 0 };
 
     state.waveformSurfaceReadyPromise = initializeWaveformSurface(loadToken);
     state.spectrogramSurfaceReadyPromise = initializeSpectrogramSurface(loadToken);

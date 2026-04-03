@@ -62,6 +62,7 @@ import type {
   WaveformDisplaySnapshot,
   WaveformDisplayWindowMetrics,
   WaveformRenderRequest,
+  WaveformViewportState,
 } from './core/types';
 
 const vscode = acquireVsCodeApi();
@@ -142,6 +143,19 @@ type WaveformZoomAnimationState = {
 
 const elements = createAudioscopeElements();
 
+function createInitialWaveformViewportState(): WaveformViewportState {
+  return {
+    axisRenderRange: { start: 0, end: 0 },
+    axisRenderWidth: 0,
+    presentedRange: { start: 0, end: 0 },
+    renderedHeight: 0,
+    renderedRange: { start: 0, end: 0 },
+    renderedVisibleSpan: 0,
+    renderedWidth: 0,
+    targetRange: { start: 0, end: 0 },
+  };
+}
+
 const state = {
   activeFile: null,
   loadToken: 0,
@@ -181,7 +195,7 @@ const state = {
   spectrogramSurfaceReadyPromise: null,
   waveformCanvas: null,
   waveformDisplaySnapshot: null as WaveformDisplaySnapshot | null,
-  waveformViewRange: { start: 0, end: 0 },
+  waveformViewport: createInitialWaveformViewportState(),
   waveformHoverClientPoint: null,
   waveformSeekPointerId: null,
   viewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
@@ -202,14 +216,8 @@ const state = {
   sessionVersion: 0,
   waveformRequestGeneration: 0,
   waveformPendingRequest: null,
-  waveformRenderRange: { start: 0, end: 0 },
-  waveformRenderWidth: 0,
-  waveformRenderHeight: 0,
-  waveformRenderVisibleSpan: 0,
   waveformSamplePlotMode: false,
   waveformRawSamplePlotMode: false,
-  waveformAxisRenderRange: { start: 0, end: 0 },
-  waveformAxisRenderWidth: 0,
   waveformZoomAnimation: null as WaveformZoomAnimationState | null,
   waveformZoomAnimationFrame: 0,
   waveformZoomAnimationToken: 0,
@@ -687,25 +695,25 @@ function createWaveformAxisSnapshot(
 
 function syncWaveformLegacyStateFromSnapshot(snapshot: WaveformDisplaySnapshot | null) {
   if (!snapshot) {
-    state.waveformRenderRange = { start: 0, end: 0 };
-    state.waveformRenderWidth = 0;
-    state.waveformRenderHeight = 0;
-    state.waveformRenderVisibleSpan = 0;
+    state.waveformViewport.renderedRange = { start: 0, end: 0 };
+    state.waveformViewport.renderedWidth = 0;
+    state.waveformViewport.renderedHeight = 0;
+    state.waveformViewport.renderedVisibleSpan = 0;
     state.waveformSamplePlotMode = false;
     state.waveformRawSamplePlotMode = false;
-    state.waveformAxisRenderRange = { start: 0, end: 0 };
-    state.waveformAxisRenderWidth = 0;
+    state.waveformViewport.axisRenderRange = { start: 0, end: 0 };
+    state.waveformViewport.axisRenderWidth = 0;
     return;
   }
 
-  state.waveformRenderRange = cloneTimeRange(snapshot.renderRange);
-  state.waveformRenderWidth = snapshot.renderWidth;
-  state.waveformRenderHeight = snapshot.renderHeight;
-  state.waveformRenderVisibleSpan = snapshot.visibleSpan;
+  state.waveformViewport.renderedRange = cloneTimeRange(snapshot.renderRange);
+  state.waveformViewport.renderedWidth = snapshot.renderWidth;
+  state.waveformViewport.renderedHeight = snapshot.renderHeight;
+  state.waveformViewport.renderedVisibleSpan = snapshot.visibleSpan;
   state.waveformSamplePlotMode = snapshot.samplePlotMode;
   state.waveformRawSamplePlotMode = snapshot.rawSamplePlotMode;
-  state.waveformAxisRenderRange = cloneTimeRange(snapshot.renderRange);
-  state.waveformAxisRenderWidth = snapshot.renderWidth;
+  state.waveformViewport.axisRenderRange = cloneTimeRange(snapshot.renderRange);
+  state.waveformViewport.axisRenderWidth = snapshot.renderWidth;
 }
 
 function setWaveformDisplaySnapshot(nextSnapshot: WaveformDisplaySnapshot | null) {
@@ -750,6 +758,23 @@ function updateWaveformDisplaySnapshotWindow(
   return snapshot;
 }
 
+function isValidWaveformRange(range: TimeRange | null | undefined) {
+  return Boolean(range)
+    && Number.isFinite(range?.start)
+    && Number.isFinite(range?.end)
+    && (range?.end ?? 0) > (range?.start ?? 0);
+}
+
+function setWaveformPresentedRange(range: TimeRange | null | undefined) {
+  if (!isValidWaveformRange(range)) {
+    state.waveformViewport.presentedRange = { start: 0, end: 0 };
+    return state.waveformViewport.presentedRange;
+  }
+
+  state.waveformViewport.presentedRange = cloneTimeRange(range as TimeRange);
+  return state.waveformViewport.presentedRange;
+}
+
 function getDisplayedWaveformRange(
   desiredDisplayRange = getWaveformRange(),
   metrics = getWaveformSnapshotDisplayMetrics(state.waveformDisplaySnapshot, desiredDisplayRange),
@@ -757,19 +782,22 @@ function getDisplayedWaveformRange(
   return metrics?.displayRange ?? desiredDisplayRange;
 }
 
+function getPresentedWaveformRange(
+  playbackTime = null,
+  smoothFollowPlaybackActive = isSmoothFollowPlaybackActive(playbackTime),
+) {
+  if (isValidWaveformRange(state.waveformViewport.presentedRange)) {
+    return cloneTimeRange(state.waveformViewport.presentedRange);
+  }
+
+  return getWaveformGroundTruthRange(playbackTime, smoothFollowPlaybackActive);
+}
+
 function getInteractiveWaveformRange(
   playbackTime = null,
   smoothFollowPlaybackActive = isSmoothFollowPlaybackActive(playbackTime),
 ) {
-  const animatedRange = state.waveformZoomAnimation?.currentRange;
-  const pendingRange = state.waveformPendingZoomAnimation?.fromRange;
-  const desiredDisplayRange = animatedRange && animatedRange.end > animatedRange.start
-    ? animatedRange
-    : pendingRange && pendingRange.end > pendingRange.start
-      ? pendingRange
-      : getWaveformRange(playbackTime, smoothFollowPlaybackActive);
-
-  return cloneTimeRange(getDisplayedWaveformRange(desiredDisplayRange));
+  return getPresentedWaveformRange(playbackTime, smoothFollowPlaybackActive);
 }
 
 function getWaveformGroundTruthRange(
@@ -1529,7 +1557,7 @@ function handleWaveformPresented(body) {
   const width = pendingRequest?.width ?? responseWidth ?? fallbackWidth;
   const height = pendingRequest?.height ?? responseHeight ?? fallbackHeight;
   state.waveformPendingRequest = null;
-  const desiredDisplayRange = getWaveformRange();
+  const desiredDisplayRange = cloneTimeRange(pendingRequest?.displayRange ?? getWaveformRange());
   const nextSnapshot: WaveformDisplaySnapshot = {
     axisTicks: createWaveformAxisSnapshot(
       { end: body.viewEnd, start: body.viewStart },
@@ -1588,10 +1616,13 @@ function handleWaveformPresented(body) {
   );
   const renderedDisplayRange = animationRange ?? pendingZoomAnimation?.fromRange ?? desiredDisplayRange;
   const renderedDisplayMetrics = getWaveformSnapshotDisplayMetrics(nextSnapshot, renderedDisplayRange);
+  const nextPresentedRange = renderedDisplayMetrics?.displayRange ?? renderedDisplayRange;
+
+  setWaveformPresentedRange(nextPresentedRange);
 
   renderWaveformAxis({
     displayMetrics: renderedDisplayMetrics,
-    displayRange: renderedDisplayMetrics?.displayRange ?? renderedDisplayRange,
+    displayRange: nextPresentedRange,
   });
 
   if (shouldStartPendingZoomAnimation && pendingZoomAnimation) {
@@ -1603,7 +1634,7 @@ function handleWaveformPresented(body) {
   applyWaveformAxisTransform(renderedDisplayRange, renderedDisplayMetrics);
   refreshWaveformHoverPresentation({
     displayMetrics: renderedDisplayMetrics,
-    displayRange: renderedDisplayMetrics?.displayRange ?? renderedDisplayRange,
+    displayRange: nextPresentedRange,
   });
 
   if (!coversDesiredDisplay && allowInitialPartialSnapshot) {
@@ -1702,16 +1733,16 @@ function ensureWaveformViewRange() {
   cancelWaveformZoomAnimation();
 
   if (duration <= 0) {
-    state.waveformViewRange = { start: 0, end: 0 };
+    setWaveformTargetRange({ start: 0, end: 0 }, duration);
     return;
   }
 
-  if (state.waveformViewRange.end <= state.waveformViewRange.start) {
-    state.waveformViewRange = { start: 0, end: duration };
+  if (state.waveformViewport.targetRange.end <= state.waveformViewport.targetRange.start) {
+    setWaveformTargetRange({ start: 0, end: duration }, duration);
     return;
   }
 
-  state.waveformViewRange = normalizeWaveformRange(state.waveformViewRange, duration);
+  setWaveformTargetRange(state.waveformViewport.targetRange, duration);
 }
 
 function getViewportPointerMetrics(targetElement, clientX) {
@@ -1750,27 +1781,47 @@ function getWaveformPointerMetricsFromEvent(event) {
 }
 
 function getTimeAtViewportClientX(clientX, targetElement, range = getInteractiveWaveformRange()) {
-  const span = Math.max(0, range.end - range.start);
   const { offsetX, width } = getViewportPointerMetrics(targetElement, clientX);
 
-  if (span <= 0 || width <= 0) {
+  if (width <= 0) {
     return 0;
   }
 
+  const frameRange = getWaveformFrameRange(range);
   const ratio = offsetX / width;
-  return clamp(range.start + ratio * span, 0, getEffectiveDuration());
+
+  if (!frameRange) {
+    const span = Math.max(0, range.end - range.start);
+    return span <= 0
+      ? 0
+      : clamp(range.start + ratio * span, 0, getEffectiveDuration());
+  }
+
+  const frameSpan = Math.max(1, frameRange.endFrame - frameRange.startFrame);
+  const framePosition = frameRange.startFrame + (ratio * frameSpan);
+  return clamp(framePosition / frameRange.sampleRate, 0, getEffectiveDuration());
 }
 
 function getTimeAtViewportPointerEvent(event, targetElement, range = getInteractiveWaveformRange()) {
-  const span = Math.max(0, range.end - range.start);
   const { offsetX, width } = getViewportPointerMetricsFromEvent(targetElement, event);
 
-  if (span <= 0 || width <= 0) {
+  if (width <= 0) {
     return 0;
   }
 
+  const frameRange = getWaveformFrameRange(range);
   const ratio = offsetX / width;
-  return clamp(range.start + ratio * span, 0, getEffectiveDuration());
+
+  if (!frameRange) {
+    const span = Math.max(0, range.end - range.start);
+    return span <= 0
+      ? 0
+      : clamp(range.start + ratio * span, 0, getEffectiveDuration());
+  }
+
+  const frameSpan = Math.max(1, frameRange.endFrame - frameRange.startFrame);
+  const framePosition = frameRange.startFrame + (ratio * frameSpan);
+  return clamp(framePosition / frameRange.sampleRate, 0, getEffectiveDuration());
 }
 
 function getTimeAtWaveformClientX(clientX, range = getInteractiveWaveformRange()) {
@@ -1831,7 +1882,7 @@ function getAdjustedLoopRange(baseRange, edge, clientX, targetElement = elements
   };
 }
 
-function syncWaveformSelection(range = getDisplayedWaveformRange()) {
+function syncWaveformSelection(range = getPresentedWaveformRange()) {
   const activeSelection = state.selectionDraft ?? state.loopRange;
   const span = Math.max(0, range.end - range.start);
   const viewportWidth = getWaveformViewportWidth();
@@ -1911,8 +1962,8 @@ function renderWaveformUi(
 ) {
   const duration = getEffectiveDuration();
   const currentTime = getCurrentPlaybackTime();
-  const range = cloneTimeRange(displayRange ?? getWaveformGroundTruthRange(currentTime));
-  const span = Math.max(0, range.end - range.start);
+  const targetRange = cloneTimeRange(displayRange ?? getWaveformGroundTruthRange(currentTime));
+  const span = Math.max(0, targetRange.end - targetRange.start);
   const zoomFactor = duration > 0 && span > 0 ? duration / span : 1;
   const loopLabelRange = state.selectionDraft ?? state.loopRange;
   const hasCommittedLoopRange = Boolean(state.loopRange);
@@ -1933,21 +1984,21 @@ function renderWaveformUi(
   elements.waveClearLoop.tabIndex = 0;
   elements.waveClearLoop.setAttribute('aria-hidden', 'false');
 
-  updateWaveformDisplayFromSnapshot(range, {
+  const presentedRange = updateWaveformDisplayFromSnapshot(targetRange, {
     currentTime,
     syncHover: true,
     syncSelection: true,
   });
   renderTransportTimelineOverview({
     currentTime,
-    displayRange: range,
+    displayRange: presentedRange ?? targetRange,
     duration,
     isPlayable: hasPlaybackTransport() && duration > 0,
   });
   if (syncSpectrogram) {
     scheduleSpectrogramRender();
   } else {
-    syncPresentedSpectrogramRange(range);
+    syncPresentedSpectrogramRange(presentedRange ?? targetRange);
   }
 }
 
@@ -2000,8 +2051,8 @@ function renderWaveformAxis(options: WaveformAxisRenderOptions = {}) {
     if (elements.waveformAxis.firstElementChild) {
       elements.waveformAxis.replaceChildren();
     }
-    state.waveformAxisRenderRange = { start: 0, end: 0 };
-    state.waveformAxisRenderWidth = 0;
+    state.waveformViewport.axisRenderRange = { start: 0, end: 0 };
+    state.waveformViewport.axisRenderWidth = 0;
     return;
   }
 
@@ -2021,8 +2072,8 @@ function renderWaveformAxis(options: WaveformAxisRenderOptions = {}) {
     }
     : createWaveformAxisSnapshot(renderRange, renderWidth, viewportWidth, snapshot.visibleSpan);
 
-  state.waveformAxisRenderRange = cloneTimeRange(axisSnapshot.renderRange);
-  state.waveformAxisRenderWidth = axisSnapshot.renderWidth;
+  state.waveformViewport.axisRenderRange = cloneTimeRange(axisSnapshot.renderRange);
+  state.waveformViewport.axisRenderWidth = axisSnapshot.renderWidth;
 
   const axisContent = getOrCreateWaveformAxisContent();
   axisContent.style.width = `${axisSnapshot.renderWidth}px`;
@@ -2090,7 +2141,7 @@ function applyTransportTimelineSnapshot(snapshot: TimelineViewportSnapshot) {
 function renderTransportTimelineOverview(
   {
     currentTime = getCurrentPlaybackTime(),
-    displayRange = getWaveformGroundTruthRange(currentTime),
+    displayRange = getPresentedWaveformRange(currentTime),
     duration = getEffectiveDuration(),
     isPlayable = hasPlaybackTransport() && duration > 0,
   }: {
@@ -2110,7 +2161,7 @@ function renderTransportTimelineOverview(
   return snapshot;
 }
 
-function applyWaveformPlaybackTime(timeSeconds, range = getWaveformGroundTruthRange(timeSeconds)) {
+function applyWaveformPlaybackTime(timeSeconds, range = getPresentedWaveformRange(timeSeconds)) {
   const span = Math.max(0, range.end - range.start);
 
   if (span <= 0 || !Number.isFinite(timeSeconds)) {
@@ -2151,6 +2202,7 @@ function updateWaveformDisplayFromSnapshot(
   const displayMetrics = getWaveformSnapshotDisplayMetrics(state.waveformDisplaySnapshot, desiredDisplayRange);
   updateWaveformDisplaySnapshotWindow(desiredDisplayRange, state.waveformDisplaySnapshot, displayMetrics);
   const displayedRange = getDisplayedWaveformRange(desiredDisplayRange, displayMetrics);
+  setWaveformPresentedRange(displayedRange);
   applyWaveformCanvasTransform(desiredDisplayRange, displayMetrics);
   applyWaveformAxisTransform(desiredDisplayRange, displayMetrics);
 
@@ -2158,7 +2210,7 @@ function updateWaveformDisplayFromSnapshot(
     syncWaveformSelection(displayedRange);
   }
 
-  applyWaveformPlaybackTime(currentTime, desiredDisplayRange);
+  applyWaveformPlaybackTime(currentTime, displayedRange);
 
   if (syncHover) {
     refreshWaveformHoverPresentation({
@@ -2302,7 +2354,6 @@ function syncFollowView(
       syncSelection: true,
       updateStoredRange: true,
     });
-    applyWaveformPlaybackTime(timeSeconds, centeredRange);
 
     if (!hasWaveformRenderCoverage(centeredRange, false)) {
       void syncWaveformView({
@@ -2317,22 +2368,31 @@ function syncFollowView(
   }
 
   if (smoothFollowPlaybackActive) {
-    updateWaveformDisplayFromSnapshot(range, {
+    const targetRange = cloneTimeRange(range);
+    const presentedRange = getPresentedWaveformRange(timeSeconds, smoothFollowPlaybackActive);
+    const canPresentTargetRange = hasWaveformRenderCoverage(targetRange, smoothFollowPlaybackActive);
+
+    setWaveformTargetRange(targetRange);
+
+    updateWaveformDisplayFromSnapshot(canPresentTargetRange ? targetRange : presentedRange, {
       currentTime: timeSeconds,
       smoothFollowPlaybackActive,
       syncHover: true,
       syncSelection: true,
-      updateStoredRange: true,
+      updateStoredRange: false,
     });
 
-    if (!hasWaveformRenderCoverage(range, smoothFollowPlaybackActive)) {
+    if (!canPresentTargetRange) {
       void syncWaveformView({
         currentTime: timeSeconds,
-        displayRange: range,
+        displayRange: targetRange,
         smoothFollowPlaybackActive,
       });
+      syncPresentedSpectrogramRange(presentedRange);
+    } else {
+      scheduleSpectrogramRender();
     }
-    scheduleSpectrogramRender();
+
     return;
   }
 
@@ -2361,10 +2421,10 @@ function syncFollowView(
   }
 
   cancelWaveformZoomAnimation();
-  state.waveformViewRange = {
+  setWaveformTargetRange({
     start: nextStart,
     end: nextStart + span,
-  };
+  }, duration);
   renderWaveformUi();
   queueVisibleSpectrogramRequest();
   void syncWaveformView({
@@ -2416,7 +2476,7 @@ async function syncWaveformView(
 async function requestWaveformViewRender(
   {
     currentTime = getCurrentPlaybackTime(),
-    displayRange = getWaveformRange(currentTime),
+    displayRange = getWaveformTargetRange(currentTime),
     force = false,
     smoothFollowPlaybackActive = isSmoothFollowPlaybackActive(currentTime),
   } = {},
@@ -2489,7 +2549,7 @@ function updateWaveformViewRange(updater, { animateZoom = false }: WaveformViewR
     return;
   }
 
-  const current = getInteractiveWaveformRange();
+  const current = getPresentedWaveformRange();
   const rawNext = updater(current);
   const nextRange = normalizeWaveformRange(rawNext, duration);
 
@@ -2500,7 +2560,7 @@ function updateWaveformViewRange(updater, { animateZoom = false }: WaveformViewR
     return;
   }
 
-  state.waveformViewRange = nextRange;
+  setWaveformTargetRange(nextRange, duration);
 
   if (animateZoom) {
     const zoomAnimation = {
@@ -2528,7 +2588,7 @@ function updateWaveformViewRange(updater, { animateZoom = false }: WaveformViewR
 
 function zoomAroundTime(anchorTime, requestedSpan) {
   const duration = getEffectiveDuration();
-  const range = getInteractiveWaveformRange();
+  const range = getPresentedWaveformRange();
   const span = range.end - range.start;
 
   if (duration <= 0 || span <= 0) {
@@ -2555,7 +2615,7 @@ function zoomAroundTime(anchorTime, requestedSpan) {
 }
 
 function zoomWaveformIn() {
-  const range = getInteractiveWaveformRange();
+  const range = getPresentedWaveformRange();
   const span = range.end - range.start;
 
   if (span <= 0) {
@@ -2566,7 +2626,7 @@ function zoomWaveformIn() {
 }
 
 function zoomWaveformOut() {
-  const range = getInteractiveWaveformRange();
+  const range = getPresentedWaveformRange();
   const span = range.end - range.start;
 
   if (span <= 0) {
@@ -2850,7 +2910,7 @@ function getWaveformSampleInfoAtClientX(
   clientX,
   {
     displayMetrics = null,
-    displayRange = getDisplayedWaveformRange(),
+    displayRange = getPresentedWaveformRange(),
   }: {
     displayMetrics?: WaveformDisplayWindowMetrics | null;
     displayRange?: TimeRange;
@@ -2970,7 +3030,7 @@ function formatWaveformSampleValue(sampleValue) {
 function refreshWaveformHoverPresentation(
   {
     displayMetrics = null,
-    displayRange = getDisplayedWaveformRange(),
+    displayRange = getPresentedWaveformRange(),
   }: {
     displayMetrics?: WaveformDisplayWindowMetrics | null;
     displayRange?: TimeRange;
@@ -3328,7 +3388,7 @@ function getWaveformViewportWidth() {
   return Math.max(1, elements.waveformViewport.clientWidth);
 }
 
-function getWaveformRange(
+function getWaveformTargetRange(
   playbackTime = null,
   smoothFollowPlaybackActive = isSmoothFollowPlaybackActive(playbackTime),
 ) {
@@ -3348,10 +3408,17 @@ function getWaveformRange(
   return centerWaveformRangeOnTime(storedRange, timeSeconds, duration);
 }
 
+function getWaveformRange(
+  playbackTime = null,
+  smoothFollowPlaybackActive = isSmoothFollowPlaybackActive(playbackTime),
+) {
+  return getWaveformTargetRange(playbackTime, smoothFollowPlaybackActive);
+}
+
 function getStoredWaveformRange(duration = getEffectiveDuration()) {
   const current = {
-    start: Number.isFinite(state.waveformViewRange.start) ? state.waveformViewRange.start : 0,
-    end: Number.isFinite(state.waveformViewRange.end) ? state.waveformViewRange.end : 0,
+    start: Number.isFinite(state.waveformViewport.targetRange.start) ? state.waveformViewport.targetRange.start : 0,
+    end: Number.isFinite(state.waveformViewport.targetRange.end) ? state.waveformViewport.targetRange.end : 0,
   };
 
   if (!Number.isFinite(duration) || duration <= 0) {
@@ -3365,13 +3432,50 @@ function getStoredWaveformRange(duration = getEffectiveDuration()) {
   return normalizeWaveformRange(current, duration);
 }
 
+function setWaveformTargetRange(range, duration = getEffectiveDuration()) {
+  if (!Number.isFinite(duration) || duration <= 0) {
+    state.waveformViewport.targetRange = { start: 0, end: 0 };
+    return state.waveformViewport.targetRange;
+  }
+
+  state.waveformViewport.targetRange = normalizeWaveformRange(range, duration);
+  return state.waveformViewport.targetRange;
+}
+
+function getWaveformRenderedRange() {
+  const snapshot = state.waveformDisplaySnapshot;
+
+  if (!snapshot || !isValidWaveformRange(snapshot.renderRange)) {
+    return null;
+  }
+
+  return cloneTimeRange(snapshot.renderRange);
+}
+
+function getWaveformFrameRange(range = getPresentedWaveformRange()) {
+  const sampleRate = Number(state.analysis?.sampleRate);
+
+  if (!isValidWaveformRange(range) || !Number.isFinite(sampleRate) || sampleRate <= 0) {
+    return null;
+  }
+
+  const startFrame = Math.max(0, Math.round(range.start * sampleRate));
+  const endFrame = Math.max(startFrame + 1, Math.round(range.end * sampleRate));
+
+  return {
+    endFrame,
+    sampleRate,
+    startFrame,
+  };
+}
+
 function commitWaveformDisplayRange(range, duration = getEffectiveDuration()) {
   if (!Number.isFinite(duration) || duration <= 0) {
     return;
   }
 
   cancelWaveformZoomAnimation();
-  state.waveformViewRange = normalizeWaveformRange(range, duration);
+  setWaveformTargetRange(range, duration);
 }
 
 function centerWaveformRangeOnTime(range, timeSeconds, duration = getEffectiveDuration()) {
@@ -3541,7 +3645,7 @@ function isRangeBuffered(targetRange, bufferRange, marginRatio = 0) {
 }
 
 function getWaveformRenderRequestMetrics(
-  displayRange = getWaveformRange(),
+  displayRange = getWaveformTargetRange(),
   smoothFollowPlaybackActive = isSmoothFollowPlaybackActive(),
 ) {
   const duration = getEffectiveDuration();
@@ -3593,9 +3697,9 @@ function getWaveformRenderRequestMetrics(
 }
 
 function getWaveformDisplayWindowMetrics(
-  displayRange = getWaveformRange(),
-  renderRange = state.waveformRenderRange,
-  renderWidth = state.waveformRenderWidth,
+  displayRange = getWaveformTargetRange(),
+  renderRange = state.waveformViewport.renderedRange,
+  renderWidth = state.waveformViewport.renderedWidth,
   viewportWidth = getWaveformViewportWidth(),
 ) {
   return getWaveformDisplayWindowMetricsPure(
@@ -3717,7 +3821,7 @@ function doesWaveformRenderCandidateCoverDisplay(
 }
 
 function hasWaveformRenderCoverage(
-  displayRange = getWaveformRange(),
+  displayRange = getWaveformTargetRange(),
   smoothFollowPlaybackActive = isSmoothFollowPlaybackActive(),
 ) {
   const { height, renderWidth } = getWaveformRenderRequestMetrics(displayRange, smoothFollowPlaybackActive);
@@ -3735,7 +3839,7 @@ function hasWaveformRenderCoverage(
 }
 
 function applyWaveformCanvasTransform(
-  displayRange = getWaveformRange(),
+  displayRange = getWaveformTargetRange(),
   displayMetrics = getWaveformSnapshotDisplayMetrics(state.waveformDisplaySnapshot, displayRange),
 ) {
   const canvas = state.waveformCanvas;
@@ -3763,7 +3867,7 @@ function applyWaveformCanvasTransform(
 }
 
 function applyWaveformAxisTransform(
-  displayRange = getWaveformRange(),
+  displayRange = getWaveformTargetRange(),
   displayMetrics = getWaveformSnapshotDisplayMetrics(state.waveformDisplaySnapshot, displayRange),
 ) {
   const axisContent = elements.waveformAxis.firstElementChild;

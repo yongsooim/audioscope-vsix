@@ -87,15 +87,16 @@ export function createAudioscopeTransportLoopController({
 
     syncFollowView(currentTime, viewportRange, smoothFollowPlaybackActive);
     const groundTruthRange = getWaveformRange(currentTime, smoothFollowPlaybackActive);
+    const presentedRange = getDisplayedWaveformRange(groundTruthRange);
 
     if (!smoothFollowPlaybackActive) {
-      refreshWaveformHoverPresentation({ displayRange: getDisplayedWaveformRange(groundTruthRange) });
+      refreshWaveformHoverPresentation({ displayRange: presentedRange });
     }
 
-    applyWaveformPlaybackTime(currentTime, groundTruthRange);
+    applyWaveformPlaybackTime(currentTime, presentedRange);
     renderTransportTimelineOverview({
       currentTime,
-      displayRange: groundTruthRange,
+      displayRange: presentedRange,
       duration,
       isPlayable,
     });

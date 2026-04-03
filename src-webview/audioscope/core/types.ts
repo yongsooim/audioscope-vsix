@@ -61,6 +61,17 @@ export interface WaveformRenderRequest {
   width: number;
 }
 
+export interface WaveformViewportState {
+  axisRenderRange: TimeRange;
+  axisRenderWidth: number;
+  presentedRange: TimeRange;
+  renderedHeight: number;
+  renderedRange: TimeRange;
+  renderedVisibleSpan: number;
+  renderedWidth: number;
+  targetRange: TimeRange;
+}
+
 export interface TimelineViewportSnapshot {
   currentRatio: number;
   currentTime: number;

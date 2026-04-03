@@ -138,7 +138,17 @@ export function createAudioscopeLifecycleController({
     state.decodeFallbackError = null;
     state.resolveDecodeFallback = null;
     state.rejectDecodeFallback = null;
-    state.waveformViewRange = { start: 0, end: 0 };
+    state.waveformViewport = {
+      ...state.waveformViewport,
+      axisRenderRange: { start: 0, end: 0 },
+      axisRenderWidth: 0,
+      presentedRange: { start: 0, end: 0 },
+      renderedHeight: 0,
+      renderedRange: { start: 0, end: 0 },
+      renderedVisibleSpan: 0,
+      renderedWidth: 0,
+      targetRange: { start: 0, end: 0 },
+    };
     state.waveformHoverClientPoint = null;
     state.waveformSeekPointerId = null;
     state.selectionDrag = null;
