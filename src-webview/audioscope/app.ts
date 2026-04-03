@@ -101,7 +101,6 @@ const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const WAVEFORM_FOLLOW_LEFT_THRESHOLD_RATIO = 0.25;
 const WAVEFORM_FOLLOW_RIGHT_THRESHOLD_RATIO = 0.75;
 const WAVEFORM_FOLLOW_TARGET_RATIO = 0.5;
-const WAVEFORM_ZOOM_ANIMATION_DURATION_MS = 140;
 const WAVEFORM_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
 const WAVEFORM_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 28;
 const WAVEFORM_RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 0.9;
@@ -132,16 +131,6 @@ const QUALITY_PRESETS = {
 
 const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
-
-type WaveformViewRangeUpdateOptions = {
-  animateZoom?: boolean;
-};
-
-type WaveformZoomAnimationState = {
-  currentRange: TimeRange;
-  fromRange: TimeRange;
-  toRange: TimeRange;
-};
 
 const elements = createAudioscopeElements();
 
@@ -220,10 +209,6 @@ const state = {
   waveformPendingRequest: null,
   waveformSamplePlotMode: false,
   waveformRawSamplePlotMode: false,
-  waveformZoomAnimation: null as WaveformZoomAnimationState | null,
-  waveformZoomAnimationFrame: 0,
-  waveformZoomAnimationToken: 0,
-  waveformPendingZoomAnimation: null as { fromRange: TimeRange; toRange: TimeRange } | null,
   playbackFrame: 0,
   waveformFrame: 0,
   spectrogramFrame: 0,
@@ -345,6 +330,7 @@ const {
   viewportRatioMax: VIEWPORT_RATIO_MAX,
   viewportRatioMin: VIEWPORT_RATIO_MIN,
   viewportSplitStep: VIEWPORT_SPLIT_STEP,
+  waveformFollowTargetRatio: WAVEFORM_FOLLOW_TARGET_RATIO,
   waveformZoomStepFactor: WAVEFORM_ZOOM_STEP_FACTOR,
 });
 
@@ -1609,15 +1595,7 @@ function handleWaveformPresented(body) {
   }
 
   setWaveformDisplaySnapshot(nextSnapshot);
-  const activeZoomAnimation = state.waveformZoomAnimation;
-  const pendingZoomAnimation = state.waveformPendingZoomAnimation;
-  const animationRange = activeZoomAnimation?.currentRange ?? null;
-  const shouldStartPendingZoomAnimation = Boolean(
-    pendingZoomAnimation
-    && isSameWaveformRange(pendingZoomAnimation.toRange, desiredDisplayRange)
-    && doesWaveformSnapshotPhysicallyCoverDisplay(pendingZoomAnimation.toRange, nextSnapshot),
-  );
-  const renderedDisplayRange = animationRange ?? pendingZoomAnimation?.fromRange ?? desiredDisplayRange;
+  const renderedDisplayRange = desiredDisplayRange;
   const renderedDisplayMetrics = getWaveformSnapshotDisplayMetrics(nextSnapshot, renderedDisplayRange);
   const nextPresentedRange = renderedDisplayMetrics?.displayRange ?? renderedDisplayRange;
 
@@ -1627,11 +1605,6 @@ function handleWaveformPresented(body) {
     displayMetrics: renderedDisplayMetrics,
     displayRange: nextPresentedRange,
   });
-
-  if (shouldStartPendingZoomAnimation && pendingZoomAnimation) {
-    startWaveformZoomAnimation(pendingZoomAnimation.fromRange, pendingZoomAnimation.toRange);
-    return;
-  }
 
   applyWaveformCanvasTransform(renderedDisplayRange, renderedDisplayMetrics);
   applyWaveformAxisTransform(renderedDisplayRange, renderedDisplayMetrics);
@@ -2182,6 +2155,7 @@ function renderTransportTimelineOverview(
 
 function applyWaveformPlaybackTime(timeSeconds, range = getPresentedWaveformRange(timeSeconds)) {
   const span = Math.max(0, range.end - range.start);
+  const duration = getEffectiveDuration();
 
   if (span <= 0 || !Number.isFinite(timeSeconds)) {
     elements.waveformProgress.style.width = '0%';
@@ -2193,7 +2167,22 @@ function applyWaveformPlaybackTime(timeSeconds, range = getPresentedWaveformRang
     return;
   }
 
-  const progressPercent = clamp(((timeSeconds - range.start) / span) * 100, 0, 100);
+  let progressPercent = clamp(((timeSeconds - range.start) / span) * 100, 0, 100);
+
+  if (
+    state.followPlayback
+    && isPlaybackActive()
+    && !isFollowPlaybackInteractionActive()
+    && duration > 0
+  ) {
+    const targetStart = clamp(
+      timeSeconds - (span * WAVEFORM_FOLLOW_TARGET_RATIO),
+      0,
+      Math.max(0, duration - span),
+    );
+    progressPercent = clamp(((timeSeconds - targetStart) / span) * 100, 0, 100);
+  }
+
   const isCursorVisible = timeSeconds >= range.start && timeSeconds <= range.end;
 
   elements.waveformProgress.style.width = `${progressPercent}%`;
@@ -2247,20 +2236,6 @@ function isSameWaveformRange(left: TimeRange | null | undefined, right: TimeRang
     && Math.abs((left?.end ?? 0) - (right?.end ?? 0)) <= SPECTROGRAM_RANGE_EPSILON_SECONDS;
 }
 
-function easeOutWaveformZoom(progress: number) {
-  const clampedProgress = clamp(progress, 0, 1);
-  return 1 - ((1 - clampedProgress) ** 3);
-}
-
-function interpolateWaveformRange(fromRange: TimeRange, toRange: TimeRange, progress: number): TimeRange {
-  const easedProgress = easeOutWaveformZoom(progress);
-
-  return {
-    start: fromRange.start + ((toRange.start - fromRange.start) * easedProgress),
-    end: fromRange.end + ((toRange.end - fromRange.end) * easedProgress),
-  };
-}
-
 function doesWaveformSnapshotPhysicallyCoverDisplay(
   displayRange: TimeRange,
   snapshot: WaveformDisplaySnapshot | null = state.waveformDisplaySnapshot,
@@ -2282,71 +2257,8 @@ function doesWaveformSnapshotPhysicallyCoverDisplay(
     && snapshot.renderRange.end >= (displayRange.end - toleranceSeconds);
 }
 
-function cancelWaveformZoomAnimation({ clearPending = true } = {}) {
-  state.waveformZoomAnimationToken += 1;
-
-  if (state.waveformZoomAnimationFrame) {
-    window.cancelAnimationFrame(state.waveformZoomAnimationFrame);
-    state.waveformZoomAnimationFrame = 0;
-  }
-
-  state.waveformZoomAnimation = null;
-
-  if (clearPending) {
-    state.waveformPendingZoomAnimation = null;
-  }
-}
-
-function startWaveformZoomAnimation(fromRange: TimeRange, toRange: TimeRange) {
-  cancelWaveformZoomAnimation({ clearPending: false });
-  state.waveformPendingZoomAnimation = null;
-
-  if (isSameWaveformRange(fromRange, toRange)) {
-    renderWaveformUi({ syncSpectrogram: false });
-    return;
-  }
-
-  state.waveformZoomAnimationToken += 1;
-  const animationToken = state.waveformZoomAnimationToken;
-  const startedAt = performance.now();
-
-  const renderFrame = (range: TimeRange) => {
-    state.waveformZoomAnimation = {
-      currentRange: cloneTimeRange(range),
-      fromRange: cloneTimeRange(fromRange),
-      toRange: cloneTimeRange(toRange),
-    };
-    renderWaveformUi({
-      displayRange: range,
-      syncSpectrogram: false,
-    });
-  };
-
-  renderFrame(fromRange);
-
-  const step = (now: number) => {
-    if (state.waveformZoomAnimationToken !== animationToken) {
-      return;
-    }
-
-    const progress = WAVEFORM_ZOOM_ANIMATION_DURATION_MS <= 0
-      ? 1
-      : clamp((now - startedAt) / WAVEFORM_ZOOM_ANIMATION_DURATION_MS, 0, 1);
-    const nextRange = interpolateWaveformRange(fromRange, toRange, progress);
-
-    renderFrame(nextRange);
-
-    if (progress >= 1) {
-      state.waveformZoomAnimationFrame = 0;
-      state.waveformZoomAnimation = null;
-      renderWaveformUi({ syncSpectrogram: false });
-      return;
-    }
-
-    state.waveformZoomAnimationFrame = window.requestAnimationFrame(step);
-  };
-
-  state.waveformZoomAnimationFrame = window.requestAnimationFrame(step);
+function cancelWaveformZoomAnimation() {
+  // Waveform zoom transitions are intentionally disabled.
 }
 
 function syncFollowView(
@@ -2561,7 +2473,7 @@ async function requestWaveformViewRender(
   });
 }
 
-function updateWaveformViewRange(updater, { animateZoom = false }: WaveformViewRangeUpdateOptions = {}) {
+function updateWaveformViewRange(updater) {
   const duration = getEffectiveDuration();
 
   if (duration <= 0) {
@@ -2581,26 +2493,8 @@ function updateWaveformViewRange(updater, { animateZoom = false }: WaveformViewR
 
   setWaveformTargetRange(nextRange, duration);
 
-  if (animateZoom) {
-    const zoomAnimation = {
-      fromRange: cloneTimeRange(current),
-      toRange: cloneTimeRange(nextRange),
-    };
-
-    if (doesWaveformSnapshotPhysicallyCoverDisplay(nextRange)) {
-      startWaveformZoomAnimation(zoomAnimation.fromRange, zoomAnimation.toRange);
-    } else {
-      cancelWaveformZoomAnimation({ clearPending: false });
-      state.waveformPendingZoomAnimation = zoomAnimation;
-      renderWaveformUi({
-        displayRange: current,
-        syncSpectrogram: false,
-      });
-    }
-  } else {
-    cancelWaveformZoomAnimation();
-    renderWaveformUi();
-  }
+  cancelWaveformZoomAnimation();
+  renderWaveformUi();
   queueVisibleSpectrogramRequest();
   void syncWaveformView();
 }
@@ -2613,7 +2507,12 @@ function zoomAroundTime(anchorTime, requestedSpan) {
     return;
   }
 
-  const nextRange = getZoomedWaveformRange(anchorTime, requestedSpan, range);
+  const nextRange = getZoomedWaveformRange(
+    anchorTime,
+    requestedSpan,
+    range,
+    state.followPlayback ? WAVEFORM_FOLLOW_TARGET_RATIO : null,
+  );
   const nextSpan = nextRange.end - nextRange.start;
 
   if (Math.abs(nextSpan - span) <= 1e-9) {
@@ -2623,7 +2522,7 @@ function zoomAroundTime(anchorTime, requestedSpan) {
   updateWaveformViewRange(() => ({
     start: nextRange.start,
     end: nextRange.end,
-  }), { animateZoom: true });
+  }));
 }
 
 function zoomWaveformIn() {
@@ -2655,7 +2554,7 @@ function resetWaveformZoom() {
     return;
   }
 
-  updateWaveformViewRange(() => ({ start: 0, end: duration }), { animateZoom: true });
+  updateWaveformViewRange(() => ({ start: 0, end: duration }));
 }
 
 function disableFollowPlayback() {
@@ -3528,7 +3427,12 @@ function snapWaveformTargetRangeToFrames(range, duration = getEffectiveDuration(
   };
 }
 
-function getZoomedWaveformRange(anchorTime, requestedSpan, baseRange = getPresentedWaveformRange()) {
+function getZoomedWaveformRange(
+  anchorTime,
+  requestedSpan,
+  baseRange = getPresentedWaveformRange(),
+  anchorRatioOverride = null,
+) {
   const duration = getEffectiveDuration();
   const sampleRate = getWaveformSampleRate();
   const normalizedBaseRange = normalizeWaveformRange(baseRange, duration);
@@ -3566,7 +3470,9 @@ function getZoomedWaveformRange(anchorTime, requestedSpan, baseRange = getPresen
     minVisibleFrames,
     durationFrames,
   );
-  const anchorRatio = clamp((anchorFrame - baseStartFrame) / baseSpanFrames, 0, 1);
+  const anchorRatio = anchorRatioOverride === null
+    ? clamp((anchorFrame - baseStartFrame) / baseSpanFrames, 0, 1)
+    : clamp(anchorRatioOverride, 0, 1);
   const nextStartFrame = clamp(
     anchorFrame - Math.round(nextSpanFrames * anchorRatio),
     0,
@@ -3581,6 +3487,14 @@ function getZoomedWaveformRange(anchorTime, requestedSpan, baseRange = getPresen
 }
 
 function getPreferredWaveformZoomAnchorTime(fallbackTime) {
+  if (state.followPlayback) {
+    const currentPlaybackTime = getCurrentPlaybackTime();
+
+    if (Number.isFinite(currentPlaybackTime)) {
+      return snapTimeToWaveformFrame(currentPlaybackTime);
+    }
+  }
+
   const point = state.waveformHoverClientPoint;
 
   if (point && Number.isFinite(point.clientX)) {

@@ -13,6 +13,7 @@ interface AudioscopeViewportControllerDeps {
     anchorTime: number,
     requestedSpan: number,
     baseRange: { start: number; end: number },
+    anchorRatioOverride?: number | null,
   ) => { start: number; end: number };
   getTimeAtViewportClientX: (
     clientX: number,
@@ -24,11 +25,11 @@ interface AudioscopeViewportControllerDeps {
   state: any;
   updateWaveformViewRange: (
     updater: (current: { start: number; end: number }) => { start: number; end: number },
-    options?: { animateZoom?: boolean },
   ) => void;
   viewportRatioMax: number;
   viewportRatioMin: number;
   viewportSplitStep: number;
+  waveformFollowTargetRatio: number;
   waveformZoomStepFactor: number;
 }
 
@@ -49,6 +50,7 @@ export function createAudioscopeViewportController({
   viewportRatioMax,
   viewportRatioMin,
   viewportSplitStep,
+  waveformFollowTargetRatio,
   waveformZoomStepFactor,
 }: AudioscopeViewportControllerDeps) {
   function normalizeViewportSplitRatio(value) {
@@ -281,7 +283,10 @@ export function createAudioscopeViewportController({
     const horizontalMagnitude = Math.abs(deltaX);
     const verticalMagnitude = Math.abs(deltaY);
     const intent = verticalMagnitude >= horizontalMagnitude ? 'zoom' : 'pan';
-    const shouldPreserveFollowZoom = state.followPlayback && intent === 'zoom' && verticalMagnitude > 0.01;
+    const shouldPreserveFollowZoom = state.followPlayback
+      && state.audioTransport?.isPlaying?.() === true
+      && intent === 'zoom'
+      && verticalMagnitude > 0.01;
     const pointerRatio = getViewportPointerRatio(event.clientX, targetElement);
     const currentPlaybackTime = getCurrentPlaybackTime();
     const anchorTime = shouldPreserveFollowZoom && Number.isFinite(currentPlaybackTime)
@@ -309,7 +314,12 @@ export function createAudioscopeViewportController({
           return current;
         }
 
-        const nextRange = getZoomedWaveformRange(anchorTime, nextSpan, current);
+        const nextRange = getZoomedWaveformRange(
+          anchorTime,
+          nextSpan,
+          current,
+          shouldPreserveFollowZoom ? waveformFollowTargetRatio : null,
+        );
         nextStart = nextRange.start;
         nextSpan = nextRange.end - nextRange.start;
       }
@@ -323,8 +333,6 @@ export function createAudioscopeViewportController({
         start: nextStart,
         end: nextStart + nextSpan,
       };
-    }, {
-      animateZoom: intent === 'zoom' && verticalMagnitude > 0.01,
     });
   }
 
