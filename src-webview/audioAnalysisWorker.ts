@@ -32,11 +32,11 @@ const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SPECTROGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_ROW_BLOCK_SIZE = 32;
+const WEBGPU_LINEAR_WORKGROUP_SIZE = 64;
 const MAX_TILE_CACHE_ENTRIES = 24;
 const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
 const ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR = true;
 const ENABLE_EXPERIMENTAL_WEBGPU_SPECTROGRAM_COMPUTE = true;
-const MAX_WEBGPU_COMPUTE_FFT_SIZE = 4096;
 const WEBGPU_TILE_TEXTURE_FORMAT = 'rgba8unorm';
 const LOW_FREQUENCY_ENHANCEMENT_MAX_FREQUENCY = 1200;
 const MIXED_FREQUENCY_PIVOT_HZ = 1000;
@@ -221,13 +221,16 @@ struct ComputeParams {
 @group(0) @binding(2) var<storage, read_write> outputSpectrum: array<vec2<f32>>;
 
 @compute @workgroup_size(64)
-fn prepareSpectrogramInput(@builtin(global_invocation_id) globalId: vec3<u32>) {
+fn prepareSpectrogramInput(
+  @builtin(global_invocation_id) globalId: vec3<u32>,
+  @builtin(num_workgroups) numWorkgroups: vec3<u32>,
+) {
   let fftSize = params.header0.x;
   let columnCount = params.header0.y;
   let sampleCount = params.header0.w;
   let decimationFactor = max(params.header1.z, 1u);
   let totalSamples = fftSize * columnCount;
-  let linearIndex = globalId.x;
+  let linearIndex = globalId.x + (globalId.y * numWorkgroups.x * 64u);
 
   if (linearIndex >= totalSamples) {
     return;
@@ -301,7 +304,10 @@ fn complexMul(left: vec2<f32>, right: vec2<f32>) -> vec2<f32> {
 }
 
 @compute @workgroup_size(64)
-fn runSpectrogramFftStage(@builtin(global_invocation_id) globalId: vec3<u32>) {
+fn runSpectrogramFftStage(
+  @builtin(global_invocation_id) globalId: vec3<u32>,
+  @builtin(num_workgroups) numWorkgroups: vec3<u32>,
+) {
   let fftSize = params.header0.x;
   let columnCount = params.header0.y;
   let stageIndex = params.header1.x;
@@ -309,7 +315,7 @@ fn runSpectrogramFftStage(@builtin(global_invocation_id) globalId: vec3<u32>) {
   let l = fftSize >> (stageIndex + 1u);
   let butterfliesPerColumn = fftSize / 2u;
   let totalButterflies = butterfliesPerColumn * columnCount;
-  let butterflyIndex = globalId.x;
+  let butterflyIndex = globalId.x + (globalId.y * numWorkgroups.x * 64u);
 
   if (butterflyIndex >= totalButterflies || l == 0u) {
     return;
@@ -1550,6 +1556,30 @@ function createGpuBufferWithData(device: any, usage: number, data: ArrayBufferVi
   buffer.unmap();
   return buffer;
 }
+
+function getMaxComputeWorkgroupsPerDimension(device: any): number {
+  const limit = Number(device?.limits?.maxComputeWorkgroupsPerDimension);
+  return Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 65535;
+}
+
+function getLinearComputeDispatchSize(
+  totalInvocations: number,
+  device: any,
+  workgroupSize: number = WEBGPU_LINEAR_WORKGROUP_SIZE,
+): [number, number] {
+  const safeWorkgroupSize = Math.max(1, Math.floor(workgroupSize));
+  const totalGroups = Math.max(1, Math.ceil(Math.max(0, totalInvocations) / safeWorkgroupSize));
+  const maxGroupsPerDimension = getMaxComputeWorkgroupsPerDimension(device);
+  const xGroups = Math.max(1, Math.min(totalGroups, maxGroupsPerDimension));
+  const yGroups = Math.max(1, Math.ceil(totalGroups / xGroups));
+
+  if (yGroups > maxGroupsPerDimension) {
+    throw new Error(`WebGPU dispatch exceeds device limits (${totalGroups} groups required).`);
+  }
+
+  return [xGroups, yGroups];
+}
+
 function resizeWebGpuSurface(): void {
   if (!surfaceState.webGpu || !surfaceState.canvas) {
     return;
@@ -3233,6 +3263,14 @@ async function renderStftTileWithWebGpu(
     && 'hasEnhancedRows' in layoutResource
     && layoutResource.hasEnhancedRows
     && plan.decimationFactor > 1;
+  const [inputDispatchX, inputDispatchY] = getLinearComputeDispatchSize(
+    columnCount * plan.fftSize,
+    webGpu.device,
+  );
+  const [fftDispatchX, fftDispatchY] = getLinearComputeDispatchSize(
+    columnCount * (plan.fftSize / 2),
+    webGpu.device,
+  );
 
   try {
     writeBufferAtOffset(computeState.paramBuffer, 0, createStftComputeParamsData(plan, {
@@ -3293,11 +3331,11 @@ async function renderStftTileWithWebGpu(
 
     computePass.setPipeline(computeState.inputPipeline);
     computePass.setBindGroup(0, computeState.baseInputBindGroup, [0]);
-    computePass.dispatchWorkgroups(Math.ceil((columnCount * plan.fftSize) / 64));
+    computePass.dispatchWorkgroups(inputDispatchX, inputDispatchY);
 
     if (useLowFrequencyEnhancement && computeState.lowInputBindGroup) {
       computePass.setBindGroup(0, computeState.lowInputBindGroup, [computeState.paramStride]);
-      computePass.dispatchWorkgroups(Math.ceil((columnCount * plan.fftSize) / 64));
+      computePass.dispatchWorkgroups(inputDispatchX, inputDispatchY);
     }
 
     computePass.setPipeline(computeState.fftPipeline);
@@ -3308,7 +3346,7 @@ async function renderStftTileWithWebGpu(
         stageIndex % 2 === 0 ? computeState.fftBindGroupForward : computeState.fftBindGroupReverse,
         [paramOffset],
       );
-      computePass.dispatchWorkgroups(Math.ceil((columnCount * (plan.fftSize / 2)) / 64));
+      computePass.dispatchWorkgroups(fftDispatchX, fftDispatchY);
     }
 
     if (useLowFrequencyEnhancement) {
@@ -3319,7 +3357,7 @@ async function renderStftTileWithWebGpu(
           stageIndex % 2 === 0 ? computeState.lowStageBindGroupForward : computeState.lowStageBindGroupReverse,
           [paramOffset],
         );
-        computePass.dispatchWorkgroups(Math.ceil((columnCount * (plan.fftSize / 2)) / 64));
+        computePass.dispatchWorkgroups(fftDispatchX, fftDispatchY);
       }
     }
 
