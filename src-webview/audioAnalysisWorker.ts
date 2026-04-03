@@ -9,6 +9,7 @@ const MAX_FREQUENCY = 20000;
 const ROW_BUCKET_SIZE = 16;
 const VISIBLE_ROW_OVERSAMPLE = 1.35;
 const LIBROSA_DEFAULT_MEL_BAND_COUNT = 128;
+const MEL_BAND_COUNT_OPTIONS = [64, 128, 256, 512];
 
 const QUALITY_PRESETS = {
   balanced: {
@@ -33,8 +34,8 @@ const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SPECTROGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_ROW_BLOCK_SIZE = 32;
-const WEBGPU_OVERVIEW_TILE_SUBMIT_BATCH_SIZE = 2;
-const WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE = 4;
+const WEBGPU_OVERVIEW_TILE_SUBMIT_BATCH_SIZE = 4;
+const WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE = 8;
 const WEBGPU_LINEAR_WORKGROUP_SIZE = 64;
 const WEBGPU_STFT_PARAM_ENTRIES_PER_SLOT = 32;
 const WEBGPU_STFT_SCRATCH_SLOT_COUNT = WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE;
@@ -656,6 +657,7 @@ interface SpectrogramRequest {
   frequencyScale?: FrequencyScale;
   generation?: number;
   maxDecibels?: number;
+  melBandCount?: number;
   minDecibels?: number;
   overlapRatio?: number;
   pixelHeight?: number;
@@ -712,6 +714,7 @@ interface RenderRequestPlan {
   hopSamples: number;
   hopSeconds: number;
   maxDecibels: number;
+  melBandCount: number;
   minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
@@ -3976,12 +3979,13 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
   const frequencyScale = getEffectiveFrequencyScale(analysisType, request?.frequencyScale);
   const fftSize = analysisType === 'scalogram' ? 0 : normalizeFftSize(request?.fftSize);
   const overlapRatio = analysisType === 'scalogram' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
+  const melBandCount = normalizeMelBandCount(request?.melBandCount);
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
   const rowOversample = requestKind === 'visible' && analysisType !== 'scalogram'
     ? VISIBLE_ROW_OVERSAMPLE
     : 1;
   const rowCount = analysisType === 'mel'
-    ? LIBROSA_DEFAULT_MEL_BAND_COUNT
+    ? melBandCount
     : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
@@ -4028,6 +4032,7 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     hopSamples,
     hopSeconds: secondsPerColumn,
     maxDecibels: dbWindow.maxDecibels,
+    melBandCount,
     minDecibels: dbWindow.minDecibels,
     overlapRatio,
     pixelHeight,
@@ -4066,6 +4071,7 @@ function createLayerReadyBody(plan: RenderRequestPlan) {
     hopSamples: plan.hopSamples,
     hopSeconds: plan.hopSeconds,
     maxDecibels: plan.maxDecibels,
+    melBandCount: plan.melBandCount,
     minDecibels: plan.minDecibels,
     overlapRatio: plan.overlapRatio,
     pixelHeight: plan.pixelHeight,
@@ -4098,6 +4104,7 @@ function isEquivalentPlan(left: RenderRequestPlan | null, right: RenderRequestPl
     && left.frequencyScale === right.frequencyScale
     && left.minDecibels === right.minDecibels
     && left.maxDecibels === right.maxDecibels
+    && left.melBandCount === right.melBandCount
     && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-6
     && Math.abs(left.viewStart - right.viewStart) <= 1e-6
     && Math.abs(left.viewEnd - right.viewEnd) <= 1e-6;
@@ -4111,6 +4118,13 @@ function normalizeFftSize(value: unknown): number {
 function normalizeOverlapRatio(value: unknown): number {
   const numericValue = Number(value);
   return OVERLAP_RATIO_OPTIONS.includes(numericValue) ? numericValue : 0.75;
+}
+
+function normalizeMelBandCount(value: unknown): number {
+  const numericValue = Number(value);
+  return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
+    ? numericValue
+    : LIBROSA_DEFAULT_MEL_BAND_COUNT;
 }
 
 function ensureSpectrogramOutputCapacity(module: WaveCoreModule, byteLength: number): void {

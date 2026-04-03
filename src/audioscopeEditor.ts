@@ -399,7 +399,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                 aria-label="Toggle spectrogram settings"
               >Settings</button>
               <div id="spectrogram-meta-controls" class="spectrogram-meta-controls" hidden>
-                <label class="spectrogram-control">
+                <label id="spectrogram-type-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Type</span>
                   <select id="spectrogram-type-select" class="spectrogram-control-select" aria-label="Spectrogram analysis type">
                     <option value="spectrogram" selected>Spectrogram</option>
@@ -407,7 +407,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="scalogram">Scalogram</option>
                   </select>
                 </label>
-                <label class="spectrogram-control">
+                <label id="spectrogram-fft-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">FFT</span>
                   <select id="spectrogram-fft-select" class="spectrogram-control-select" aria-label="Spectrogram FFT size">
                     <option value="1024">1024</option>
@@ -417,7 +417,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="16384">16384</option>
                   </select>
                 </label>
-                <label class="spectrogram-control">
+                <label id="spectrogram-overlap-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Overlap</span>
                   <select id="spectrogram-overlap-select" class="spectrogram-control-select" aria-label="Spectrogram overlap ratio">
                     <option value="0.5">50%</option>
@@ -426,7 +426,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="0.9375">93.75%</option>
                   </select>
                 </label>
-                <label class="spectrogram-control">
+                <label id="spectrogram-scale-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Scale</span>
                   <select id="spectrogram-scale-select" class="spectrogram-control-select" aria-label="Spectrogram frequency scale">
                     <option value="log" selected>Log</option>
@@ -434,7 +434,16 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="linear">Linear</option>
                   </select>
                 </label>
-                <label class="spectrogram-control">
+                <label id="spectrogram-mel-bands-control" class="spectrogram-control" hidden>
+                  <span class="spectrogram-control-label">Bands</span>
+                  <select id="spectrogram-mel-bands-select" class="spectrogram-control-select" aria-label="Mel spectrogram band count">
+                    <option value="64">64</option>
+                    <option value="128" selected>128</option>
+                    <option value="256">256</option>
+                    <option value="512">512</option>
+                  </select>
+                </label>
+                <label id="spectrogram-distribution-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Curve</span>
                   <select id="spectrogram-distribution-select" class="spectrogram-control-select" aria-label="Spectrogram colormap distribution">
                     <option value="balanced" selected>Balanced</option>
@@ -442,7 +451,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="contrast">Contrast</option>
                   </select>
                 </label>
-                <div class="spectrogram-control spectrogram-control-slider">
+                <div id="spectrogram-db-range-control" class="spectrogram-control spectrogram-control-slider">
                   <span class="spectrogram-control-label">Min/Max</span>
                   <span id="spectrogram-db-range-group" class="spectrogram-control-slider-group spectrogram-control-slider-group-dual">
                     <span class="spectrogram-control-range-dual" aria-hidden="true"></span>

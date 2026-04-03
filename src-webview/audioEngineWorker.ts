@@ -51,6 +51,7 @@ const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
 const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
 const ROW_BUCKET_SIZE = 16;
 const LIBROSA_DEFAULT_MEL_BAND_COUNT = 128;
+const MEL_BAND_COUNT_OPTIONS = [64, 128, 256, 512];
 const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
 const SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 28;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
@@ -240,6 +241,7 @@ interface EngineState {
     fftSize: number;
     frequencyScale: SpectrogramFrequencyScale;
     maxDecibels: number;
+    melBandCount: number;
     minDecibels: number;
     overlapRatio: number;
   };
@@ -298,6 +300,7 @@ const state: EngineState = {
     fftSize: 4096,
     frequencyScale: 'log',
     maxDecibels: 0,
+    melBandCount: LIBROSA_DEFAULT_MEL_BAND_COUNT,
     minDecibels: -80,
     overlapRatio: 0.75,
   },
@@ -615,12 +618,20 @@ function normalizeSpectrogramDbWindow(
   return { minDecibels, maxDecibels };
 }
 
+function normalizeMelBandCount(value: unknown): number {
+  const numericValue = Number(value);
+  return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
+    ? numericValue
+    : LIBROSA_DEFAULT_MEL_BAND_COUNT;
+}
+
 function handleSpectrogramConfig(config: {
   analysisType: SpectrogramAnalysisType;
   colormapDistribution: SpectrogramColormapDistribution;
   fftSize: number;
   frequencyScale: SpectrogramFrequencyScale;
   maxDecibels: number;
+  melBandCount: number;
   minDecibels: number;
   overlapRatio: number;
 }): void {
@@ -639,6 +650,7 @@ function handleSpectrogramConfig(config: {
   const nextFrequencyScale = nextAnalysisType === 'spectrogram'
     ? (config.frequencyScale === 'linear' || config.frequencyScale === 'mixed' ? config.frequencyScale : 'log')
     : 'log';
+  const nextMelBandCount = normalizeMelBandCount(config.melBandCount);
   const nextDbWindow = normalizeSpectrogramDbWindow(
     config.minDecibels,
     config.maxDecibels,
@@ -651,6 +663,7 @@ function handleSpectrogramConfig(config: {
     || nextFftSize !== state.spectrogramConfig.fftSize
     || nextDbWindow.minDecibels !== state.spectrogramConfig.minDecibels
     || nextDbWindow.maxDecibels !== state.spectrogramConfig.maxDecibels
+    || nextMelBandCount !== state.spectrogramConfig.melBandCount
     || Math.abs(nextOverlapRatio - state.spectrogramConfig.overlapRatio) > 1e-9
     || nextFrequencyScale !== state.spectrogramConfig.frequencyScale;
 
@@ -665,6 +678,7 @@ function handleSpectrogramConfig(config: {
     fftSize: nextFftSize,
     frequencyScale: nextFrequencyScale,
     maxDecibels: nextDbWindow.maxDecibels,
+    melBandCount: nextMelBandCount,
     minDecibels: nextDbWindow.minDecibels,
     overlapRatio: nextOverlapRatio,
   };
@@ -1455,7 +1469,7 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
   const rowOversample = analysisType === 'scalogram' ? 1 : VISIBLE_ROW_OVERSAMPLE;
   const rowCount = analysisType === 'mel'
-    ? LIBROSA_DEFAULT_MEL_BAND_COUNT
+    ? normalizeMelBandCount(state.spectrogramConfig.melBandCount)
     : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,

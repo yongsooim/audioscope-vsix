@@ -52,6 +52,7 @@ const VIEWPORT_RATIO_MIN = 0;
 const LOOP_HANDLE_WIDTH_PX = 8;
 const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. Rebuild or reinstall audioscope to restore metadata and decoding.';
 const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
+const SPECTROGRAM_MEL_BAND_OPTIONS = [64, 128, 256, 512];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
@@ -94,6 +95,7 @@ type SpectrogramVisibleRequest = {
   frequencyScale: SpectrogramFrequencyScale;
   generation: number;
   maxDecibels: number;
+  melBandCount: number;
   minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
@@ -217,6 +219,7 @@ const state = {
     fftSize: 4096,
     frequencyScale: 'log' as SpectrogramFrequencyScale,
     maxDecibels: 0,
+    melBandCount: 128,
     minDecibels: -80,
     overlapRatio: 0.75,
   },
@@ -422,6 +425,11 @@ function normalizeSpectrogramDbWindow(
 function normalizeSpectrogramFftSize(value: unknown): number {
   const numericValue = Number(value);
   return SPECTROGRAM_FFT_OPTIONS.includes(numericValue) ? numericValue : 4096;
+}
+
+function normalizeSpectrogramMelBandCount(value: unknown): number {
+  const numericValue = Number(value);
+  return SPECTROGRAM_MEL_BAND_OPTIONS.includes(numericValue) ? numericValue : 128;
 }
 
 function normalizeSpectrogramFrequencyScale(value: unknown): SpectrogramFrequencyScale {
@@ -1149,6 +1157,7 @@ function renderSpectrogramScale(): void {
 function renderSpectrogramMeta(): void {
   const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
   const supportsScale = analysisType === 'spectrogram';
+  const supportsMelBands = analysisType === 'mel';
   const isScalogram = analysisType === 'scalogram';
   const dbWindow = normalizeSpectrogramDbWindow(
     state.spectrogramConfig.minDecibels,
@@ -1160,13 +1169,21 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramFftSelect.value = String(state.spectrogramConfig.fftSize);
   elements.spectrogramOverlapSelect.value = String(state.spectrogramConfig.overlapRatio);
   elements.spectrogramScaleSelect.value = normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale);
+  elements.spectrogramMelBandsSelect.value = String(
+    normalizeSpectrogramMelBandCount(state.spectrogramConfig.melBandCount),
+  );
   elements.spectrogramDistributionSelect.value = normalizeSpectrogramColormapDistribution(
     state.spectrogramConfig.colormapDistribution,
   );
 
+  elements.spectrogramFftControl.hidden = isScalogram;
+  elements.spectrogramOverlapControl.hidden = isScalogram;
+  elements.spectrogramScaleControl.hidden = !supportsScale;
+  elements.spectrogramMelBandsControl.hidden = !supportsMelBands;
   elements.spectrogramFftSelect.disabled = isScalogram;
   elements.spectrogramOverlapSelect.disabled = isScalogram;
   elements.spectrogramScaleSelect.disabled = !supportsScale;
+  elements.spectrogramMelBandsSelect.disabled = !supportsMelBands;
   elements.spectrogramMinDbSlider.value = String(dbWindow.minDecibels);
   elements.spectrogramMaxDbSlider.value = String(dbWindow.maxDecibels);
   const rangeStartPercent = ((dbWindow.minDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.min)
@@ -1205,6 +1222,7 @@ function getEffectiveSpectrogramRenderConfig() {
       ? normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale)
       : 'log' as SpectrogramFrequencyScale,
     maxDecibels: dbWindow.maxDecibels,
+    melBandCount: normalizeSpectrogramMelBandCount(state.spectrogramConfig.melBandCount),
     minDecibels: dbWindow.minDecibels,
     overlapRatio: normalizeSpectrogramOverlapRatio(state.spectrogramConfig.overlapRatio),
   };
@@ -1329,6 +1347,7 @@ function isCompatibleVisibleRequest(
     && activeRequest.fftSize === renderConfig.fftSize
     && activeRequest.frequencyScale === renderConfig.frequencyScale
     && activeRequest.maxDecibels === renderConfig.maxDecibels
+    && activeRequest.melBandCount === renderConfig.melBandCount
     && activeRequest.minDecibels === renderConfig.minDecibels
     && Math.abs(activeRequest.overlapRatio - renderConfig.overlapRatio) <= 1e-6
     && Math.abs(activeRequest.pixelWidth - size.pixelWidth) <= 1
@@ -1423,19 +1442,20 @@ function syncSpectrogramView({ force = false } = {}): void {
   const previousGeneration = state.analysis.generation;
   const generation = previousGeneration + 1;
   state.analysis.generation = generation;
-  state.analysis.activeVisibleRequest = {
-    analysisType: renderConfig.analysisType,
-    colormapDistribution: renderConfig.colormapDistribution,
-    configVersion: state.analysis.configVersion,
-    displayEnd: displayRange.end,
-    displayStart: displayRange.start,
-    fftSize: renderConfig.fftSize,
-    frequencyScale: renderConfig.frequencyScale,
-    generation,
-    maxDecibels: renderConfig.maxDecibels,
-    minDecibels: renderConfig.minDecibels,
-    overlapRatio: renderConfig.overlapRatio,
-    pixelHeight,
+    state.analysis.activeVisibleRequest = {
+      analysisType: renderConfig.analysisType,
+      colormapDistribution: renderConfig.colormapDistribution,
+      configVersion: state.analysis.configVersion,
+      displayEnd: displayRange.end,
+      displayStart: displayRange.start,
+      fftSize: renderConfig.fftSize,
+      frequencyScale: renderConfig.frequencyScale,
+      generation,
+      maxDecibels: renderConfig.maxDecibels,
+      melBandCount: renderConfig.melBandCount,
+      minDecibels: renderConfig.minDecibels,
+      overlapRatio: renderConfig.overlapRatio,
+      pixelHeight,
     pixelWidth,
     viewEnd: requestRange.end,
     viewStart: requestRange.start,
@@ -1461,6 +1481,7 @@ function syncSpectrogramView({ force = false } = {}): void {
       frequencyScale: renderConfig.frequencyScale,
       generation,
       maxDecibels: renderConfig.maxDecibels,
+      melBandCount: renderConfig.melBandCount,
       minDecibels: renderConfig.minDecibels,
       overlapRatio: renderConfig.overlapRatio,
       pixelHeight,
@@ -1948,6 +1969,7 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
       frequencyScale: body.frequencyScale === 'linear' || body.frequencyScale === 'mixed' ? body.frequencyScale : 'log',
       generation: Number(body.generation) || 0,
       maxDecibels: Math.round(Number(body.maxDecibels) || 0),
+      melBandCount: normalizeSpectrogramMelBandCount(body.melBandCount),
       minDecibels: Math.round(Number(body.minDecibels) || 0),
       overlapRatio: Number(body.overlapRatio) || 0,
       pixelHeight: Number(body.pixelHeight) || 0,
@@ -2353,6 +2375,11 @@ function attachUiEvents(): void {
   });
   elements.spectrogramOverlapSelect.addEventListener('change', () => {
     state.spectrogramConfig.overlapRatio = normalizeSpectrogramOverlapRatio(elements.spectrogramOverlapSelect.value);
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramMelBandsSelect.addEventListener('change', () => {
+    state.spectrogramConfig.melBandCount = normalizeSpectrogramMelBandCount(elements.spectrogramMelBandsSelect.value);
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });

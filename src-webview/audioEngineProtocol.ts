@@ -225,6 +225,7 @@ export interface SetSpectrogramConfigMessage {
     fftSize: number;
     frequencyScale: SpectrogramFrequencyScale;
     maxDecibels: number;
+    melBandCount: number;
     minDecibels: number;
     overlapRatio: number;
   };
