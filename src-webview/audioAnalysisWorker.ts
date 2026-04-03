@@ -8,6 +8,7 @@ const MIN_FREQUENCY = 50;
 const MAX_FREQUENCY = 20000;
 const ROW_BUCKET_SIZE = 16;
 const VISIBLE_ROW_OVERSAMPLE = 1.35;
+const LIBROSA_DEFAULT_MEL_BAND_COUNT = 128;
 
 const QUALITY_PRESETS = {
   balanced: {
@@ -68,6 +69,12 @@ const COLORMAP_DISTRIBUTION_GAMMAS = {
   contrast: 1.18,
   soft: 0.84,
 } as const;
+
+const SLANEY_MEL_FREQUENCY_MIN = 0;
+const SLANEY_MEL_FREQUENCY_STEP = 200 / 3;
+const SLANEY_MEL_LOG_REGION_START_HZ = 1000;
+const SLANEY_MEL_LOG_REGION_START_MEL = (SLANEY_MEL_LOG_REGION_START_HZ - SLANEY_MEL_FREQUENCY_MIN) / SLANEY_MEL_FREQUENCY_STEP;
+const SLANEY_MEL_LOG_STEP = Math.log(6.4) / 27;
 
 type QualityPreset = 'balanced' | 'high' | 'max';
 type AnalysisType = 'mel' | 'scalogram' | 'spectrogram';
@@ -507,8 +514,7 @@ fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
   let row = melRows[rowIndex];
   let spectrumBaseIndex = columnIndex * fftSize;
-  var weightedEnergy = 0.0;
-  var totalWeight = 0.0;
+  var melPower = 0.0;
   var weightIndex = row.weightOffset;
   let weightEnd = row.weightOffset + row.weightCount;
 
@@ -521,17 +527,15 @@ fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
     let weight = melWeights[weightIndex];
     let spectrum = baseSpectrum[spectrumBaseIndex + binIndex];
     let power = dot(spectrum, spectrum) * params.timing.w;
-    weightedEnergy += power * weight;
-    totalWeight += weight;
+    melPower += power * weight;
     weightIndex += 1u;
   }
 
-  let meanPower = weightedEnergy / max(totalWeight, 1e-8);
   let targetRow = i32((rowCount - 1u) - rowIndex);
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePowerForAnalysis(meanPower, ANALYSIS_TYPE_MEL, params.padding.x, params.padding.y, params.padding.z)),
+    paletteColor(normalizePowerForAnalysis(melPower, ANALYSIS_TYPE_MEL, params.padding.x, params.padding.y, params.padding.z)),
   );
 }
 `;
@@ -2529,11 +2533,23 @@ function createBandRangesForSampleRate(
 }
 
 function hzToMel(frequency: number): number {
-  return 1127 * Math.log(1 + (frequency / 700));
+  const safeFrequency = Math.max(0, frequency);
+
+  if (safeFrequency < SLANEY_MEL_LOG_REGION_START_HZ) {
+    return (safeFrequency - SLANEY_MEL_FREQUENCY_MIN) / SLANEY_MEL_FREQUENCY_STEP;
+  }
+
+  return SLANEY_MEL_LOG_REGION_START_MEL
+    + (Math.log(safeFrequency / SLANEY_MEL_LOG_REGION_START_HZ) / SLANEY_MEL_LOG_STEP);
 }
 
 function melToHz(melValue: number): number {
-  return 700 * (Math.exp(melValue / 1127) - 1);
+  if (melValue < SLANEY_MEL_LOG_REGION_START_MEL) {
+    return SLANEY_MEL_FREQUENCY_MIN + (SLANEY_MEL_FREQUENCY_STEP * melValue);
+  }
+
+  return SLANEY_MEL_LOG_REGION_START_HZ
+    * Math.exp(SLANEY_MEL_LOG_STEP * (melValue - SLANEY_MEL_LOG_REGION_START_MEL));
 }
 
 function getScalogramFrequencyForRow(row: number, rows: number, minFrequency: number, maxFrequency: number): number {
@@ -2579,8 +2595,8 @@ function getStftLayoutResource(
     const rows = Math.max(1, plan.rowCount);
     const nyquist = analysisState.sampleRate / 2;
     const maximumBin = Math.max(2, Math.trunc(plan.fftSize / 2));
-    const safeMinFrequency = Math.max(1, analysisState.minFrequency);
-    const safeMaxFrequency = Math.max(safeMinFrequency * 1.01, analysisState.maxFrequency);
+    const safeMinFrequency = Math.max(0, analysisState.minFrequency);
+    const safeMaxFrequency = Math.max(safeMinFrequency + 1, analysisState.maxFrequency);
     const melMin = hzToMel(safeMinFrequency);
     const melMax = hzToMel(safeMaxFrequency);
     const melStep = (melMax - melMin) / (rows + 1);
@@ -2592,9 +2608,10 @@ function getStftLayoutResource(
       const leftFrequency = melToHz(melMin + (melStep * row));
       const centerFrequency = melToHz(melMin + (melStep * (row + 1)));
       const rightFrequency = melToHz(melMin + (melStep * (row + 2)));
+      const areaNormalization = 2 / Math.max(1e-6, rightFrequency - leftFrequency);
       const startBin = clamp(
         Math.floor((leftFrequency / nyquist) * maximumBin),
-        1,
+        0,
         maximumBin - 1,
       );
       const peakBin = clamp(
@@ -2625,6 +2642,8 @@ function getStftLayoutResource(
         if (weight <= 0) {
           continue;
         }
+
+        weight *= areaNormalization;
 
         bins.push(bin);
         weights.push(weight);
@@ -3888,7 +3907,9 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
   const rowOversample = requestKind === 'visible' && analysisType !== 'scalogram'
     ? VISIBLE_ROW_OVERSAMPLE
     : 1;
-  const rowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
+  const rowCount = analysisType === 'mel'
+    ? LIBROSA_DEFAULT_MEL_BAND_COUNT
+    : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),

@@ -2,6 +2,11 @@ import { clamp } from '../core/format';
 
 const MIXED_FREQUENCY_PIVOT_HZ = 1000;
 const MIXED_FREQUENCY_PIVOT_POSITION = 0.5;
+const SLANEY_MEL_FREQUENCY_MIN = 0;
+const SLANEY_MEL_FREQUENCY_STEP = 200 / 3;
+const SLANEY_MEL_LOG_REGION_START_HZ = 1000;
+const SLANEY_MEL_LOG_REGION_START_MEL = (SLANEY_MEL_LOG_REGION_START_HZ - SLANEY_MEL_FREQUENCY_MIN) / SLANEY_MEL_FREQUENCY_STEP;
+const SLANEY_MEL_LOG_STEP = Math.log(6.4) / 27;
 
 export function buildLinearFrequencyTicks(
   minFrequency: number,
@@ -119,16 +124,28 @@ export function getFrequencyAtMixedPosition(position: number, minFrequency: numb
 }
 
 function frequencyToMel(frequency: number): number {
-  return 1127 * Math.log(1 + (frequency / 700));
+  const safeFrequency = Math.max(0, frequency);
+
+  if (safeFrequency < SLANEY_MEL_LOG_REGION_START_HZ) {
+    return (safeFrequency - SLANEY_MEL_FREQUENCY_MIN) / SLANEY_MEL_FREQUENCY_STEP;
+  }
+
+  return SLANEY_MEL_LOG_REGION_START_MEL
+    + (Math.log(safeFrequency / SLANEY_MEL_LOG_REGION_START_HZ) / SLANEY_MEL_LOG_STEP);
 }
 
 function melToFrequency(melValue: number): number {
-  return 700 * (Math.exp(melValue / 1127) - 1);
+  if (melValue < SLANEY_MEL_LOG_REGION_START_MEL) {
+    return SLANEY_MEL_FREQUENCY_MIN + (SLANEY_MEL_FREQUENCY_STEP * melValue);
+  }
+
+  return SLANEY_MEL_LOG_REGION_START_HZ
+    * Math.exp(SLANEY_MEL_LOG_STEP * (melValue - SLANEY_MEL_LOG_REGION_START_MEL));
 }
 
 export function getMelFrequencyPosition(frequency: number, minFrequency: number, maxFrequency: number): number {
-  const safeMin = Math.max(1, minFrequency);
-  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const safeMin = Math.max(0, minFrequency);
+  const safeMax = Math.max(safeMin + 1, maxFrequency);
   const start = frequencyToMel(safeMin);
   const end = frequencyToMel(safeMax);
   const current = frequencyToMel(clamp(frequency, safeMin, safeMax));
@@ -137,8 +154,8 @@ export function getMelFrequencyPosition(frequency: number, minFrequency: number,
 }
 
 export function getFrequencyAtMelPosition(position: number, minFrequency: number, maxFrequency: number): number {
-  const safeMin = Math.max(1, minFrequency);
-  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const safeMin = Math.max(0, minFrequency);
+  const safeMax = Math.max(safeMin + 1, maxFrequency);
   const start = frequencyToMel(safeMin);
   const end = frequencyToMel(safeMax);
   const ratio = 1 - clamp(position, 0, 1);

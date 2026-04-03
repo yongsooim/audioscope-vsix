@@ -14,6 +14,7 @@ pub const hard_min_frequency: f32 = 50.0;
 pub const hard_max_frequency: f32 = 20_000.0;
 pub const min_db: f32 = -80.0;
 pub const max_db: f32 = 0.0;
+pub const librosa_default_mel_band_count: i32 = 128;
 pub const low_frequency_enhancement_max_frequency: f32 = 1_200.0;
 pub const morlet_omega0: f32 = 6.0;
 pub const morlet_support_sigma: f32 = 3.0;
@@ -379,17 +380,33 @@ pub fn decodeFrequencyScale(value: i32) FrequencyScale {
 
 const mixed_frequency_pivot_hz: f32 = 1_000.0;
 const mixed_frequency_pivot_ratio: f32 = 0.5;
+const slaney_mel_frequency_min: f32 = 0.0;
+const slaney_mel_frequency_step: f32 = 200.0 / 3.0;
+const slaney_mel_log_region_start_hz: f32 = 1_000.0;
+const slaney_mel_log_region_start_mel: f32 = (slaney_mel_log_region_start_hz - slaney_mel_frequency_min) / slaney_mel_frequency_step;
+const slaney_mel_log_step: f32 = @log(6.4) / 27.0;
 
 fn getMixedFrequencyPivot(min_frequency: f32, max_frequency: f32) f32 {
     return clampf32(mixed_frequency_pivot_hz, min_frequency, max_frequency);
 }
 
 pub fn hzToMel(frequency: f32) f32 {
-    return 1127.0 * @log(1.0 + (frequency / 700.0));
+    const safe_frequency = maxF32(0.0, frequency);
+    if (safe_frequency < slaney_mel_log_region_start_hz) {
+        return (safe_frequency - slaney_mel_frequency_min) / slaney_mel_frequency_step;
+    }
+
+    return slaney_mel_log_region_start_mel
+        + (@log(safe_frequency / slaney_mel_log_region_start_hz) / slaney_mel_log_step);
 }
 
 pub fn melToHz(mel_value: f32) f32 {
-    return 700.0 * (@exp(mel_value / 1127.0) - 1.0);
+    if (mel_value < slaney_mel_log_region_start_mel) {
+        return slaney_mel_frequency_min + (slaney_mel_frequency_step * mel_value);
+    }
+
+    return slaney_mel_log_region_start_hz
+        * @exp(slaney_mel_log_step * (mel_value - slaney_mel_log_region_start_mel));
 }
 
 pub fn bandStartFrequencyForRow(row: i32, rows: i32, min_frequency: f32, max_frequency: f32, scale: FrequencyScale) f32 {

@@ -50,6 +50,7 @@ const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
 const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
 const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
 const ROW_BUCKET_SIZE = 16;
+const LIBROSA_DEFAULT_MEL_BAND_COUNT = 128;
 const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
 const SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 28;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
@@ -1453,7 +1454,9 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
   const pixelHeight = Math.max(1, state.spectrogramSurface.pixelHeight);
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
   const rowOversample = analysisType === 'scalogram' ? 1 : VISIBLE_ROW_OVERSAMPLE;
-  const rowCount = quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
+  const rowCount = analysisType === 'mel'
+    ? LIBROSA_DEFAULT_MEL_BAND_COUNT
+    : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),

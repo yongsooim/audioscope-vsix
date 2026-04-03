@@ -247,8 +247,8 @@ fn createMelBands(
     const rows = @as(i32, @intCast(bands.len));
     const nyquist = sample_rate / 2.0;
     const maximum_bin = core.maxI32(2, @divTrunc(fft_size, 2));
-    const safe_min_frequency = core.maxF32(1.0, min_frequency);
-    const safe_max_frequency = core.maxF32(safe_min_frequency * 1.01, max_frequency);
+    const safe_min_frequency = core.maxF32(0.0, min_frequency);
+    const safe_max_frequency = core.maxF32(safe_min_frequency + 1.0, max_frequency);
     const mel_min = core.hzToMel(safe_min_frequency);
     const mel_max = core.hzToMel(safe_max_frequency);
     const mel_step = (mel_max - mel_min) / @as(f32, @floatFromInt(rows + 1));
@@ -260,7 +260,7 @@ fn createMelBands(
         const right_frequency = core.melToHz(mel_min + (mel_step * @as(f32, @floatFromInt(row + 2))));
         const start_bin = core.clampi32(
             @as(i32, @intFromFloat(@floor((left_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
-            1,
+            0,
             maximum_bin - 1,
         );
         const peak_bin = core.clampi32(
@@ -488,11 +488,11 @@ fn computeBandMeanPower(power_spectrum: []const f32, range: core.BandRange) f32 
     return weighted_energy / core.maxF32(total_weight, 1e-8);
 }
 
-fn computeMelBandMeanPower(power_spectrum: []const f32, band: core.MelBand, fft_size: i32, sample_rate: f32) f32 {
+fn computeMelBandPower(power_spectrum: []const f32, band: core.MelBand, fft_size: i32, sample_rate: f32) f32 {
     const maximum_bin = core.maxI32(2, @divTrunc(fft_size, 2));
     const nyquist = sample_rate / 2.0;
+    const area_normalization = 2.0 / core.maxF32(1e-6, band.end_frequency - band.start_frequency);
     var weighted_energy: f32 = 0.0;
-    var total_weight: f32 = 0.0;
     var bin = band.start_bin;
 
     while (bin < band.end_bin) : (bin += 1) {
@@ -508,11 +508,10 @@ fn computeMelBandMeanPower(power_spectrum: []const f32, band: core.MelBand, fft_
         }
 
         weight = core.clampf32(weight, 0.0, 1.0);
-        weighted_energy += power_spectrum[@as(usize, @intCast(bin))] * weight;
-        total_weight += weight;
+        weighted_energy += power_spectrum[@as(usize, @intCast(bin))] * (weight * area_normalization);
     }
 
-    return weighted_energy / core.maxF32(total_weight, 1e-8);
+    return weighted_energy;
 }
 
 fn displayMinDbForAnalysisType(analysis_type: core.AnalysisType) f32 {
@@ -785,7 +784,7 @@ fn renderStftDerivedTile(
         var row: i32 = 0;
         while (row < row_count) : (row += 1) {
             const normalized = switch (analysis_type) {
-                .mel => normalizePowerForDisplay(computeMelBandMeanPower(
+                .mel => normalizePowerForDisplay(computeMelBandPower(
                     power_spectrum,
                     layout.mel_bands[@as(usize, @intCast(row))],
                     fft_size,
