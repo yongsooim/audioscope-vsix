@@ -437,9 +437,8 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                 <label id="spectrogram-mel-bands-control" class="spectrogram-control" hidden>
                   <span class="spectrogram-control-label">Bands</span>
                   <select id="spectrogram-mel-bands-select" class="spectrogram-control-select" aria-label="Mel spectrogram band count">
-                    <option value="64">64</option>
-                    <option value="128" selected>128</option>
-                    <option value="256">256</option>
+                    <option value="128">128</option>
+                    <option value="256" selected>256</option>
                     <option value="512">512</option>
                   </select>
                 </label>

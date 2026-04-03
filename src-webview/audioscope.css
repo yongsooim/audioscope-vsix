@@ -748,6 +748,7 @@ body {
   position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
+  --spectrogram-axis-width: 30px;
   width: 100%;
   max-width: 100%;
   margin: 0 !important;
@@ -760,7 +761,7 @@ body {
 .spectrogram-axis {
   position: absolute;
   inset: 0 auto 0 0;
-  width: 76px;
+  width: var(--spectrogram-axis-width);
   z-index: 4;
   overflow: visible;
   pointer-events: none;
@@ -833,6 +834,7 @@ body {
   font-size: 10px;
   font-weight: 700;
   line-height: 1.2;
+  cursor: pointer;
 }
 
 .spectrogram-meta-toggle::after {
@@ -1671,11 +1673,7 @@ body {
 
   .spectrogram-panel {
     padding: 0 var(--surface-inline-padding) !important;
-  }
-
-  .spectrogram-axis {
-    inset: 0 auto 0 0;
-    width: 60px;
+    --spectrogram-axis-width: 60px;
   }
 
   .viewport-splitter-handle {

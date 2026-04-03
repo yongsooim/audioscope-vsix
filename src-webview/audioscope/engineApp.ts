@@ -52,7 +52,7 @@ const VIEWPORT_RATIO_MIN = 0;
 const LOOP_HANDLE_WIDTH_PX = 8;
 const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. Rebuild or reinstall audioscope to restore metadata and decoding.';
 const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
-const SPECTROGRAM_MEL_BAND_OPTIONS = [64, 128, 256, 512];
+const SPECTROGRAM_MEL_BAND_OPTIONS = [128, 256, 512];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
@@ -219,7 +219,7 @@ const state = {
     fftSize: 4096,
     frequencyScale: 'log' as SpectrogramFrequencyScale,
     maxDecibels: 0,
-    melBandCount: 128,
+    melBandCount: 256,
     minDecibels: -80,
     overlapRatio: 0.75,
   },
@@ -429,7 +429,7 @@ function normalizeSpectrogramFftSize(value: unknown): number {
 
 function normalizeSpectrogramMelBandCount(value: unknown): number {
   const numericValue = Number(value);
-  return SPECTROGRAM_MEL_BAND_OPTIONS.includes(numericValue) ? numericValue : 128;
+  return SPECTROGRAM_MEL_BAND_OPTIONS.includes(numericValue) ? numericValue : 256;
 }
 
 function normalizeSpectrogramFrequencyScale(value: unknown): SpectrogramFrequencyScale {
