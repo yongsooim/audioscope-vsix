@@ -4,7 +4,7 @@ import {
   quantizeCeil,
 } from './sharedBuffers';
 
-const MIN_FREQUENCY = 20;
+const MIN_FREQUENCY = 50;
 const MAX_FREQUENCY = 20000;
 const ROW_BUCKET_SIZE = 16;
 const VISIBLE_ROW_OVERSAMPLE = 1.35;
@@ -41,6 +41,7 @@ const ANALYSIS_TYPE_CODES = {
 const FREQUENCY_SCALE_CODES = {
   log: 0,
   linear: 1,
+  mixed: 2,
 };
 const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
   balanced: 2048,
@@ -50,7 +51,7 @@ const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
 
 type QualityPreset = 'balanced' | 'high' | 'max';
 type AnalysisType = 'mel' | 'scalogram' | 'spectrogram';
-type FrequencyScale = 'linear' | 'log';
+type FrequencyScale = 'linear' | 'log' | 'mixed';
 type LayerKind = 'overview' | 'visible';
 
 interface CanvasInitOptions {
@@ -402,7 +403,7 @@ function normalizeAnalysisType(value: unknown): AnalysisType {
 }
 
 function normalizeFrequencyScale(value: unknown): FrequencyScale {
-  return value === 'linear' ? 'linear' : 'log';
+  return value === 'linear' || value === 'mixed' ? value : 'log';
 }
 
 function getEffectiveFrequencyScale(analysisType: AnalysisType, value: unknown): FrequencyScale {

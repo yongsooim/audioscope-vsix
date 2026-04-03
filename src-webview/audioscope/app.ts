@@ -37,9 +37,11 @@ import {
   formatFrequencyLabel,
   getFrequencyAtLinearPosition,
   getFrequencyAtLogPosition,
+  getFrequencyAtMixedPosition,
   getFrequencyAtMelPosition,
   getLinearFrequencyPosition,
   getLogFrequencyPosition,
+  getMixedFrequencyPosition,
   getMelFrequencyPosition,
 } from './math/spectrogramMath';
 import {
@@ -75,9 +77,9 @@ const audioTransportProcessorScriptUri = document.body.dataset.audioTransportPro
 const stretchProcessorScriptUri = document.body.dataset.stretchProcessorSrc;
 const DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
 
-const SPECTROGRAM_MIN_FREQUENCY = 20;
+const SPECTROGRAM_MIN_FREQUENCY = 50;
 const SPECTROGRAM_MAX_FREQUENCY = 20000;
-const SPECTROGRAM_TICKS = [20000, 16000, 12000, 8000, 4000, 2000, 1000, 400, 100, 40, 20];
+const SPECTROGRAM_TICKS = [20000, 16000, 12000, 8000, 4000, 2000, 1000, 400, 100, 50];
 const SPECTROGRAM_LINEAR_TICK_COUNT = 6;
 const SPECTROGRAM_OVERVIEW_WIDTH_SCALE = 0.45;
 const SPECTROGRAM_OVERVIEW_HEIGHT_SCALE = 0.7;
@@ -334,6 +336,7 @@ const {
   getEffectiveDuration,
   getInteractiveWaveformRange,
   getMinVisibleDuration,
+  getZoomedWaveformRange,
   getTimeAtViewportClientX,
   getViewportPointerRatio,
   splitterFallbackSizePx: VIEWPORT_SPLITTER_FALLBACK_SIZE_PX,
@@ -612,7 +615,7 @@ function normalizeSpectrogramAnalysisType(value) {
 }
 
 function normalizeSpectrogramFrequencyScale(value) {
-  return value === 'linear' ? 'linear' : 'log';
+  return value === 'linear' || value === 'mixed' ? value : 'log';
 }
 
 function normalizeSpectrogramOverlapRatio(value) {
@@ -1832,6 +1835,22 @@ function getTimeAtWaveformPointerEvent(event, range = getInteractiveWaveformRang
   return getTimeAtViewportPointerEvent(event, elements.waveformHitTarget ?? elements.waveformViewport, range);
 }
 
+function getSnappedTimeAtViewportClientX(clientX, targetElement, range = getInteractiveWaveformRange()) {
+  return snapTimeToWaveformFrame(getTimeAtViewportClientX(clientX, targetElement, range));
+}
+
+function getSnappedTimeAtViewportPointerEvent(event, targetElement, range = getInteractiveWaveformRange()) {
+  return snapTimeToWaveformFrame(getTimeAtViewportPointerEvent(event, targetElement, range));
+}
+
+function getSnappedTimeAtWaveformClientX(clientX, range = getInteractiveWaveformRange()) {
+  return snapTimeToWaveformFrame(getTimeAtWaveformClientX(clientX, range));
+}
+
+function getSnappedTimeAtWaveformPointerEvent(event, range = getInteractiveWaveformRange()) {
+  return snapTimeToWaveformFrame(getTimeAtWaveformPointerEvent(event, range));
+}
+
 function normalizeLoopRange(startTime, endTime) {
   const duration = getEffectiveDuration();
 
@@ -1839,8 +1858,8 @@ function normalizeLoopRange(startTime, endTime) {
     return null;
   }
 
-  const start = clamp(Math.min(startTime, endTime), 0, duration);
-  const end = clamp(Math.max(startTime, endTime), 0, duration);
+  const start = snapTimeToWaveformFrame(clamp(Math.min(startTime, endTime), 0, duration));
+  const end = snapTimeToWaveformFrame(clamp(Math.max(startTime, endTime), 0, duration));
 
   if (end - start < LOOP_SELECTION_MIN_SECONDS) {
     return null;
@@ -1867,7 +1886,7 @@ function isTimeWithinLoopRange(loopRange, timeSeconds) {
 
 function getAdjustedLoopRange(baseRange, edge, clientX, targetElement = elements.waveformHitTarget ?? elements.waveformViewport) {
   const duration = getEffectiveDuration();
-  const nextTime = getTimeAtViewportClientX(clientX, targetElement);
+  const nextTime = getSnappedTimeAtViewportClientX(clientX, targetElement);
 
   if (edge === 'start') {
     return {
@@ -2587,30 +2606,23 @@ function updateWaveformViewRange(updater, { animateZoom = false }: WaveformViewR
 }
 
 function zoomAroundTime(anchorTime, requestedSpan) {
-  const duration = getEffectiveDuration();
   const range = getPresentedWaveformRange();
   const span = range.end - range.start;
 
-  if (duration <= 0 || span <= 0) {
+  if (getEffectiveDuration() <= 0 || span <= 0) {
     return;
   }
 
-  const nextSpan = clamp(
-    requestedSpan,
-    getMinVisibleDuration(duration),
-    Math.max(getMinVisibleDuration(duration), duration),
-  );
+  const nextRange = getZoomedWaveformRange(anchorTime, requestedSpan, range);
+  const nextSpan = nextRange.end - nextRange.start;
 
   if (Math.abs(nextSpan - span) <= 1e-9) {
     return;
   }
 
-  const ratio = span > 0 ? clamp((anchorTime - range.start) / span, 0, 1) : 0.5;
-  const nextStart = anchorTime - nextSpan * ratio;
-
   updateWaveformViewRange(() => ({
-    start: nextStart,
-    end: nextStart + nextSpan,
+    start: nextRange.start,
+    end: nextRange.end,
   }), { animateZoom: true });
 }
 
@@ -2622,7 +2634,7 @@ function zoomWaveformIn() {
     return;
   }
 
-  zoomAroundTime(range.start + span * 0.5, span / WAVEFORM_ZOOM_STEP_FACTOR);
+  zoomAroundTime(getPreferredWaveformZoomAnchorTime(range.start + span * 0.5), span / WAVEFORM_ZOOM_STEP_FACTOR);
 }
 
 function zoomWaveformOut() {
@@ -2633,7 +2645,7 @@ function zoomWaveformOut() {
     return;
   }
 
-  zoomAroundTime(range.start + span * 0.5, span * WAVEFORM_ZOOM_STEP_FACTOR);
+  zoomAroundTime(getPreferredWaveformZoomAnchorTime(range.start + span * 0.5), span * WAVEFORM_ZOOM_STEP_FACTOR);
 }
 
 function resetWaveformZoom() {
@@ -3151,11 +3163,11 @@ function hideLoopHandleHoverTooltip(targetElement) {
 }
 
 function seekWaveformTo(timeSeconds) {
-  setPlaybackPosition(timeSeconds);
+  setPlaybackPosition(snapTimeToWaveformFrame(timeSeconds));
 }
 
 function seekWaveformAtClientX(clientX) {
-  seekWaveformTo(getTimeAtWaveformClientX(clientX));
+  seekWaveformTo(getSnappedTimeAtWaveformClientX(clientX));
 }
 
 function beginSelectionDrag(event, targetElement) {
@@ -3164,7 +3176,7 @@ function beginSelectionDrag(event, targetElement) {
   targetElement.setPointerCapture(event.pointerId);
   state.selectionDrag = {
     pointerId: event.pointerId,
-    anchorTime: getTimeAtViewportPointerEvent(event, targetElement),
+    anchorTime: getSnappedTimeAtViewportPointerEvent(event, targetElement),
     anchorX: event.clientX,
     moved: false,
     targetElement,
@@ -3184,7 +3196,7 @@ function updateSelectionDrag(event, targetElement) {
     return;
   }
 
-  const endTime = getTimeAtViewportPointerEvent(event, targetElement);
+  const endTime = getSnappedTimeAtViewportPointerEvent(event, targetElement);
   const pointerDelta = Math.abs(event.clientX - selectionDrag.anchorX);
   const nextSelection = normalizeLoopRange(selectionDrag.anchorTime, endTime);
 
@@ -3224,7 +3236,7 @@ function releaseSelectionDrag(event, targetElement, cancelled = false) {
     return;
   }
 
-  const endTime = getTimeAtViewportPointerEvent(event, targetElement);
+  const endTime = getSnappedTimeAtViewportPointerEvent(event, targetElement);
   const nextSelection = normalizeLoopRange(selectionDrag.anchorTime, endTime);
   state.selectionDraft = null;
 
@@ -3438,7 +3450,7 @@ function setWaveformTargetRange(range, duration = getEffectiveDuration()) {
     return state.waveformViewport.targetRange;
   }
 
-  state.waveformViewport.targetRange = normalizeWaveformRange(range, duration);
+  state.waveformViewport.targetRange = snapWaveformTargetRangeToFrames(range, duration);
   return state.waveformViewport.targetRange;
 }
 
@@ -3467,6 +3479,115 @@ function getWaveformFrameRange(range = getPresentedWaveformRange()) {
     sampleRate,
     startFrame,
   };
+}
+
+function getWaveformSampleRate() {
+  const sampleRate = Number(state.analysis?.sampleRate);
+  return Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : null;
+}
+
+function snapTimeToWaveformFrame(timeSeconds) {
+  const sampleRate = getWaveformSampleRate();
+  const duration = getEffectiveDuration();
+
+  if (!sampleRate || !Number.isFinite(timeSeconds) || duration <= 0) {
+    return clamp(Number(timeSeconds) || 0, 0, duration);
+  }
+
+  const snappedFrame = clamp(
+    Math.round(timeSeconds * sampleRate),
+    0,
+    Math.max(0, Math.round(duration * sampleRate)),
+  );
+  return snappedFrame / sampleRate;
+}
+
+function snapWaveformTargetRangeToFrames(range, duration = getEffectiveDuration()) {
+  const normalizedRange = normalizeWaveformRange(range, duration);
+  const sampleRate = getWaveformSampleRate();
+
+  if (!sampleRate || duration <= 0) {
+    return normalizedRange;
+  }
+
+  const durationFrames = Math.max(1, Math.round(duration * sampleRate));
+  const startFrame = clamp(
+    Math.round(normalizedRange.start * sampleRate),
+    0,
+    Math.max(0, durationFrames - 1),
+  );
+  const endFrame = clamp(
+    Math.round(normalizedRange.end * sampleRate),
+    startFrame + 1,
+    durationFrames,
+  );
+
+  return {
+    start: startFrame / sampleRate,
+    end: Math.min(duration, endFrame / sampleRate),
+  };
+}
+
+function getZoomedWaveformRange(anchorTime, requestedSpan, baseRange = getPresentedWaveformRange()) {
+  const duration = getEffectiveDuration();
+  const sampleRate = getWaveformSampleRate();
+  const normalizedBaseRange = normalizeWaveformRange(baseRange, duration);
+
+  if (!sampleRate || duration <= 0 || normalizedBaseRange.end <= normalizedBaseRange.start) {
+    const nextSpan = clamp(
+      requestedSpan,
+      getMinVisibleDuration(duration),
+      Math.max(getMinVisibleDuration(duration), duration),
+    );
+    const snappedAnchorTime = snapTimeToWaveformFrame(anchorTime);
+    const ratio = (normalizedBaseRange.end - normalizedBaseRange.start) > 0
+      ? clamp((snappedAnchorTime - normalizedBaseRange.start) / (normalizedBaseRange.end - normalizedBaseRange.start), 0, 1)
+      : 0.5;
+    const nextStart = snappedAnchorTime - (nextSpan * ratio);
+
+    return normalizeWaveformRange({
+      start: nextStart,
+      end: nextStart + nextSpan,
+    }, duration);
+  }
+
+  const durationFrames = Math.max(1, Math.round(duration * sampleRate));
+  const minVisibleFrames = Math.max(1, Math.round(getMinVisibleDuration(duration) * sampleRate));
+  const baseStartFrame = Math.max(0, Math.round(normalizedBaseRange.start * sampleRate));
+  const baseEndFrame = Math.max(baseStartFrame + 1, Math.round(normalizedBaseRange.end * sampleRate));
+  const baseSpanFrames = Math.max(1, baseEndFrame - baseStartFrame);
+  const anchorFrame = clamp(
+    Math.round(snapTimeToWaveformFrame(anchorTime) * sampleRate),
+    baseStartFrame,
+    baseEndFrame,
+  );
+  const nextSpanFrames = clamp(
+    Math.round(requestedSpan * sampleRate),
+    minVisibleFrames,
+    durationFrames,
+  );
+  const anchorRatio = clamp((anchorFrame - baseStartFrame) / baseSpanFrames, 0, 1);
+  const nextStartFrame = clamp(
+    anchorFrame - Math.round(nextSpanFrames * anchorRatio),
+    0,
+    Math.max(0, durationFrames - nextSpanFrames),
+  );
+  const nextEndFrame = Math.min(durationFrames, nextStartFrame + nextSpanFrames);
+
+  return {
+    start: nextStartFrame / sampleRate,
+    end: nextEndFrame / sampleRate,
+  };
+}
+
+function getPreferredWaveformZoomAnchorTime(fallbackTime) {
+  const point = state.waveformHoverClientPoint;
+
+  if (point && Number.isFinite(point.clientX)) {
+    return getSnappedTimeAtWaveformClientX(point.clientX, getPresentedWaveformRange());
+  }
+
+  return snapTimeToWaveformFrame(fallbackTime);
 }
 
 function commitWaveformDisplayRange(range, duration = getEffectiveDuration()) {
@@ -4022,8 +4143,14 @@ function getActiveSpectrogramAxisMode() {
     return 'mel';
   }
 
-  if (analysisType === 'spectrogram' && frequencyScale === 'linear') {
-    return 'linear';
+  if (analysisType === 'spectrogram') {
+    if (frequencyScale === 'linear') {
+      return 'linear';
+    }
+
+    if (frequencyScale === 'mixed') {
+      return 'mixed';
+    }
   }
 
   return 'log';
@@ -4045,6 +4172,8 @@ function getSpectrogramFrequencyPosition(frequency, minFrequency, maxFrequency) 
   switch (getActiveSpectrogramAxisMode()) {
     case 'linear':
       return getLinearFrequencyPosition(frequency, minFrequency, maxFrequency);
+    case 'mixed':
+      return getMixedFrequencyPosition(frequency, minFrequency, maxFrequency);
     case 'mel':
       return getMelFrequencyPosition(frequency, minFrequency, maxFrequency);
     default:
@@ -4056,6 +4185,8 @@ function getFrequencyAtSpectrogramPosition(position, minFrequency, maxFrequency)
   switch (getActiveSpectrogramAxisMode()) {
     case 'linear':
       return getFrequencyAtLinearPosition(position, minFrequency, maxFrequency);
+    case 'mixed':
+      return getFrequencyAtMixedPosition(position, minFrequency, maxFrequency);
     case 'mel':
       return getFrequencyAtMelPosition(position, minFrequency, maxFrequency);
     default:

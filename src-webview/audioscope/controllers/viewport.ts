@@ -9,6 +9,11 @@ interface AudioscopeViewportControllerDeps {
   getEffectiveDuration: () => number;
   getInteractiveWaveformRange: () => { start: number; end: number };
   getMinVisibleDuration: (duration: number) => number;
+  getZoomedWaveformRange: (
+    anchorTime: number,
+    requestedSpan: number,
+    baseRange: { start: number; end: number },
+  ) => { start: number; end: number };
   getTimeAtViewportClientX: (
     clientX: number,
     targetElement: HTMLElement,
@@ -35,6 +40,7 @@ export function createAudioscopeViewportController({
   getEffectiveDuration,
   getInteractiveWaveformRange,
   getMinVisibleDuration,
+  getZoomedWaveformRange,
   getTimeAtViewportClientX,
   getViewportPointerRatio,
   splitterFallbackSizePx,
@@ -303,11 +309,9 @@ export function createAudioscopeViewportController({
           return current;
         }
 
-        const anchorRatio = shouldPreserveFollowZoom
-          ? clamp((anchorTime - current.start) / currentSpan, 0, 1)
-          : pointerRatio;
-
-        nextStart = anchorTime - nextSpan * anchorRatio;
+        const nextRange = getZoomedWaveformRange(anchorTime, nextSpan, current);
+        nextStart = nextRange.start;
+        nextSpan = nextRange.end - nextRange.start;
       }
 
       if (intent === 'pan' && horizontalMagnitude > 0.01) {

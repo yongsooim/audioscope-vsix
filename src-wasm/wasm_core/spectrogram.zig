@@ -71,7 +71,7 @@ fn getFftResource(fft_size_i32: i32) ?*core.FftResource {
     const denominator = @as(f32, @floatFromInt(fft_size - 1));
     for (resource.window, 0..) |*value, index| {
         const ratio = (2.0 * std.math.pi * @as(f32, @floatFromInt(index))) / denominator;
-        value.* = 0.5 * (1.0 - @cos(ratio));
+        value.* = 0.54 - (0.46 * @cos(ratio));
     }
 
     resource.next = core.g_session.fft_resources;
@@ -136,6 +136,43 @@ fn createLinearBandRanges(
         const row = @as(i32, @intCast(row_usize));
         const start_frequency = core.bandStartFrequencyForRow(row, rows, safe_min_frequency, safe_max_frequency, .linear);
         const end_frequency = core.bandEndFrequencyForRow(row, rows, safe_min_frequency, safe_max_frequency, .linear);
+        const start_bin = core.clampi32(
+            @as(i32, @intFromFloat(@floor((start_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
+            1,
+            maximum_bin - 1,
+        );
+        const end_bin = core.clampi32(
+            @as(i32, @intFromFloat(@ceil((end_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
+            start_bin + 1,
+            maximum_bin,
+        );
+
+        range.* = .{
+            .start_bin = start_bin,
+            .end_bin = end_bin,
+            .start_frequency = start_frequency,
+            .end_frequency = end_frequency,
+        };
+    }
+}
+
+fn createMixedBandRanges(
+    ranges: []core.BandRange,
+    fft_size: i32,
+    sample_rate: f32,
+    min_frequency: f32,
+    max_frequency: f32,
+) void {
+    const rows = @as(i32, @intCast(ranges.len));
+    const nyquist = sample_rate / 2.0;
+    const maximum_bin = core.maxI32(2, @divTrunc(fft_size, 2));
+    const safe_min_frequency = core.maxF32(1.0, min_frequency);
+    const safe_max_frequency = core.maxF32(safe_min_frequency + 1.0, max_frequency);
+
+    for (ranges, 0..) |*range, row_usize| {
+        const row = @as(i32, @intCast(row_usize));
+        const start_frequency = core.bandStartFrequencyForRow(row, rows, safe_min_frequency, safe_max_frequency, .mixed);
+        const end_frequency = core.bandEndFrequencyForRow(row, rows, safe_min_frequency, safe_max_frequency, .mixed);
         const start_bin = core.clampi32(
             @as(i32, @intFromFloat(@floor((start_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
             1,
@@ -292,6 +329,7 @@ fn getBandLayoutResource(
             switch (frequency_scale) {
                 .linear => createLinearBandRanges(resource.band_ranges, fft_size, core.g_session.sample_rate, min_frequency, max_frequency),
                 .log => createLogBandRanges(resource.band_ranges, fft_size, core.g_session.sample_rate, min_frequency, max_frequency),
+                .mixed => createMixedBandRanges(resource.band_ranges, fft_size, core.g_session.sample_rate, min_frequency, max_frequency),
             }
 
             if (decimation_factor > 1) {
@@ -575,46 +613,46 @@ fn paletteColorAt(normalized: f32) [4]u8 {
     var end_g: f32 = 0.0;
     var end_b: f32 = 0.0;
 
-    if (t < 0.14) {
-        local_t = t / 0.14;
-        start_r = 4.0;
-        start_g = 4.0;
-        start_b = 12.0;
-        end_r = 34.0;
-        end_g = 17.0;
-        end_b = 70.0;
+    if (t < 0.16) {
+        local_t = t / 0.16;
+        start_r = 2.0;
+        start_g = 6.0;
+        start_b = 18.0;
+        end_r = 8.0;
+        end_g = 32.0;
+        end_b = 86.0;
     } else if (t < 0.34) {
-        local_t = (t - 0.14) / 0.2;
-        start_r = 34.0;
-        start_g = 17.0;
-        start_b = 70.0;
-        end_r = 91.0;
-        end_g = 31.0;
-        end_b = 126.0;
-    } else if (t < 0.58) {
-        local_t = (t - 0.34) / 0.24;
-        start_r = 91.0;
-        start_g = 31.0;
-        start_b = 126.0;
-        end_r = 179.0;
-        end_g = 68.0;
-        end_b = 112.0;
-    } else if (t < 0.82) {
-        local_t = (t - 0.58) / 0.24;
-        start_r = 179.0;
-        start_g = 68.0;
-        start_b = 112.0;
-        end_r = 248.0;
-        end_g = 143.0;
-        end_b = 84.0;
+        local_t = (t - 0.16) / 0.18;
+        start_r = 8.0;
+        start_g = 32.0;
+        start_b = 86.0;
+        end_r = 20.0;
+        end_g = 82.0;
+        end_b = 168.0;
+    } else if (t < 0.56) {
+        local_t = (t - 0.34) / 0.22;
+        start_r = 20.0;
+        start_g = 82.0;
+        start_b = 168.0;
+        end_r = 54.0;
+        end_g = 164.0;
+        end_b = 212.0;
+    } else if (t < 0.8) {
+        local_t = (t - 0.56) / 0.24;
+        start_r = 54.0;
+        start_g = 164.0;
+        start_b = 212.0;
+        end_r = 208.0;
+        end_g = 214.0;
+        end_b = 60.0;
     } else {
-        local_t = (t - 0.82) / 0.18;
-        start_r = 248.0;
-        start_g = 143.0;
-        start_b = 84.0;
-        end_r = 252.0;
-        end_g = 236.0;
-        end_b = 176.0;
+        local_t = (t - 0.8) / 0.2;
+        start_r = 208.0;
+        start_g = 214.0;
+        start_b = 60.0;
+        end_r = 255.0;
+        end_g = 244.0;
+        end_b = 132.0;
     }
 
     return .{

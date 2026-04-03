@@ -10,10 +10,10 @@ pub const min_level_block_size: i32 = 16;
 pub const level_scale_factor: i32 = 4;
 pub const min_level_buckets: i32 = 512;
 
-pub const hard_min_frequency: f32 = 20.0;
+pub const hard_min_frequency: f32 = 50.0;
 pub const hard_max_frequency: f32 = 20_000.0;
-pub const min_db: f32 = -92.0;
-pub const max_db: f32 = -12.0;
+pub const min_db: f32 = -80.0;
+pub const max_db: f32 = 0.0;
 pub const low_frequency_enhancement_max_frequency: f32 = 1_200.0;
 pub const morlet_omega0: f32 = 6.0;
 pub const morlet_support_sigma: f32 = 3.0;
@@ -37,6 +37,7 @@ pub const AnalysisType = enum(i32) {
 pub const FrequencyScale = enum(i32) {
     log = 0,
     linear = 1,
+    mixed = 2,
 };
 
 pub const PffftSetup = opaque {};
@@ -369,7 +370,18 @@ pub fn decodeAnalysisType(value: i32) AnalysisType {
 }
 
 pub fn decodeFrequencyScale(value: i32) FrequencyScale {
-    return if (value == 1) .linear else .log;
+    return switch (value) {
+        1 => .linear,
+        2 => .mixed,
+        else => .log,
+    };
+}
+
+const mixed_frequency_pivot_hz: f32 = 1_000.0;
+const mixed_frequency_pivot_ratio: f32 = 0.5;
+
+fn getMixedFrequencyPivot(min_frequency: f32, max_frequency: f32) f32 {
+    return clampf32(mixed_frequency_pivot_hz, min_frequency, max_frequency);
 }
 
 pub fn hzToMel(frequency: f32) f32 {
@@ -386,6 +398,20 @@ pub fn bandStartFrequencyForRow(row: i32, rows: i32, min_frequency: f32, max_fre
     return switch (scale) {
         .linear => min_frequency + ((max_frequency - min_frequency) * start_ratio),
         .log => min_frequency * @exp(@log(max_frequency / min_frequency) * start_ratio),
+        .mixed => blk: {
+            const pivot = getMixedFrequencyPivot(min_frequency, max_frequency);
+
+            if (start_ratio <= mixed_frequency_pivot_ratio or pivot >= max_frequency) {
+                const lower_ratio = if (mixed_frequency_pivot_ratio <= 0)
+                    0
+                else
+                    start_ratio / mixed_frequency_pivot_ratio;
+                break :blk min_frequency + ((pivot - min_frequency) * lower_ratio);
+            }
+
+            const upper_ratio = (start_ratio - mixed_frequency_pivot_ratio) / (1.0 - mixed_frequency_pivot_ratio);
+            break :blk pivot * @exp(@log(max_frequency / pivot) * upper_ratio);
+        },
     };
 }
 
@@ -395,6 +421,20 @@ pub fn bandEndFrequencyForRow(row: i32, rows: i32, min_frequency: f32, max_frequ
     return switch (scale) {
         .linear => min_frequency + ((max_frequency - min_frequency) * end_ratio),
         .log => min_frequency * @exp(@log(max_frequency / min_frequency) * end_ratio),
+        .mixed => blk: {
+            const pivot = getMixedFrequencyPivot(min_frequency, max_frequency);
+
+            if (end_ratio <= mixed_frequency_pivot_ratio or pivot >= max_frequency) {
+                const lower_ratio = if (mixed_frequency_pivot_ratio <= 0)
+                    0
+                else
+                    end_ratio / mixed_frequency_pivot_ratio;
+                break :blk min_frequency + ((pivot - min_frequency) * lower_ratio);
+            }
+
+            const upper_ratio = (end_ratio - mixed_frequency_pivot_ratio) / (1.0 - mixed_frequency_pivot_ratio);
+            break :blk pivot * @exp(@log(max_frequency / pivot) * upper_ratio);
+        },
     };
 }
 
