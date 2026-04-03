@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("./core.zig");
+const chroma_analysis = @import("./chroma_analysis.zig");
 const mel_analysis = @import("./mel_analysis.zig");
 const mfcc = @import("./mfcc.zig");
 
@@ -32,6 +33,17 @@ pub fn freeBandLayoutResources() void {
     core.g_session.band_layout_resources = null;
 }
 
+pub fn freeChromaLayoutResources() void {
+    var current = core.g_session.chroma_layout_resources;
+    while (current) |node| {
+        const next = node.next;
+        node.deinit();
+        core.allocator.destroy(node);
+        current = next;
+    }
+    core.g_session.chroma_layout_resources = null;
+}
+
 pub fn freeScalogramResources() void {
     var current = core.g_session.scalogram_resources;
     while (current) |node| {
@@ -43,12 +55,23 @@ pub fn freeScalogramResources() void {
     core.g_session.scalogram_resources = null;
 }
 
-fn getFftResource(fft_size_i32: i32) ?*core.FftResource {
+pub fn freeConstantQResources() void {
+    var current = core.g_session.constant_q_resources;
+    while (current) |node| {
+        const next = node.next;
+        node.deinit();
+        core.allocator.destroy(node);
+        current = next;
+    }
+    core.g_session.constant_q_resources = null;
+}
+
+fn getFftResource(fft_size_i32: i32, window_function: core.WindowFunction) ?*core.FftResource {
     const fft_size = @as(usize, @intCast(fft_size_i32));
     const maximum_bin = @as(usize, @intCast(core.maxI32(2, @divTrunc(fft_size_i32, 2))));
     var current = core.g_session.fft_resources;
     while (current) |resource| : (current = resource.next) {
-        if (resource.fft_size == fft_size) return resource;
+        if (resource.fft_size == fft_size and resource.window_function == window_function) return resource;
     }
 
     if (fft_size == 0) return null;
@@ -57,6 +80,7 @@ fn getFftResource(fft_size_i32: i32) ?*core.FftResource {
     resource.* = .{
         .fft_size = fft_size,
         .maximum_bin = maximum_bin,
+        .window_function = window_function,
     };
     errdefer {
         resource.deinit();
@@ -74,10 +98,8 @@ fn getFftResource(fft_size_i32: i32) ?*core.FftResource {
     const half_fft_size = @as(f32, @floatFromInt(fft_size / 2));
     resource.power_scale = 1.0 / (half_fft_size * half_fft_size);
 
-    const denominator = @as(f32, @floatFromInt(fft_size - 1));
     for (resource.window, 0..) |*value, index| {
-        const ratio = (2.0 * std.math.pi * @as(f32, @floatFromInt(index))) / denominator;
-        value.* = 0.54 - (0.46 * @cos(ratio));
+        value.* = core.windowValue(window_function, @as(i32, @intCast(index)), @as(i32, @intCast(fft_size)));
     }
 
     resource.next = core.g_session.fft_resources;
@@ -324,11 +346,98 @@ fn getBandLayoutResource(
                 }
             }
         },
-        .scalogram => return null,
+        .scalogram, .chroma => return null,
     }
 
     resource.next = core.g_session.band_layout_resources;
     core.g_session.band_layout_resources = resource;
+    return resource;
+}
+
+fn getChromaLayoutResource(
+    analysis_type: core.AnalysisType,
+    fft_size: i32,
+    min_frequency: f32,
+    max_frequency: f32,
+    bin_count: i32,
+    bins_per_octave: i32,
+) ?*core.ChromaLayoutResource {
+    var current = core.g_session.chroma_layout_resources;
+    while (current) |resource| : (current = resource.next) {
+        if (resource.analysis_type == analysis_type and
+            resource.fft_size == fft_size and
+            resource.bin_count == bin_count and
+            resource.bins_per_octave == bins_per_octave and
+            core.approxEqF32(resource.sample_rate, core.g_session.sample_rate) and
+            core.approxEqF32(resource.min_frequency, min_frequency) and
+            core.approxEqF32(resource.max_frequency, max_frequency))
+        {
+            return resource;
+        }
+    }
+
+    const resource = core.allocator.create(core.ChromaLayoutResource) catch return null;
+    resource.* = .{
+        .analysis_type = analysis_type,
+        .fft_size = fft_size,
+        .sample_rate = core.g_session.sample_rate,
+        .min_frequency = min_frequency,
+        .max_frequency = max_frequency,
+        .bin_count = bin_count,
+        .bins_per_octave = bins_per_octave,
+    };
+    errdefer {
+        resource.deinit();
+        core.allocator.destroy(resource);
+    }
+
+    const layout_data = switch (analysis_type) {
+        .chroma => chroma_analysis.createCqtChromaFoldLayout(
+            bin_count,
+            bins_per_octave,
+        ) catch return null,
+        else => return null,
+    };
+
+    resource.row_offsets = layout_data.row_offsets;
+    resource.bin_indices = layout_data.bin_indices;
+    resource.weights = layout_data.weights;
+    resource.next = core.g_session.chroma_layout_resources;
+    core.g_session.chroma_layout_resources = resource;
+    return resource;
+}
+
+fn getConstantQResource(max_frequency: f32, bins_per_octave: i32, window_function: core.WindowFunction) ?*core.ConstantQResource {
+    const safe_bins_per_octave = core.maxI32(core.chroma_bin_count, bins_per_octave);
+    const safe_max_frequency = core.maxF32(core.cqt_default_fmin * 1.01, max_frequency);
+    const bin_count = chroma_analysis.constantQBinCount(safe_max_frequency, safe_bins_per_octave);
+    var current = core.g_session.constant_q_resources;
+    while (current) |resource| : (current = resource.next) {
+        if (resource.bin_count == bin_count and
+            resource.bins_per_octave == safe_bins_per_octave and
+            resource.window_function == window_function and
+            core.approxEqF32(resource.max_frequency, safe_max_frequency))
+        {
+            return resource;
+        }
+    }
+
+    const resource = core.allocator.create(core.ConstantQResource) catch return null;
+    errdefer core.allocator.destroy(resource);
+
+    const frequencies = chroma_analysis.createConstantQFrequencies(bin_count, safe_bins_per_octave) catch return null;
+    defer core.allocator.free(frequencies);
+
+    resource.* = .{
+        .bin_count = bin_count,
+        .max_frequency = safe_max_frequency,
+        .bins_per_octave = safe_bins_per_octave,
+        .window_function = window_function,
+        .bank = core.ScalogramKernelBank.initFromFrequencies(frequencies, window_function) catch return null,
+    };
+
+    resource.next = core.g_session.constant_q_resources;
+    core.g_session.constant_q_resources = resource;
     return resource;
 }
 
@@ -462,6 +571,7 @@ fn displayMinDbForAnalysisType(analysis_type: core.AnalysisType) f32 {
         .mel => mel_display_min_db,
         .mfcc => core.min_db,
         .scalogram => scalogram_display_min_db,
+        .chroma => 0.0,
         .spectrogram => core.min_db,
     };
 }
@@ -471,6 +581,7 @@ fn displayGammaForAnalysisType(analysis_type: core.AnalysisType) f32 {
         .mel => mel_display_gamma,
         .mfcc => 1.0,
         .scalogram => scalogram_display_gamma,
+        .chroma => 1.0,
         .spectrogram => 1.0,
     };
 }
@@ -488,6 +599,11 @@ fn normalizePowerForDisplay(
     const normalized = core.clampf32((decibels - clamped_min_db) / (clamped_max_db - clamped_min_db), 0.0, 1.0);
     const gamma = displayGammaForAnalysisType(analysis_type) * core.clampf32(distribution_gamma, 0.2, 2.5);
     return std.math.pow(f32, normalized, gamma);
+}
+
+fn normalizeChromaValueForDisplay(value: f32, distribution_gamma: f32) f32 {
+    const normalized = core.clampf32(value, 0.0, 1.0);
+    return std.math.pow(f32, normalized, core.clampf32(distribution_gamma, 0.2, 2.5));
 }
 
 fn computeScalogramKernelPower(center_sample: i32, kernel: *const core.ScalogramRowKernel) f32 {
@@ -659,6 +775,7 @@ fn writePaletteColor(normalized: f32, output: []u8) void {
 
 fn renderStftDerivedTile(
     analysis_type: core.AnalysisType,
+    window_function: core.WindowFunction,
     frequency_scale: core.FrequencyScale,
     tile_start: f64,
     tile_end: f64,
@@ -678,7 +795,7 @@ fn renderStftDerivedTile(
         return 0;
     }
 
-    const resource = getFftResource(fft_size) orelse return 0;
+    const resource = getFftResource(fft_size, window_function) orelse return 0;
     const session_duration = @as(f64, core.g_session.duration);
     const minimum_tile_span = 1.0 / @as(f64, core.g_session.sample_rate);
     const maximum_tile_start = @max(0.0, session_duration - minimum_tile_span);
@@ -754,6 +871,7 @@ fn renderStftDerivedTile(
                     core.g_session.sample_rate,
                 ), .mel, distribution_gamma, min_db, max_db),
                 .mfcc => 0.0,
+                .chroma => 0.0,
                 .spectrogram => blk: {
                     const base_range = layout.band_ranges[@as(usize, @intCast(row))];
                     const use_low_band = layout.use_low_frequency_enhancement and base_range.end_frequency <= layout.low_frequency_maximum;
@@ -770,6 +888,76 @@ fn renderStftDerivedTile(
             const target_row = row_count - row - 1;
             const pixel_offset = ((@as(usize, @intCast(target_row)) * output_width) + @as(usize, @intCast(column_index))) * 4;
             writePaletteColor(normalized, output[pixel_offset .. pixel_offset + 4]);
+        }
+    }
+
+    return 1;
+}
+
+fn renderChromaTile(
+    tile_start: f64,
+    tile_end: f64,
+    column_count: i32,
+    row_count: i32,
+    window_function: core.WindowFunction,
+    distribution_gamma: f32,
+    output_ptr: usize,
+) i32 {
+    if (!core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end)) {
+        return 0;
+    }
+
+    const session_duration = @as(f64, core.g_session.duration);
+    const minimum_tile_span = 1.0 / @as(f64, core.g_session.sample_rate);
+    const maximum_tile_start = @max(0.0, session_duration - minimum_tile_span);
+    const clamped_tile_start = core.clampf64(tile_start, 0.0, maximum_tile_start);
+    const clamped_tile_end = core.clampf64(tile_end, clamped_tile_start + minimum_tile_span, session_duration);
+    const safe_max_frequency = core.maxF32(core.cqt_default_fmin * 1.01, core.g_session.max_frequency);
+    const cqt_resource = getConstantQResource(safe_max_frequency, core.cqt_default_bins_per_octave, window_function) orelse return 0;
+    const layout = getChromaLayoutResource(
+        .chroma,
+        0,
+        core.cqt_default_fmin,
+        safe_max_frequency,
+        cqt_resource.bin_count,
+        cqt_resource.bins_per_octave,
+    ) orelse return 0;
+    const cqt_powers = core.allocator.alloc(f32, @as(usize, @intCast(cqt_resource.bin_count))) catch return 0;
+    defer core.allocator.free(cqt_powers);
+
+    const output = @as([*]u8, @ptrFromInt(output_ptr));
+    const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(clamped_tile_end - clamped_tile_start)));
+    const output_width = @as(usize, @intCast(column_count));
+    var chroma_values: [core.chroma_bin_count]f32 = [_]f32{0.0} ** core.chroma_bin_count;
+
+    var column_index: i32 = 0;
+    while (column_index < column_count) : (column_index += 1) {
+        const center_ratio = if (column_count == 1)
+            0.5
+        else
+            (@as(f64, @floatFromInt(column_index)) + 0.5) / @as(f64, @floatFromInt(column_count));
+        const center_time = clamped_tile_start + (center_ratio * @as(f64, safe_tile_span));
+        const center_sample = @as(i32, @intFromFloat(@round(center_time * @as(f64, core.g_session.sample_rate))));
+
+        for (cqt_resource.bank.rows, 0..) |*kernel, bin_usize| {
+            cqt_powers[bin_usize] = computeScalogramKernelPower(center_sample, kernel);
+        }
+
+        chroma_analysis.accumulateChromaValues(cqt_powers, layout, chroma_values[0..]);
+        chroma_analysis.normalizeChromaValues(chroma_values[0..]);
+
+        var row: i32 = 0;
+        while (row < row_count) : (row += 1) {
+            const chroma_value = if (row < core.chroma_bin_count)
+                chroma_values[@as(usize, @intCast(row))]
+            else
+                0.0;
+            const target_row = row_count - row - 1;
+            const pixel_offset = ((@as(usize, @intCast(target_row)) * output_width) + @as(usize, @intCast(column_index))) * 4;
+            writePaletteColor(
+                normalizeChromaValueForDisplay(chroma_value, distribution_gamma),
+                output[pixel_offset .. pixel_offset + 4],
+            );
         }
     }
 
@@ -861,6 +1049,7 @@ pub export fn wave_sample_mfcc_value_at_frame(
     fft_size: i32,
     min_frequency: f32,
     max_frequency: f32,
+    window_function_value: i32,
 ) f32 {
     if (core.g_session.samples.len == 0 or coefficient_count <= 0 or coefficient_index < 0 or coefficient_index >= coefficient_count or mel_band_count <= 0 or fft_size <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or core.g_session.sample_rate <= 0.0 or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
         return std.math.nan(f32);
@@ -872,7 +1061,7 @@ pub export fn wave_sample_mfcc_value_at_frame(
         return std.math.nan(f32);
     }
 
-    const resource = getFftResource(fft_size) orelse return std.math.nan(f32);
+    const resource = getFftResource(fft_size, core.decodeWindowFunction(window_function_value)) orelse return std.math.nan(f32);
     const layout = getBandLayoutResource(
         .mfcc,
         .log,
@@ -920,6 +1109,7 @@ pub export fn wave_render_spectrogram_tile_rgba(
     min_db: f32,
     max_db: f32,
     scalogram_omega0: f32,
+    window_function_value: i32,
     output_ptr: usize,
 ) i32 {
     if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or decimation_factor <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or !core.isFiniteF32(core.g_session.duration) or core.g_session.sample_rate <= 0.0 or core.g_session.duration <= 0.0 or !core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or !core.isFiniteF32(distribution_gamma) or !core.isFiniteF32(min_db) or !core.isFiniteF32(max_db) or !core.isFiniteF32(scalogram_omega0) or tile_end <= tile_start) {
@@ -928,6 +1118,7 @@ pub export fn wave_render_spectrogram_tile_rgba(
 
     const analysis_type = core.decodeAnalysisType(analysis_type_value);
     const frequency_scale = core.decodeFrequencyScale(frequency_scale_value);
+    const window_function = core.decodeWindowFunction(window_function_value);
 
     return switch (analysis_type) {
         .scalogram => renderScalogramTile(
@@ -943,9 +1134,19 @@ pub export fn wave_render_spectrogram_tile_rgba(
             scalogram_omega0,
             output_ptr,
         ),
+        .chroma => renderChromaTile(
+            tile_start,
+            tile_end,
+            column_count,
+            row_count,
+            window_function,
+            distribution_gamma,
+            output_ptr,
+        ),
         .mel, .mfcc, .spectrogram => if (fft_size > 0)
             renderStftDerivedTile(
                 analysis_type,
+                window_function,
                 frequency_scale,
                 tile_start,
                 tile_end,

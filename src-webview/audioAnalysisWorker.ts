@@ -3,6 +3,19 @@ import {
   TILE_COLUMN_COUNT,
   quantizeCeil,
 } from './sharedBuffers';
+import {
+  buildConstantQFrequencies,
+  buildCqtChromaAssignments,
+  CHROMA_BIN_COUNT,
+  CQT_DEFAULT_BINS_PER_OCTAVE,
+  CQT_DEFAULT_FMIN,
+} from './chromaShared';
+import {
+  getWindowValue,
+  normalizeSpectrogramWindowFunction,
+  type SpectrogramWindowFunction,
+  WINDOW_FUNCTION_CODES,
+} from './windowShared';
 
 const MIN_FREQUENCY = 50;
 const MAX_FREQUENCY = 20000;
@@ -73,6 +86,8 @@ const ANALYSIS_TYPE_CODES = {
   mel: 1,
   scalogram: 2,
   mfcc: 3,
+  chroma: 5,
+  chroma_cqt: 5,
 };
 const FREQUENCY_SCALE_CODES = {
   log: 0,
@@ -92,9 +107,10 @@ const SLANEY_MEL_LOG_REGION_START_MEL = (SLANEY_MEL_LOG_REGION_START_HZ - SLANEY
 const SLANEY_MEL_LOG_STEP = Math.log(6.4) / 27;
 
 type QualityPreset = 'balanced' | 'high' | 'max';
-type AnalysisType = 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
+type AnalysisType = 'chroma' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
 type ColormapDistribution = keyof typeof COLORMAP_DISTRIBUTION_GAMMAS;
 type FrequencyScale = 'linear' | 'log' | 'mixed';
+type WindowFunction = SpectrogramWindowFunction;
 type LayerKind = 'overview' | 'visible';
 type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
 type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
@@ -276,6 +292,10 @@ fn paletteColor(normalized: f32) -> vec4<f32> {
 
 const WEBGPU_SPECTROGRAM_INPUT_SHADER = /* wgsl */`
 const TWO_PI: f32 = 6.283185307179586;
+const WINDOW_HANN: u32 = 0u;
+const WINDOW_HAMMING: u32 = 1u;
+const WINDOW_BLACKMAN: u32 = 2u;
+const WINDOW_RECTANGULAR: u32 = 3u;
 
 struct ComputeParams {
   header0: vec4<u32>,
@@ -296,6 +316,7 @@ fn prepareSpectrogramInput(
   let fftSize = params.header0.x;
   let columnCount = params.header0.y;
   let sampleCount = params.header0.w;
+  let windowFunction = params.header1.y;
   let decimationFactor = max(params.header1.z, 1u);
   let totalSamples = fftSize * columnCount;
   let linearIndex = globalId.x + (globalId.y * numWorkgroups.x * 64u);
@@ -345,7 +366,14 @@ fn prepareSpectrogramInput(
 
   let denominator = max(f32(max(fftSize, 2u) - 1u), 1.0);
   let phase = TWO_PI * f32(sampleOffset) / denominator;
-  let window = 0.54 - (0.46 * cos(phase));
+  var window = 0.5 - (0.5 * cos(phase));
+  if (windowFunction == WINDOW_HAMMING) {
+    window = 0.54 - (0.46 * cos(phase));
+  } else if (windowFunction == WINDOW_BLACKMAN) {
+    window = 0.42 - (0.5 * cos(phase)) + (0.08 * cos(phase * 2.0));
+  } else if (windowFunction == WINDOW_RECTANGULAR) {
+    window = 1.0;
+  }
   outputSpectrum[(columnIndex * fftSize) + sampleOffset] = vec2<f32>(sample * window, 0.0);
 }
 `;
@@ -694,6 +722,186 @@ fn renderMfccTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
 }
 `;
 
+const WEBGPU_CQT_VALUES_SHADER = /* wgsl */`
+const CQT_TAP_REDUCTION_SIZE: u32 = 32u;
+
+struct ComputeParams {
+  header0: vec4<u32>,
+  timing: vec4<f32>,
+  padding0: vec4<u32>,
+  padding1: vec4<f32>,
+};
+
+struct CqtRow {
+  tapOffset: u32,
+  tapCount: u32,
+  firstOffset: i32,
+  lastOffset: i32,
+  normalization: f32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+};
+
+struct CqtTap {
+  sampleOffset: i32,
+  realWeight: f32,
+  imagWeight: f32,
+  normWeight: f32,
+};
+
+@group(0) @binding(0) var<uniform> params: ComputeParams;
+@group(0) @binding(1) var<storage, read> pcmSamples: array<f32>;
+@group(0) @binding(2) var<storage, read> rowMeta: array<CqtRow>;
+@group(0) @binding(3) var<storage, read> taps: array<CqtTap>;
+@group(0) @binding(4) var<storage, read_write> cqtValues: array<f32>;
+
+var<workgroup> partialReal: array<f32, CQT_TAP_REDUCTION_SIZE>;
+var<workgroup> partialImaginary: array<f32, CQT_TAP_REDUCTION_SIZE>;
+var<workgroup> partialNorm: array<f32, CQT_TAP_REDUCTION_SIZE>;
+
+@compute @workgroup_size(32, 1, 1)
+fn computeCqtValues(
+  @builtin(workgroup_id) workgroupId: vec3<u32>,
+  @builtin(local_invocation_id) localId: vec3<u32>,
+) {
+  let columnIndex = workgroupId.x;
+  let binIndex = workgroupId.y;
+  let columnCount = params.header0.x;
+  let binCount = params.header0.y;
+  let sampleCount = params.header0.z;
+  let localIndex = localId.x;
+
+  if (columnIndex >= columnCount || binIndex >= binCount) {
+    return;
+  }
+
+  var centerRatio = 0.5;
+  if (columnCount > 1u) {
+    centerRatio = (f32(columnIndex) + 0.5) / f32(columnCount);
+  }
+
+  let centerTime = params.timing.x + (centerRatio * params.timing.y);
+  let centerSample = i32(round(centerTime * params.timing.z));
+  let row = rowMeta[binIndex];
+  let firstSample = centerSample + row.firstOffset;
+  let lastSample = centerSample + row.lastOffset;
+  let useFullNormalization = firstSample >= 0 && u32(lastSample) < sampleCount;
+  var real = 0.0;
+  var imaginary = 0.0;
+  var norm = select(0.0, row.normalization, useFullNormalization);
+  var tapIndex = localIndex;
+
+  loop {
+    if (tapIndex >= row.tapCount) {
+      break;
+    }
+
+    let packedIndex = row.tapOffset + tapIndex;
+    let tap = taps[packedIndex];
+    let sampleIndex = centerSample + tap.sampleOffset;
+    if (sampleIndex >= 0 && u32(sampleIndex) < sampleCount) {
+      let sample = pcmSamples[u32(sampleIndex)];
+      real += sample * tap.realWeight;
+      imaginary += sample * tap.imagWeight;
+      if (!useFullNormalization) {
+        norm += tap.normWeight;
+      }
+    }
+    tapIndex += CQT_TAP_REDUCTION_SIZE;
+  }
+
+  partialReal[localIndex] = real;
+  partialImaginary[localIndex] = imaginary;
+  partialNorm[localIndex] = norm;
+  workgroupBarrier();
+
+  var reductionStride = CQT_TAP_REDUCTION_SIZE / 2u;
+  loop {
+    if (reductionStride == 0u) {
+      break;
+    }
+
+    if (localIndex < reductionStride) {
+      partialReal[localIndex] += partialReal[localIndex + reductionStride];
+      partialImaginary[localIndex] += partialImaginary[localIndex + reductionStride];
+      partialNorm[localIndex] += partialNorm[localIndex + reductionStride];
+    }
+
+    workgroupBarrier();
+    reductionStride = reductionStride / 2u;
+  }
+
+  if (localIndex != 0u) {
+    return;
+  }
+
+  let finalNorm = partialNorm[0];
+  let power = select(
+    0.0,
+    ((partialReal[0] * partialReal[0]) + (partialImaginary[0] * partialImaginary[0])) / max(finalNorm, 1e-8),
+    finalNorm > 1e-8,
+  );
+  cqtValues[(columnIndex * binCount) + binIndex] = power;
+}
+`;
+
+const WEBGPU_CQT_CHROMA_RENDER_SHADER = /* wgsl */`
+${WEBGPU_PALETTE_SHADER_HELPERS}
+
+struct ComputeParams {
+  header0: vec4<u32>,
+  timing: vec4<f32>,
+  padding0: vec4<u32>,
+  padding1: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> params: ComputeParams;
+@group(0) @binding(1) var<storage, read> cqtValues: array<f32>;
+@group(0) @binding(2) var<storage, read> chromaAssignments: array<u32>;
+@group(0) @binding(3) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+
+fn normalizeCqtChromaValue(value: f32, columnMax: f32, distributionGamma: f32) -> f32 {
+  if (columnMax <= 1e-8) {
+    return 0.0;
+  }
+
+  return pow(clamp(value / columnMax, 0.0, 1.0), clamp(distributionGamma, 0.2, 2.5));
+}
+
+@compute @workgroup_size(8, 8)
+fn renderCqtChromaTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
+  let columnIndex = globalId.x;
+  let rowIndex = globalId.y;
+  let columnCount = params.header0.x;
+  let rowCount = params.header0.y;
+  let binCount = params.header0.z;
+
+  if (columnIndex >= columnCount || rowIndex >= rowCount) {
+    return;
+  }
+
+  let baseIndex = columnIndex * binCount;
+  var chromaValues = array<f32, 12>(
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  );
+
+  for (var binIndex = 0u; binIndex < binCount; binIndex += 1u) {
+    let chromaIndex = min(chromaAssignments[binIndex], rowCount - 1u);
+    chromaValues[chromaIndex] += cqtValues[baseIndex + binIndex];
+  }
+
+  var columnMax = 0.0;
+  for (var chromaIndex = 0u; chromaIndex < rowCount; chromaIndex += 1u) {
+    columnMax = max(columnMax, chromaValues[chromaIndex]);
+  }
+
+  let normalized = normalizeCqtChromaValue(chromaValues[rowIndex], columnMax, params.padding1.x);
+  let targetRow = i32((rowCount - 1u) - rowIndex);
+  textureStore(outputTexture, vec2<i32>(i32(columnIndex), targetRow), paletteColor(normalized));
+}
+`;
+
 const WEBGPU_SCALOGRAM_RENDER_SHADER = /* wgsl */`
 ${WEBGPU_PALETTE_SHADER_HELPERS}
 
@@ -1029,6 +1237,7 @@ interface SpectrogramRequest {
   mfccMelBandCount?: number;
   minDecibels?: number;
   overlapRatio?: number;
+  windowFunction?: WindowFunction;
   scalogramHopSamples?: number;
   scalogramMaxFrequency?: number;
   scalogramMinFrequency?: number;
@@ -1105,6 +1314,7 @@ interface RenderRequestPlan {
   tileDuration: number;
   viewEnd: number;
   viewStart: number;
+  windowFunction: WindowFunction;
   windowSeconds: number;
 }
 
@@ -1155,7 +1365,7 @@ interface SpectrogramBandLayoutResource {
   key: string;
 }
 
-interface MelBandLayoutResource {
+interface WeightedBandLayoutResource {
   bandCount: number;
   binBuffer: any;
   key: string;
@@ -1163,7 +1373,7 @@ interface MelBandLayoutResource {
   weightBuffer: any;
 }
 
-type WebGpuStftLayoutResource = MelBandLayoutResource | SpectrogramBandLayoutResource;
+type WebGpuStftLayoutResource = SpectrogramBandLayoutResource | WeightedBandLayoutResource;
 
 interface MfccDctBasisResource {
   bandCount: number;
@@ -1173,6 +1383,14 @@ interface MfccDctBasisResource {
 }
 
 interface ScalogramKernelResource {
+  key: string;
+  rowBuffer: any;
+  tapBuffer: any;
+}
+
+interface WebGpuCqtKernelResource {
+  binCount: number;
+  chromaAssignmentBuffer: any;
   key: string;
   rowBuffer: any;
   tapBuffer: any;
@@ -1265,6 +1483,19 @@ interface WebGpuScalogramComputeState {
   renderPipeline: any;
 }
 
+interface WebGpuCqtComputeState {
+  cqtValueBuffer: any;
+  cqtValueBufferCapacity: number;
+  kernelResources: Map<string, WebGpuCqtKernelResource>;
+  paramBuffer: any;
+  pcmBuffer: any;
+  pcmSampleCount: number;
+  renderChromaBindGroupLayout: any;
+  renderChromaPipeline: any;
+  renderValuesBindGroupLayout: any;
+  renderValuesPipeline: any;
+}
+
 interface WebGpuCompositorState {
   analysisFallbackReasons: Partial<Record<AnalysisType, string>>;
   bindGroupLayout: any;
@@ -1276,6 +1507,7 @@ interface WebGpuCompositorState {
   presentInstanceBuffer: any;
   presentInstanceCapacity: number;
   sampler: any;
+  cqtCompute: WebGpuCqtComputeState | null;
   scalogramCompute: WebGpuScalogramComputeState | null;
   stftCompute: WebGpuStftComputeState | null;
   surfaceResetPending: boolean;
@@ -1525,7 +1757,13 @@ function normalizeQualityPreset(value: unknown): QualityPreset {
 }
 
 function normalizeAnalysisType(value: unknown): AnalysisType {
-  return value === 'mel' || value === 'mfcc' || value === 'scalogram' ? value : 'spectrogram';
+  return value === 'chroma'
+    || value === 'chroma_cqt'
+    || value === 'mel'
+    || value === 'mfcc'
+    || value === 'scalogram'
+    ? (value === 'chroma_cqt' ? 'chroma' : value)
+    : 'spectrogram';
 }
 
 function normalizeColormapDistribution(value: unknown): ColormapDistribution {
@@ -1591,6 +1829,10 @@ function normalizeFrequencyScale(value: unknown): FrequencyScale {
 
 function getEffectiveFrequencyScale(analysisType: AnalysisType, value: unknown): FrequencyScale {
   return analysisType === 'spectrogram' ? normalizeFrequencyScale(value) : 'log';
+}
+
+function isChromaAnalysisType(analysisType: AnalysisType): boolean {
+  return analysisType === 'chroma';
 }
 
 function getWebGpuGlobals() {
@@ -1670,6 +1912,26 @@ function destroyScalogramKernelResources(computeState: WebGpuScalogramComputeSta
     }
     if (resource.tapBuffer && typeof resource.tapBuffer.destroy === 'function') {
       resource.tapBuffer.destroy();
+    }
+  }
+
+  computeState.kernelResources.clear();
+}
+
+function destroyCqtKernelResources(computeState: WebGpuCqtComputeState | null): void {
+  if (!computeState) {
+    return;
+  }
+
+  for (const resource of computeState.kernelResources.values()) {
+    if (resource.rowBuffer && typeof resource.rowBuffer.destroy === 'function') {
+      resource.rowBuffer.destroy();
+    }
+    if (resource.tapBuffer && typeof resource.tapBuffer.destroy === 'function') {
+      resource.tapBuffer.destroy();
+    }
+    if (resource.chromaAssignmentBuffer && typeof resource.chromaAssignmentBuffer.destroy === 'function') {
+      resource.chromaAssignmentBuffer.destroy();
     }
   }
 
@@ -1803,6 +2065,24 @@ function destroyWebGpuScalogramComputeState(computeState: WebGpuScalogramCompute
   computeState.fftParamBuffer = null;
 }
 
+function destroyWebGpuCqtComputeState(computeState: WebGpuCqtComputeState | null): void {
+  if (!computeState) {
+    return;
+  }
+
+  destroyCqtKernelResources(computeState);
+  for (const buffer of [computeState.cqtValueBuffer, computeState.paramBuffer, computeState.pcmBuffer]) {
+    if (buffer && typeof buffer.destroy === 'function') {
+      buffer.destroy();
+    }
+  }
+  computeState.cqtValueBuffer = null;
+  computeState.cqtValueBufferCapacity = 0;
+  computeState.paramBuffer = null;
+  computeState.pcmBuffer = null;
+  computeState.pcmSampleCount = 0;
+}
+
 function resetWebGpuComputeSessionResources(): void {
   const webGpu = surfaceState.webGpu;
 
@@ -1816,6 +2096,18 @@ function resetWebGpuComputeSessionResources(): void {
     webGpu.stftCompute.pcmBuffer.destroy();
     webGpu.stftCompute.pcmBuffer = null;
     webGpu.stftCompute.pcmSampleCount = 0;
+  }
+
+  destroyCqtKernelResources(webGpu.cqtCompute);
+  if (webGpu.cqtCompute?.cqtValueBuffer && typeof webGpu.cqtCompute.cqtValueBuffer.destroy === 'function') {
+    webGpu.cqtCompute.cqtValueBuffer.destroy();
+    webGpu.cqtCompute.cqtValueBuffer = null;
+    webGpu.cqtCompute.cqtValueBufferCapacity = 0;
+  }
+  if (webGpu.cqtCompute?.pcmBuffer && typeof webGpu.cqtCompute.pcmBuffer.destroy === 'function') {
+    webGpu.cqtCompute.pcmBuffer.destroy();
+    webGpu.cqtCompute.pcmBuffer = null;
+    webGpu.cqtCompute.pcmSampleCount = 0;
   }
 
   destroyScalogramKernelResources(webGpu.scalogramCompute);
@@ -1903,6 +2195,7 @@ function destroyWebGpuCompositor(): void {
   }
 
   destroyWebGpuStftComputeState(surfaceState.webGpu?.stftCompute ?? null);
+  destroyWebGpuCqtComputeState(surfaceState.webGpu?.cqtCompute ?? null);
   destroyWebGpuScalogramComputeState(surfaceState.webGpu?.scalogramCompute ?? null);
   if (surfaceState.webGpu?.presentInstanceBuffer && typeof surfaceState.webGpu.presentInstanceBuffer.destroy === 'function') {
     surfaceState.webGpu.presentInstanceBuffer.destroy();
@@ -2106,6 +2399,7 @@ async function initializeWebGpuCompositor(): Promise<void> {
         presentInstanceBuffer: null,
         presentInstanceCapacity: 0,
         sampler,
+        cqtCompute: null,
         scalogramCompute: null,
         stftCompute: null,
         surfaceResetPending: false,
@@ -2589,6 +2883,7 @@ function getWebGpuTileSubmitBatchSize(plan: RenderRequestPlan): number {
     !surfaceState.webGpu
     || !canUseWebGpuNativeCompute(plan)
     || plan.analysisType === 'scalogram'
+    || plan.analysisType === 'chroma'
   ) {
     return 1;
   }
@@ -2767,6 +3062,7 @@ function renderTileChunk(
     plan.minDecibels,
     plan.maxDecibels,
     plan.scalogramOmega0,
+    WINDOW_FUNCTION_CODES[plan.windowFunction] ?? 0,
     analysisState.spectrogramOutputPointer,
   );
 
@@ -3145,8 +3441,8 @@ function buildStftLayoutCacheKey(plan: RenderRequestPlan): string {
     `bands${bandCount}`,
     `dec${plan.decimationFactor}`,
     `sr${analysisState.sampleRate}`,
-    `min${analysisState.minFrequency}`,
-    `max${analysisState.maxFrequency}`,
+    `min${plan.minFrequency}`,
+    `max${plan.maxFrequency}`,
   ].join(':');
 }
 
@@ -3233,8 +3529,8 @@ function getStftLayoutResource(
     const rows = Math.max(1, plan.melBandCount);
     const nyquist = analysisState.sampleRate / 2;
     const maximumBin = Math.max(2, Math.trunc(plan.fftSize / 2));
-    const safeMinFrequency = Math.max(0, analysisState.minFrequency);
-    const safeMaxFrequency = Math.max(safeMinFrequency + 1, analysisState.maxFrequency);
+    const safeMinFrequency = Math.max(0, plan.minFrequency);
+    const safeMaxFrequency = Math.max(safeMinFrequency + 1, plan.maxFrequency);
     const melMin = hzToMel(safeMinFrequency);
     const melMax = hzToMel(safeMaxFrequency);
     const melStep = (melMax - melMin) / (rows + 1);
@@ -3292,7 +3588,7 @@ function getStftLayoutResource(
       rowData[offset + 1] = bins.length - rowOffset;
     }
 
-    const resource: MelBandLayoutResource = {
+    const resource: WeightedBandLayoutResource = {
       bandCount: rows,
       binBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Uint32Array(bins)),
       key: cacheKey,
@@ -3306,8 +3602,8 @@ function getStftLayoutResource(
   const baseRanges = createSpectrogramBandRanges({
     fftSize: plan.fftSize,
     frequencyScale: plan.frequencyScale,
-    maxFrequency: analysisState.maxFrequency,
-    minFrequency: analysisState.minFrequency,
+    maxFrequency: plan.maxFrequency,
+    minFrequency: plan.minFrequency,
     rowCount: plan.rowCount,
     sampleRate: analysisState.sampleRate,
   });
@@ -3326,7 +3622,7 @@ function getStftLayoutResource(
         baseRanges,
         plan.fftSize,
         effectiveSampleRate,
-        analysisState.minFrequency,
+        plan.minFrequency,
         lowFrequencyMaximum,
       );
     }
@@ -3460,6 +3756,115 @@ function getScalogramKernelResource(
   };
   computeState.kernelResources.set(cacheKey, resource);
   return resource;
+}
+
+function buildCqtKernelCacheKey(plan: RenderRequestPlan): string {
+  return [
+    `sr${analysisState.sampleRate}`,
+    `max${plan.maxFrequency}`,
+    `bpo${CQT_DEFAULT_BINS_PER_OCTAVE}`,
+    `win${plan.windowFunction}`,
+  ].join(':');
+}
+
+function getCqtKernelResource(
+  plan: RenderRequestPlan,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuCqtComputeState,
+): WebGpuCqtKernelResource | null {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return null;
+  }
+
+  const cacheKey = buildCqtKernelCacheKey(plan);
+  const cached = computeState.kernelResources.get(cacheKey) ?? null;
+  if (cached) {
+    return cached;
+  }
+
+  const frequencies = buildConstantQFrequencies(plan.maxFrequency, {
+    binsPerOctave: CQT_DEFAULT_BINS_PER_OCTAVE,
+    fmin: CQT_DEFAULT_FMIN,
+  });
+  const assignments = buildCqtChromaAssignments(frequencies.length, {
+    binsPerOctave: CQT_DEFAULT_BINS_PER_OCTAVE,
+    chromaBinCount: CHROMA_BIN_COUNT,
+  });
+  const rowBufferData = new ArrayBuffer(frequencies.length * 32);
+  const rowView = new DataView(rowBufferData);
+  const taps: Array<{ imagWeight: number; normWeight: number; realWeight: number; sampleOffset: number }> = [];
+  const twoPi = Math.PI * 2;
+
+  for (let binIndex = 0; binIndex < frequencies.length; binIndex += 1) {
+    const frequency = Math.max(1, frequencies[binIndex] ?? 0);
+    const scaleSeconds = DEFAULT_SCALOGRAM_OMEGA0 / (twoPi * frequency);
+    const supportSamples = Math.min(
+      4096,
+      Math.max(24, Math.ceil(scaleSeconds * 3 * analysisState.sampleRate)),
+    );
+    const stride = Math.max(1, Math.trunc(supportSamples / 96));
+    const tapCount = Math.floor((supportSamples * 2) / stride) + 1;
+    const phaseStep = (twoPi * frequency * stride) / analysisState.sampleRate;
+    const stepCos = Math.cos(phaseStep);
+    const stepSin = Math.sin(phaseStep);
+    const initialPhase = (twoPi * frequency * -supportSamples) / analysisState.sampleRate;
+    let phaseCos = Math.cos(initialPhase);
+    let phaseSin = Math.sin(initialPhase);
+    let normalization = 0;
+    let offsetValue = -supportSamples;
+    const tapOffset = taps.length;
+
+    for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
+      const windowValue = getWindowValue(plan.windowFunction, tapIndex, tapCount);
+      const normWeight = windowValue * windowValue;
+
+      taps.push({
+        imagWeight: -windowValue * phaseSin,
+        normWeight,
+        realWeight: windowValue * phaseCos,
+        sampleOffset: offsetValue,
+      });
+      normalization += normWeight;
+
+      const nextPhaseCos = (phaseCos * stepCos) - (phaseSin * stepSin);
+      phaseSin = (phaseSin * stepCos) + (phaseCos * stepSin);
+      phaseCos = nextPhaseCos;
+      offsetValue += stride;
+    }
+
+    const rowOffset = binIndex * 32;
+    rowView.setUint32(rowOffset, tapOffset, true);
+    rowView.setUint32(rowOffset + 4, tapCount, true);
+    rowView.setInt32(rowOffset + 8, taps[tapOffset]?.sampleOffset ?? 0, true);
+    rowView.setInt32(rowOffset + 12, taps[tapOffset + tapCount - 1]?.sampleOffset ?? 0, true);
+    rowView.setFloat32(rowOffset + 16, normalization, true);
+  }
+
+  const tapBufferData = new ArrayBuffer(taps.length * 16);
+  const tapView = new DataView(tapBufferData);
+  for (let tapIndex = 0; tapIndex < taps.length; tapIndex += 1) {
+    const tap = taps[tapIndex]!;
+    const byteOffset = tapIndex * 16;
+    tapView.setInt32(byteOffset, tap.sampleOffset, true);
+    tapView.setFloat32(byteOffset + 4, tap.realWeight, true);
+    tapView.setFloat32(byteOffset + 8, tap.imagWeight, true);
+    tapView.setFloat32(byteOffset + 12, tap.normWeight, true);
+  }
+
+  try {
+    const resource: WebGpuCqtKernelResource = {
+      binCount: frequencies.length,
+      chromaAssignmentBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, assignments),
+      key: cacheKey,
+      rowBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, rowBufferData),
+      tapBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, tapBufferData),
+    };
+    computeState.kernelResources.set(cacheKey, resource);
+    return resource;
+  } catch {
+    return null;
+  }
 }
 
 function buildScalogramFftPlanKey(plan: RenderRequestPlan): string {
@@ -3702,7 +4107,7 @@ function createStftComputeParamsData(
   view.setUint32(8, plan.rowCount, true);
   view.setUint32(12, sampleCount, true);
   view.setUint32(16, slotStageIndex, true);
-  view.setUint32(20, ANALYSIS_TYPE_CODES[plan.analysisType] ?? 0, true);
+  view.setUint32(20, WINDOW_FUNCTION_CODES[plan.windowFunction] ?? 0, true);
   view.setUint32(24, decimationFactor, true);
   view.setUint32(28, useLowFrequencyEnhancement ? 1 : 0, true);
   view.setFloat32(32, tileStart, true);
@@ -3783,6 +4188,39 @@ function createScalogramComputeParamsData(
   view.setFloat32(48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
   view.setFloat32(52, plan.minDecibels, true);
   view.setFloat32(56, plan.maxDecibels, true);
+  return buffer;
+}
+
+function createCqtComputeParamsData(
+  columnCount: number,
+  binCount: number,
+  sampleCount: number,
+  sampleRate: number,
+  tileStart: number,
+  tileSpan: number,
+): ArrayBuffer {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, columnCount, true);
+  view.setUint32(4, binCount, true);
+  view.setUint32(8, sampleCount, true);
+  view.setFloat32(16, tileStart, true);
+  view.setFloat32(20, tileSpan, true);
+  view.setFloat32(24, sampleRate, true);
+  return buffer;
+}
+
+function createCqtRenderParamsData(
+  plan: RenderRequestPlan,
+  columnCount: number,
+  binCount: number,
+): ArrayBuffer {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, columnCount, true);
+  view.setUint32(4, plan.rowCount, true);
+  view.setUint32(8, binCount, true);
+  view.setFloat32(48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
   return buffer;
 }
 
@@ -4296,7 +4734,6 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
         },
       ],
     });
-
     webGpu.stftCompute = {
       bandLayoutResources: new Map(),
       fftBindGroupLayout,
@@ -4373,6 +4810,116 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
   }
 
   return webGpu.stftCompute;
+}
+
+function initializeWebGpuCqtCompute(webGpu: WebGpuCompositorState): WebGpuCqtComputeState | null {
+  if (webGpu.cqtCompute) {
+    return webGpu.cqtCompute;
+  }
+
+  const globals = getWebGpuGlobals();
+  if (!globals || !Number.isFinite(globals.textureUsage.STORAGE_BINDING)) {
+    return null;
+  }
+
+  try {
+    const valuesModule = webGpu.device.createShaderModule({ code: WEBGPU_CQT_VALUES_SHADER });
+    const renderModule = webGpu.device.createShaderModule({ code: WEBGPU_CQT_CHROMA_RENDER_SHADER });
+    const paramBuffer = webGpu.device.createBuffer({
+      size: 512,
+      usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM,
+    });
+    const renderValuesBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 4,
+          buffer: { type: 'storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+    const renderChromaBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          storageTexture: {
+            access: 'write-only',
+            format: WEBGPU_TILE_TEXTURE_FORMAT as any,
+            viewDimension: '2d',
+          },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+
+    webGpu.cqtCompute = {
+      cqtValueBuffer: null,
+      cqtValueBufferCapacity: 0,
+      kernelResources: new Map(),
+      paramBuffer,
+      pcmBuffer: null,
+      pcmSampleCount: 0,
+      renderChromaBindGroupLayout,
+      renderChromaPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'renderCqtChromaTexture',
+          module: renderModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [renderChromaBindGroupLayout],
+        }),
+      }),
+      renderValuesBindGroupLayout,
+      renderValuesPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'computeCqtValues',
+          module: valuesModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [renderValuesBindGroupLayout],
+        }),
+      }),
+    };
+  } catch {
+    return null;
+  }
+
+  return webGpu.cqtCompute;
 }
 
 function initializeWebGpuScalogramCompute(webGpu: WebGpuCompositorState): WebGpuScalogramComputeState | null {
@@ -4738,6 +5285,40 @@ function ensureWebGpuMfccScratchBuffer(
   }
 }
 
+function ensureWebGpuCqtValueBuffer(
+  computeState: WebGpuCqtComputeState,
+  tileRecord: TileRecord,
+  binCount: number,
+  webGpu: WebGpuCompositorState,
+): boolean {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return false;
+  }
+
+  const requiredValueCount = Math.max(1, tileRecord.columnCount * Math.max(1, binCount));
+  if (computeState.cqtValueBuffer && computeState.cqtValueBufferCapacity >= requiredValueCount) {
+    return true;
+  }
+
+  if (computeState.cqtValueBuffer && typeof computeState.cqtValueBuffer.destroy === 'function') {
+    computeState.cqtValueBuffer.destroy();
+  }
+
+  try {
+    computeState.cqtValueBuffer = webGpu.device.createBuffer({
+      size: alignTo(requiredValueCount * Float32Array.BYTES_PER_ELEMENT, 4),
+      usage: globals.bufferUsage.STORAGE,
+    });
+    computeState.cqtValueBufferCapacity = requiredValueCount;
+    return true;
+  } catch {
+    computeState.cqtValueBuffer = null;
+    computeState.cqtValueBufferCapacity = 0;
+    return false;
+  }
+}
+
 async function renderStftTileWithWebGpu(
   plan: RenderRequestPlan,
   tileRecord: TileRecord,
@@ -4894,7 +5475,7 @@ async function renderStftTileWithWebGpu(
       : finalBaseBuffer;
 
     if (plan.analysisType === 'mel') {
-      const melResource = layoutResource as MelBandLayoutResource;
+      const melResource = layoutResource as WeightedBandLayoutResource;
       const bindGroup = webGpu.device.createBindGroup({
         layout: computeState.renderMelBindGroupLayout,
         entries: [
@@ -4909,7 +5490,7 @@ async function renderStftTileWithWebGpu(
       computePass.setPipeline(computeState.renderMelPipeline);
       computePass.setBindGroup(0, bindGroup, [renderParamOffset]);
     } else if (plan.analysisType === 'mfcc') {
-      const melResource = layoutResource as MelBandLayoutResource;
+      const melResource = layoutResource as WeightedBandLayoutResource;
       const melEnergyBindGroup = webGpu.device.createBindGroup({
         layout: computeState.renderMelEnergyBindGroupLayout,
         entries: [
@@ -5245,6 +5826,105 @@ async function renderScalogramTileWithWebGpu(
   );
 }
 
+async function renderCqtChromaTileWithWebGpu(
+  plan: RenderRequestPlan,
+  tileRecord: TileRecord,
+  tileStart: number,
+  tileEnd: number,
+): Promise<boolean> {
+  const webGpu = surfaceState.webGpu;
+  if (!webGpu) {
+    return false;
+  }
+
+  const computeState = initializeWebGpuCqtCompute(webGpu);
+  if (!computeState) {
+    markAnalysisTypeWebGpuFallback(plan, 'CQT WebGPU compute initialization failed.');
+    return false;
+  }
+  if (!ensureWebGpuPcmBuffer(webGpu, computeState)) {
+    markAnalysisTypeWebGpuFallback(plan, 'CQT WebGPU buffers are unavailable.');
+    return false;
+  }
+
+  const kernelResource = getCqtKernelResource(plan, webGpu, computeState);
+  if (!kernelResource) {
+    markAnalysisTypeWebGpuFallback(plan, 'CQT kernel resources are unavailable.');
+    return false;
+  }
+  if (!ensureTileGpuResources(tileRecord, webGpu, { requiresStorage: true, uploadIfDirty: false })) {
+    return false;
+  }
+  if (!ensureWebGpuCqtValueBuffer(computeState, tileRecord, kernelResource.binCount, webGpu)) {
+    return false;
+  }
+
+  try {
+    const tileSpan = Math.max((1 / analysisState.sampleRate), tileEnd - tileStart);
+    writeBufferAtOffset(
+      computeState.paramBuffer,
+      0,
+      createCqtComputeParamsData(
+        tileRecord.columnCount,
+        kernelResource.binCount,
+        analysisState.sampleCount,
+        analysisState.sampleRate,
+        tileStart,
+        tileSpan,
+      ),
+    );
+    writeBufferAtOffset(
+      computeState.paramBuffer,
+      256,
+      createCqtRenderParamsData(plan, tileRecord.columnCount, kernelResource.binCount),
+    );
+
+    const computeBindGroup = webGpu.device.createBindGroup({
+      layout: computeState.renderValuesBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: computeState.paramBuffer, offset: 0, size: 64 } },
+        { binding: 1, resource: { buffer: computeState.pcmBuffer } },
+        { binding: 2, resource: { buffer: kernelResource.rowBuffer } },
+        { binding: 3, resource: { buffer: kernelResource.tapBuffer } },
+        { binding: 4, resource: { buffer: computeState.cqtValueBuffer } },
+      ],
+    });
+    const renderBindGroup = webGpu.device.createBindGroup({
+      layout: computeState.renderChromaBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: computeState.paramBuffer, offset: 256, size: 64 } },
+        { binding: 1, resource: { buffer: computeState.cqtValueBuffer } },
+        { binding: 2, resource: { buffer: kernelResource.chromaAssignmentBuffer } },
+        { binding: 3, resource: tileRecord.gpuTextureView },
+      ],
+    });
+
+    const commandEncoder = webGpu.device.createCommandEncoder();
+    const computePass = commandEncoder.beginComputePass();
+    computePass.setPipeline(computeState.renderValuesPipeline);
+    computePass.setBindGroup(0, computeBindGroup);
+    computePass.dispatchWorkgroups(tileRecord.columnCount, kernelResource.binCount);
+
+    computePass.setPipeline(computeState.renderChromaPipeline);
+    computePass.setBindGroup(0, renderBindGroup);
+    computePass.dispatchWorkgroups(
+      Math.ceil(tileRecord.columnCount / 8),
+      Math.ceil(plan.rowCount / 8),
+    );
+    computePass.end();
+
+    webGpu.device.queue.submit([commandEncoder.finish()]);
+    tileRecord.gpuDirty = false;
+    tileRecord.renderedColumns = tileRecord.columnCount;
+    tileRecord.complete = true;
+    return true;
+  } catch (error) {
+    destroyTileGpuResources(tileRecord);
+    markAnalysisTypeWebGpuFallback(plan, error instanceof Error ? error.message : 'CQT GPU compute failed.');
+    return false;
+  }
+}
+
 async function renderTileWithWebGpu(
   plan: RenderRequestPlan,
   tileRecord: TileRecord,
@@ -5252,7 +5932,9 @@ async function renderTileWithWebGpu(
   tileEnd: number,
   webGpuSlotIndex: number,
 ): Promise<boolean> {
-  return plan.analysisType === 'scalogram'
+  return plan.analysisType === 'chroma'
+    ? renderCqtChromaTileWithWebGpu(plan, tileRecord, tileStart, tileEnd)
+    : plan.analysisType === 'scalogram'
     ? renderScalogramTileWithWebGpu(plan, tileRecord, tileStart, tileEnd)
     : renderStftTileWithWebGpu(plan, tileRecord, tileStart, tileEnd, webGpuSlotIndex);
 }
@@ -5561,11 +6243,13 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
   const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1));
   const dprBucket = Math.max(2, Math.round(Number(request?.dpr) || 2));
   const analysisType = normalizeAnalysisType(request?.analysisType);
+  const isChroma = isChromaAnalysisType(analysisType);
   const colormapDistribution = normalizeColormapDistribution(request?.colormapDistribution);
   const dbWindow = normalizeDbWindow(request?.minDecibels, request?.maxDecibels, analysisType);
   const frequencyScale = getEffectiveFrequencyScale(analysisType, request?.frequencyScale);
-  const fftSize = analysisType === 'scalogram' ? 0 : normalizeFftSize(request?.fftSize);
-  const overlapRatio = analysisType === 'scalogram' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
+  const windowFunction = normalizeSpectrogramWindowFunction(request?.windowFunction);
+  const fftSize = analysisType === 'scalogram' || analysisType === 'chroma' ? 0 : normalizeFftSize(request?.fftSize);
+  const overlapRatio = analysisType === 'scalogram' || analysisType === 'chroma' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
   const mfccCoefficientCount = normalizeMfccCoefficientCount(request?.mfccCoefficientCount);
   const scalogramOmega0 = normalizeScalogramOmega0(request?.scalogramOmega0);
   const scalogramRowDensity = normalizeScalogramRowDensity(request?.scalogramRowDensity);
@@ -5582,7 +6266,9 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     : analysisType === 'scalogram'
       ? scalogramRowDensity
       : 1;
-  const rowCount = analysisType === 'mel'
+  const rowCount = isChroma
+    ? CHROMA_BIN_COUNT
+    : analysisType === 'mel'
     ? melBandCount
     : analysisType === 'mfcc'
       ? mfccCoefficientCount
@@ -5591,7 +6277,7 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
   );
-  const hopSamples = analysisType === 'scalogram'
+  const hopSamples = analysisType === 'scalogram' || analysisType === 'chroma'
     ? normalizeScalogramHopSamples(request?.scalogramHopSamples)
     : Math.max(1, Math.round(fftSize * (1 - overlapRatio)));
   const secondsPerColumn = hopSamples / analysisState.sampleRate;
@@ -5601,7 +6287,7 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     startTileIndex,
     Math.floor(Math.max(viewStart, viewEnd - (secondsPerColumn * 0.5)) / tileDuration),
   );
-  const windowSeconds = analysisType === 'scalogram' ? 0 : fftSize / analysisState.sampleRate;
+  const windowSeconds = analysisType === 'scalogram' || analysisType === 'chroma' ? 0 : fftSize / analysisState.sampleRate;
   const decimationFactor = analysisType === 'spectrogram'
     ? Math.max(1, preset.lowFrequencyDecimationFactor || 1)
     : 1;
@@ -5610,10 +6296,15 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     `dist${colormapDistribution}`,
     `db${dbWindow.minDecibels}:${dbWindow.maxDecibels}`,
     `scale${frequencyScale}`,
+    `win${windowFunction}`,
     `fft${fftSize}`,
     `bands${analysisType === 'mel' || analysisType === 'mfcc' ? melBandCount : 0}`,
     `coeff${analysisType === 'mfcc' ? mfccCoefficientCount : 0}`,
-    `min${analysisType === 'scalogram' ? scalogramFrequencyRange.minFrequency : analysisState.minFrequency}`,
+    `min${analysisType === 'scalogram'
+      ? scalogramFrequencyRange.minFrequency
+      : isChroma
+        ? CQT_DEFAULT_FMIN
+        : analysisState.minFrequency}`,
     `max${analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : analysisState.maxFrequency}`,
     `omega${analysisType === 'scalogram' ? scalogramOmega0 : 0}`,
     `density${analysisType === 'scalogram' ? scalogramRowDensity : 0}`,
@@ -5642,12 +6333,17 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     melBandCount,
     mfccCoefficientCount,
     minDecibels: dbWindow.minDecibels,
-    minFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.minFrequency : analysisState.minFrequency,
+    minFrequency: analysisType === 'scalogram'
+      ? scalogramFrequencyRange.minFrequency
+      : isChroma
+        ? CQT_DEFAULT_FMIN
+        : analysisState.minFrequency,
     overlapRatio,
     pixelHeight,
     pixelWidth,
     requestKind,
     rowCount,
+    windowFunction,
     scalogramOmega0,
     scalogramRowDensity,
     startTileIndex,
@@ -5699,6 +6395,7 @@ function createLayerReadyBody(plan: RenderRequestPlan) {
     targetRows: plan.rowCount,
     viewEnd: plan.viewEnd,
     viewStart: plan.viewStart,
+    windowFunction: plan.windowFunction,
     windowSeconds: plan.windowSeconds,
   };
 }
@@ -5728,6 +6425,7 @@ function isEquivalentPlan(left: RenderRequestPlan | null, right: RenderRequestPl
     && Math.abs(left.scalogramOmega0 - right.scalogramOmega0) <= 1e-6
     && Math.abs(left.scalogramRowDensity - right.scalogramRowDensity) <= 1e-6
     && left.hopSamples === right.hopSamples
+    && left.windowFunction === right.windowFunction
     && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-6
     && Math.abs(left.viewStart - right.viewStart) <= 1e-6
     && Math.abs(left.viewEnd - right.viewEnd) <= 1e-6;

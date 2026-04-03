@@ -21,6 +21,7 @@ import type {
   SpectrogramAnalysisType,
   SpectrogramColormapDistribution,
   SpectrogramFrequencyScale,
+  SpectrogramWindowFunction,
   SurfaceKind,
   TransportCommand,
   ViewportIntent,
@@ -32,12 +33,25 @@ import {
   TILE_COLUMN_COUNT,
   quantizeCeil,
 } from './sharedBuffers';
-import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from './waveCoreRuntime';
+import {
+  createWaveDisplayPlanner,
+  loadWaveCoreRuntime,
+  type WaveCoreModule,
+  type WaveCoreRuntime,
+  type WaveDisplayPlanner,
+} from './waveCoreRuntime';
+import { normalizeSpectrogramWindowFunction, WINDOW_FUNCTION_CODES } from './windowShared';
 import {
   WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
   WAVEFORM_BOTTOM_PADDING_PX as WAVEFORM_BOTTOM_PADDING_PX,
   WAVEFORM_TOP_PADDING_PX as WAVEFORM_TOP_PADDING_PX,
 } from './waveformGeometry';
+import {
+  CHROMA_BIN_COUNT,
+  CQT_DEFAULT_FMIN,
+  getChromaBinAtPosition,
+  getChromaLabel,
+} from './chromaShared';
 
 const CENTER_LINE_ALPHA = 0.14;
 const DISPLAY_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 24;
@@ -78,6 +92,9 @@ const WAVEFORM_MAX_ZOOM_PIXELS_PER_SAMPLE = 8;
 const WAVEFORM_RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 0.9;
 const WAVEFORM_RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 1.15;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
+const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2;
+const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
+const WAVEFORM_PYRAMID_BUILD_STEP_BLOCKS = 32_768;
 const MAX_TILE_CACHE_ENTRIES = 24;
 const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
 const WAVEFORM_PREVIEW_SAMPLE_TAPS = [-0.3, 0, 0.3] as const;
@@ -87,6 +104,7 @@ const ANALYSIS_TYPE_CODES: Record<SpectrogramAnalysisType, number> = {
   mel: 1,
   scalogram: 2,
   mfcc: 3,
+  chroma: 5,
 };
 
 const FREQUENCY_SCALE_CODES: Record<SpectrogramFrequencyScale, number> = {
@@ -134,6 +152,17 @@ interface WaveformSurfaceState {
   heightCssPx: number;
   renderScale: number;
   widthCssPx: number;
+}
+
+interface WaveformRenderCacheState {
+  canvas: OffscreenCanvas | null;
+  context: OffscreenCanvasRenderingContext2D | null;
+  heightCssPx: number;
+  plotMode: WaveformPlotMode | null;
+  renderRange: RangeFrames | null;
+  renderScale: number;
+  renderWidthCssPx: number;
+  sessionRevision: number;
 }
 
 interface SpectrogramSurfaceState {
@@ -185,7 +214,13 @@ interface SpectrogramPlan {
   tileDurationSeconds: number;
   viewEndSeconds: number;
   viewStartSeconds: number;
+  windowFunction: SpectrogramWindowFunction;
   windowSeconds: number;
+}
+
+interface WaveformBufferedRenderPlan {
+  renderRange: RangeFrames;
+  renderWidthCssPx: number;
 }
 
 interface RangeFrames {
@@ -233,6 +268,7 @@ interface EngineSessionState {
 }
 
 interface EngineState {
+  displayPlanner: WaveDisplayPlanner | null;
   dragState: DragState;
   hoverWaveformRatioX: number | null;
   lastSpectrogramPlan: SpectrogramPlan | null;
@@ -255,6 +291,7 @@ interface EngineState {
     melBandCount: number;
     mfccCoefficientCount: number;
     mfccMelBandCount: number;
+    windowFunction: SpectrogramWindowFunction;
     scalogramHopSamples: number;
     scalogramMaxFrequency: number;
     scalogramMinFrequency: number;
@@ -275,6 +312,7 @@ interface EngineState {
     targetEndFrame: number;
     targetStartFrame: number;
   };
+  waveformCache: WaveformRenderCacheState;
   waveformSurface: WaveformSurfaceState;
   spectrogramSurface: SpectrogramSurfaceState;
 }
@@ -295,10 +333,22 @@ const spectrogramSurface: SpectrogramSurfaceState = {
   pixelWidth: 1,
 };
 
+const waveformCache: WaveformRenderCacheState = {
+  canvas: null,
+  context: null,
+  heightCssPx: 0,
+  plotMode: null,
+  renderRange: null,
+  renderScale: 1,
+  renderWidthCssPx: 0,
+  sessionRevision: -1,
+};
+
 let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 let requestQueue = Promise.resolve();
 
 const state: EngineState = {
+  displayPlanner: null,
   dragState: null,
   hoverWaveformRatioX: null,
   lastSpectrogramPlan: null,
@@ -321,6 +371,7 @@ const state: EngineState = {
     melBandCount: LIBROSA_DEFAULT_MEL_BAND_COUNT,
     mfccCoefficientCount: DEFAULT_MFCC_COEFFICIENT_COUNT,
     mfccMelBandCount: DEFAULT_MFCC_MEL_BAND_COUNT,
+    windowFunction: 'hann',
     scalogramHopSamples: DEFAULT_SCALOGRAM_HOP_SAMPLES,
     scalogramMaxFrequency: DEFAULT_SCALOGRAM_MAX_FREQUENCY,
     scalogramMinFrequency: DEFAULT_SCALOGRAM_MIN_FREQUENCY,
@@ -341,6 +392,7 @@ const state: EngineState = {
     targetEndFrame: 0,
     targetStartFrame: 0,
   },
+  waveformCache,
   waveformSurface,
   spectrogramSurface,
 };
@@ -429,6 +481,35 @@ async function getRuntime(): Promise<WaveCoreRuntime> {
   return runtimePromise;
 }
 
+function getDisplayPlanner(module: WaveCoreModule): WaveDisplayPlanner {
+  if (!state.displayPlanner) {
+    state.displayPlanner = createWaveDisplayPlanner(module);
+  }
+
+  return state.displayPlanner;
+}
+
+function invalidateWaveformCache(): void {
+  state.waveformCache.plotMode = null;
+  state.waveformCache.renderRange = null;
+  state.waveformCache.renderWidthCssPx = 0;
+  state.waveformCache.heightCssPx = 0;
+  state.waveformCache.renderScale = 1;
+  state.waveformCache.sessionRevision = -1;
+}
+
+function areRangeFramesEqual(left: RangeFrames | null, right: RangeFrames | null): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  if (!left || !right) {
+    return false;
+  }
+
+  return left.startFrame === right.startFrame && left.endFrame === right.endFrame;
+}
+
 function handleInitSurfaces(message: EngineMainToWorkerMessage & { type: 'InitSurfaces' }): void {
   const { body } = message;
 
@@ -448,6 +529,7 @@ function handleInitSurfaces(message: EngineMainToWorkerMessage & { type: 'InitSu
 
   resizeWaveformSurface();
   resizeSpectrogramSurface();
+  invalidateWaveformCache();
   state.renderSurfacesRevision += 1;
   state.viewport.renderWidthPx = state.waveformSurface.widthCssPx;
   emitUiState();
@@ -472,6 +554,7 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
 
   disposeWasmSession(runtime.module);
   clearTileCache();
+  invalidateWaveformCache();
 
   const durationSeconds = durationFrames / sampleRate;
   if (!runtime.module._wave_prepare_session(durationFrames, sampleRate, durationSeconds)) {
@@ -540,9 +623,15 @@ function scheduleWaveformPyramidBuild(sessionRevision: number): void {
     return;
   }
 
-  state.session.waveformBuildPending = true;
+  const beginResult = state.session.module._wave_begin_waveform_pyramid_build();
+  if (!beginResult) {
+    return;
+  }
 
-  self.setTimeout(() => {
+  state.session.waveformBuildPending = true;
+  state.session.waveformBuilt = false;
+
+  const stepBuild = () => {
     try {
       if (
         !state.session.initialized
@@ -552,22 +641,30 @@ function scheduleWaveformPyramidBuild(sessionRevision: number): void {
         return;
       }
 
-      state.session.module._wave_build_waveform_pyramid();
+      const done = state.session.module._wave_build_waveform_pyramid_step(WAVEFORM_PYRAMID_BUILD_STEP_BLOCKS);
 
       if (state.session.sessionRevision !== sessionRevision) {
         return;
       }
 
-      state.session.waveformBuilt = true;
-      state.session.waveformBuildPending = false;
-      scheduleRender();
+      if (done) {
+        state.session.waveformBuilt = true;
+        state.session.waveformBuildPending = false;
+        invalidateWaveformCache();
+        scheduleRender();
+        return;
+      }
+
+      self.setTimeout(stepBuild, 0);
     } catch (error) {
       if (state.session.sessionRevision === sessionRevision) {
         state.session.waveformBuildPending = false;
       }
       postError(error);
     }
-  }, 0);
+  };
+
+  self.setTimeout(stepBuild, 0);
 }
 
 function handlePlaybackClockTick(clock: PlaybackClockState): void {
@@ -722,6 +819,10 @@ function normalizeScalogramFrequencyRange(minValue: unknown, maxValue: unknown):
   return { minFrequency, maxFrequency };
 }
 
+function isChromaAnalysisType(analysisType: SpectrogramAnalysisType): boolean {
+  return analysisType === 'chroma';
+}
+
 function handleSpectrogramConfig(config: {
   analysisType: SpectrogramAnalysisType;
   colormapDistribution: SpectrogramColormapDistribution;
@@ -731,6 +832,7 @@ function handleSpectrogramConfig(config: {
   melBandCount: number;
   mfccCoefficientCount: number;
   mfccMelBandCount: number;
+  windowFunction: SpectrogramWindowFunction;
   scalogramHopSamples: number;
   scalogramMaxFrequency: number;
   scalogramMinFrequency: number;
@@ -739,7 +841,10 @@ function handleSpectrogramConfig(config: {
   minDecibels: number;
   overlapRatio: number;
 }): void {
-  const nextAnalysisType = config.analysisType === 'mel' || config.analysisType === 'mfcc' || config.analysisType === 'scalogram'
+  const nextAnalysisType = config.analysisType === 'chroma'
+    || config.analysisType === 'mel'
+    || config.analysisType === 'mfcc'
+    || config.analysisType === 'scalogram'
     ? config.analysisType
     : 'spectrogram';
   const nextColormapDistribution = config.colormapDistribution === 'contrast' || config.colormapDistribution === 'soft'
@@ -757,6 +862,7 @@ function handleSpectrogramConfig(config: {
   const nextMelBandCount = normalizeMelBandCount(config.melBandCount);
   const nextMfccCoefficientCount = normalizeMfccCoefficientCount(config.mfccCoefficientCount);
   const nextMfccMelBandCount = normalizeMfccMelBandCount(config.mfccMelBandCount ?? config.melBandCount);
+  const nextWindowFunction = normalizeSpectrogramWindowFunction(config.windowFunction);
   const nextScalogramHopSamples = normalizeScalogramHopSamples(config.scalogramHopSamples);
   const nextScalogramOmega0 = normalizeScalogramOmega0(config.scalogramOmega0);
   const nextScalogramRowDensity = normalizeScalogramRowDensity(config.scalogramRowDensity);
@@ -779,6 +885,7 @@ function handleSpectrogramConfig(config: {
     || nextMelBandCount !== state.spectrogramConfig.melBandCount
     || nextMfccCoefficientCount !== state.spectrogramConfig.mfccCoefficientCount
     || nextMfccMelBandCount !== state.spectrogramConfig.mfccMelBandCount
+    || nextWindowFunction !== state.spectrogramConfig.windowFunction
     || nextScalogramHopSamples !== state.spectrogramConfig.scalogramHopSamples
     || nextScalogramFrequencyRange.minFrequency !== state.spectrogramConfig.scalogramMinFrequency
     || nextScalogramFrequencyRange.maxFrequency !== state.spectrogramConfig.scalogramMaxFrequency
@@ -801,6 +908,7 @@ function handleSpectrogramConfig(config: {
     melBandCount: nextMelBandCount,
     mfccCoefficientCount: nextMfccCoefficientCount,
     mfccMelBandCount: nextMfccMelBandCount,
+    windowFunction: nextWindowFunction,
     scalogramHopSamples: nextScalogramHopSamples,
     scalogramMaxFrequency: nextScalogramFrequencyRange.maxFrequency,
     scalogramMinFrequency: nextScalogramFrequencyRange.minFrequency,
@@ -863,6 +971,7 @@ function applyViewportIntent(intent: ViewportIntent): void {
       state.spectrogramSurface.pixelHeight = spectrogramPixelHeight;
       resizeWaveformSurface();
       resizeSpectrogramSurface();
+      invalidateWaveformCache();
       state.viewport.renderWidthPx = waveformWidthCssPx;
       clampViewportToDuration();
       if (changed) {
@@ -1476,6 +1585,7 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
 
   if (!rawSamplePlotMode && !samplePlotMode) {
     if (!state.session.waveformBuilt && sampleData instanceof Float32Array) {
+      invalidateWaveformCache();
       drawWaveformPreview(
         context,
         canvas,
@@ -1489,39 +1599,93 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
       return plotMode;
     }
 
-    const slice = ensureWaveformSliceCapacity(module, columnCount * 2);
-    if (!module._wave_extract_waveform_slice(
+    const bufferedPlan = createWaveformBufferedRenderPlan(
+      module,
+      range,
       viewStartSeconds,
       viewEndSeconds,
       columnCount,
-      state.session.waveformSlicePointer,
-      0,
-    )) {
-      throw new Error('Waveform slice extraction failed.');
+    );
+
+    if (!isWaveformCacheReusable(bufferedPlan, plotMode)) {
+      const cacheSurface = ensureWaveformCacheSurface(
+        bufferedPlan.renderWidthCssPx,
+        renderHeightCssPx,
+        surface.renderScale,
+      );
+      const cacheColumnCount = Math.max(1, cacheSurface.canvas.width);
+      const cacheViewStartSeconds = framesToSeconds(bufferedPlan.renderRange.startFrame);
+      const cacheViewEndSeconds = framesToSeconds(bufferedPlan.renderRange.endFrame);
+      const slice = ensureWaveformSliceCapacity(module, cacheColumnCount * 2);
+
+      if (!module._wave_extract_waveform_slice(
+        cacheViewStartSeconds,
+        cacheViewEndSeconds,
+        cacheColumnCount,
+        state.session.waveformSlicePointer,
+        0,
+      )) {
+        throw new Error('Waveform slice extraction failed.');
+      }
+
+      if (token !== state.renderToken) {
+        return plotMode;
+      }
+
+      drawWaveformEnvelope(
+        cacheSurface.context,
+        cacheSurface.canvas,
+        slice,
+        cacheColumnCount,
+        renderHeightCssPx,
+        surface.renderScale,
+        surface.color,
+      );
+      updateWaveformCache(bufferedPlan, plotMode);
     }
 
     if (token !== state.renderToken) {
       return plotMode;
     }
 
-    drawWaveformEnvelope(
-      context,
-      canvas,
-      slice,
-      columnCount,
-      renderHeightCssPx,
-      surface.renderScale,
-      surface.color,
-    );
+    if (!presentWaveformCacheRange(context, canvas, range)) {
+      const slice = ensureWaveformSliceCapacity(module, columnCount * 2);
+      if (!module._wave_extract_waveform_slice(
+        viewStartSeconds,
+        viewEndSeconds,
+        columnCount,
+        state.session.waveformSlicePointer,
+        0,
+      )) {
+        throw new Error('Waveform slice extraction failed.');
+      }
+
+      if (token !== state.renderToken) {
+        return plotMode;
+      }
+
+      drawWaveformEnvelope(
+        context,
+        canvas,
+        slice,
+        columnCount,
+        renderHeightCssPx,
+        surface.renderScale,
+        surface.color,
+      );
+    }
+
     return plotMode;
   }
 
   if (!(sampleData instanceof Float32Array)) {
+    invalidateWaveformCache();
     clearWaveformSurface(context, canvas);
     return plotMode;
   }
 
   if (rawSamplePlotMode) {
+    invalidateWaveformCache();
     drawRawSamplePlot(
       context,
       canvas,
@@ -1536,6 +1700,7 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
     return plotMode;
   }
 
+  invalidateWaveformCache();
   drawRepresentativeSamplePlot(
     context,
     canvas,
@@ -1549,6 +1714,168 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
     surface.renderScale,
   );
   return plotMode;
+}
+
+function createWaveformBufferedRenderPlan(
+  module: WaveCoreModule,
+  visibleRange: RangeFrames,
+  viewStartSeconds: number,
+  viewEndSeconds: number,
+  deviceColumnCount: number,
+): WaveformBufferedRenderPlan {
+  const displayWidth = Math.max(1, state.waveformSurface.widthCssPx);
+  const sampleRate = Math.max(1, state.session.sampleRate);
+  const durationSeconds = state.session.durationFrames / sampleRate;
+  const secondsPerDeviceColumn = Math.max(
+    1 / sampleRate,
+    Math.max(1 / sampleRate, viewEndSeconds - viewStartSeconds) / Math.max(1, deviceColumnCount),
+  );
+  const preferredRange = state.waveformCache.sessionRevision === state.session.sessionRevision
+    && state.waveformCache.plotMode === 'envelope'
+    && state.waveformCache.heightCssPx === state.waveformSurface.heightCssPx
+    && Math.abs(state.waveformCache.renderScale - state.waveformSurface.renderScale) <= 1e-9
+    ? state.waveformCache.renderRange
+    : null;
+  const planner = getDisplayPlanner(module);
+  const planned = planner.planWaveformFollowRender({
+    bufferFactor: WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR,
+    displayEnd: viewEndSeconds,
+    displayStart: viewStartSeconds,
+    displayWidth,
+    duration: durationSeconds,
+    epsilon: secondsPerDeviceColumn,
+    marginRatio: WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO,
+    preferredEnd: preferredRange ? framesToSeconds(preferredRange.endFrame) : null,
+    preferredStart: preferredRange ? framesToSeconds(preferredRange.startFrame) : null,
+    renderScale: state.waveformSurface.renderScale,
+  });
+
+  if (!planned) {
+    return {
+      renderRange: { ...visibleRange },
+      renderWidthCssPx: displayWidth,
+    };
+  }
+
+  const renderStartFrame = clamp(Math.floor(planned.start * sampleRate), 0, Math.max(0, state.session.durationFrames - 1));
+  const renderEndFrame = clamp(
+    Math.ceil(planned.end * sampleRate),
+    renderStartFrame + 1,
+    state.session.durationFrames,
+  );
+
+  return {
+    renderRange: {
+      startFrame: renderStartFrame,
+      endFrame: renderEndFrame,
+    },
+    renderWidthCssPx: Math.max(displayWidth, Math.round(planned.width || displayWidth)),
+  };
+}
+
+function ensureWaveformCacheSurface(
+  widthCssPx: number,
+  heightCssPx: number,
+  renderScale: number,
+): { canvas: OffscreenCanvas; context: OffscreenCanvasRenderingContext2D } {
+  if (!state.waveformCache.canvas) {
+    state.waveformCache.canvas = new OffscreenCanvas(1, 1);
+  }
+
+  resizeInteractiveWaveformSurface(
+    state.waveformCache.canvas,
+    widthCssPx,
+    heightCssPx,
+    renderScale,
+  );
+
+  if (!state.waveformCache.context) {
+    const nextContext = state.waveformCache.canvas.getContext('2d');
+    if (!nextContext) {
+      throw new Error('Waveform cache 2D context is unavailable.');
+    }
+    state.waveformCache.context = nextContext;
+  }
+
+  return {
+    canvas: state.waveformCache.canvas,
+    context: state.waveformCache.context,
+  };
+}
+
+function isWaveformCacheReusable(plan: WaveformBufferedRenderPlan, plotMode: WaveformPlotMode): boolean {
+  return Boolean(
+    state.waveformCache.canvas
+    && state.waveformCache.context
+    && state.waveformCache.sessionRevision === state.session.sessionRevision
+    && state.waveformCache.plotMode === plotMode
+    && state.waveformCache.heightCssPx === state.waveformSurface.heightCssPx
+    && Math.abs(state.waveformCache.renderScale - state.waveformSurface.renderScale) <= 1e-9
+    && state.waveformCache.renderWidthCssPx === plan.renderWidthCssPx
+    && areRangeFramesEqual(state.waveformCache.renderRange, plan.renderRange)
+  );
+}
+
+function updateWaveformCache(plan: WaveformBufferedRenderPlan, plotMode: WaveformPlotMode): void {
+  state.waveformCache.plotMode = plotMode;
+  state.waveformCache.renderRange = { ...plan.renderRange };
+  state.waveformCache.renderWidthCssPx = plan.renderWidthCssPx;
+  state.waveformCache.heightCssPx = state.waveformSurface.heightCssPx;
+  state.waveformCache.renderScale = state.waveformSurface.renderScale;
+  state.waveformCache.sessionRevision = state.session.sessionRevision;
+}
+
+function presentWaveformCacheRange(
+  context: OffscreenCanvasRenderingContext2D,
+  canvas: OffscreenCanvas,
+  visibleRange: RangeFrames,
+): boolean {
+  const cacheCanvas = state.waveformCache.canvas;
+  const cacheRange = state.waveformCache.renderRange;
+
+  if (
+    !cacheCanvas
+    || !cacheRange
+    || visibleRange.startFrame < cacheRange.startFrame
+    || visibleRange.endFrame > cacheRange.endFrame
+  ) {
+    return false;
+  }
+
+  const cacheSpanFrames = Math.max(1, cacheRange.endFrame - cacheRange.startFrame);
+  const sourceStartRatio = (visibleRange.startFrame - cacheRange.startFrame) / cacheSpanFrames;
+  const sourceEndRatio = (visibleRange.endFrame - cacheRange.startFrame) / cacheSpanFrames;
+  const sourceX = clamp(
+    Math.floor(sourceStartRatio * cacheCanvas.width),
+    0,
+    Math.max(0, cacheCanvas.width - 1),
+  );
+  const sourceWidth = Math.max(
+    1,
+    Math.min(
+      cacheCanvas.width - sourceX,
+      Math.ceil((sourceEndRatio - sourceStartRatio) * cacheCanvas.width),
+    ),
+  );
+
+  context.save();
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.imageSmoothingEnabled = true;
+  context.globalCompositeOperation = 'copy';
+  context.drawImage(
+    cacheCanvas,
+    sourceX,
+    0,
+    sourceWidth,
+    cacheCanvas.height,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+  context.restore();
+
+  return true;
 }
 
 async function renderSpectrogram(range: RangeFrames, token: number): Promise<void> {
@@ -1581,6 +1908,7 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
   const preset = QUALITY_PRESETS[state.session.quality];
   const analysisType = state.spectrogramConfig.analysisType;
   const colormapDistribution = state.spectrogramConfig.colormapDistribution;
+  const isChroma = isChromaAnalysisType(analysisType);
   const dbWindow = normalizeSpectrogramDbWindow(
     state.spectrogramConfig.minDecibels,
     state.spectrogramConfig.maxDecibels,
@@ -1589,8 +1917,8 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
   const frequencyScale = analysisType === 'spectrogram'
     ? state.spectrogramConfig.frequencyScale
     : 'log';
-  const fftSize = analysisType === 'scalogram' ? 0 : state.spectrogramConfig.fftSize;
-  const overlapRatio = analysisType === 'scalogram' ? 0 : state.spectrogramConfig.overlapRatio;
+  const fftSize = analysisType === 'scalogram' || isChroma ? 0 : state.spectrogramConfig.fftSize;
+  const overlapRatio = analysisType === 'scalogram' || isChroma ? 0 : state.spectrogramConfig.overlapRatio;
   const effectiveMelBandCount = analysisType === 'mfcc'
     ? normalizeMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount)
     : normalizeMelBandCount(state.spectrogramConfig.melBandCount);
@@ -1605,7 +1933,9 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
   const pixelHeight = Math.max(1, state.spectrogramSurface.pixelHeight);
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
   const rowOversample = analysisType === 'scalogram' ? scalogramRowDensity : VISIBLE_ROW_OVERSAMPLE;
-  const rowCount = analysisType === 'mel'
+  const rowCount = isChroma
+    ? CHROMA_BIN_COUNT
+    : analysisType === 'mel'
     ? effectiveMelBandCount
     : analysisType === 'mfcc'
       ? mfccCoefficientCount
@@ -1614,7 +1944,7 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
   );
-  const hopSamples = analysisType === 'scalogram'
+  const hopSamples = analysisType === 'scalogram' || isChroma
     ? normalizeScalogramHopSamples(state.spectrogramConfig.scalogramHopSamples)
     : Math.max(1, Math.round(fftSize * (1 - overlapRatio)));
   const hopSeconds = hopSamples / state.session.sampleRate;
@@ -1625,18 +1955,24 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
   const tileDurationSeconds = viewSpanSeconds / tileCount;
   const startTileIndex = 0;
   const endTileIndex = tileCount - 1;
-  const windowSeconds = analysisType === 'scalogram' ? 0 : fftSize / state.session.sampleRate;
+  const windowSeconds = analysisType === 'scalogram' || isChroma ? 0 : fftSize / state.session.sampleRate;
   const decimationFactor = analysisType === 'spectrogram'
     ? Math.max(1, preset.lowFrequencyDecimationFactor)
     : 1;
+  const windowFunction = normalizeSpectrogramWindowFunction(state.spectrogramConfig.windowFunction);
   const configKey = [
     `type${analysisType}`,
     `dist${colormapDistribution}`,
     `scale${frequencyScale}`,
+    `win${windowFunction}`,
     `fft${fftSize}`,
     `bands${analysisType === 'mel' || analysisType === 'mfcc' ? effectiveMelBandCount : 0}`,
     `coeff${analysisType === 'mfcc' ? mfccCoefficientCount : 0}`,
-    `min${analysisType === 'scalogram' ? scalogramFrequencyRange.minFrequency : state.session.minFrequency}`,
+      `min${analysisType === 'scalogram'
+      ? scalogramFrequencyRange.minFrequency
+      : isChroma
+        ? CQT_DEFAULT_FMIN
+        : state.session.minFrequency}`,
     `max${analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : state.session.maxFrequency}`,
     `omega${analysisType === 'scalogram' ? scalogramOmega0 : 0}`,
     `density${analysisType === 'scalogram' ? scalogramRowDensity : 0}`,
@@ -1661,7 +1997,11 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     maxFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : state.session.maxFrequency,
     melBandCount: effectiveMelBandCount,
     minDecibels: dbWindow.minDecibels,
-    minFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.minFrequency : state.session.minFrequency,
+    minFrequency: analysisType === 'scalogram'
+      ? scalogramFrequencyRange.minFrequency
+      : isChroma
+        ? CQT_DEFAULT_FMIN
+        : state.session.minFrequency,
     overlapRatio,
     pixelHeight,
     pixelWidth,
@@ -1673,6 +2013,7 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     tileDurationSeconds,
     viewEndSeconds,
     viewStartSeconds,
+    windowFunction,
     windowSeconds,
   };
 }
@@ -1744,6 +2085,7 @@ function renderSpectrogramTileChunk(
     plan.minDecibels,
     plan.maxDecibels,
     plan.scalogramOmega0,
+    WINDOW_FUNCTION_CODES[plan.windowFunction] ?? 0,
     state.session.spectrogramOutputPointer,
   );
 
@@ -2098,6 +2440,18 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
     };
   }
 
+  if (isChromaAnalysisType(state.spectrogramConfig.analysisType)) {
+    const chroma = getChromaBinAtPosition(clamp01(pointerRatioY));
+    return {
+      label: `${formatAxisLabel(frame / sampleRate)} • ${getChromaLabel(chroma)}`,
+      markerVisible: false,
+      markerXRatio: ratioX,
+      markerYRatio: clamp01(pointerRatioY),
+      requestId,
+      surface: 'spectrogram',
+    };
+  }
+
   const frequency = getSpectrogramFrequencyAtPosition(clamp01(pointerRatioY));
   return {
     label: `${formatAxisLabel(frame / sampleRate)} • ${formatFrequencyLabel(frequency)}`,
@@ -2152,6 +2506,7 @@ function sampleMfccValueAtFrame(frame: number, coefficient: number): number | nu
     fftSize,
     state.session.minFrequency,
     state.session.maxFrequency,
+    WINDOW_FUNCTION_CODES[normalizeSpectrogramWindowFunction(state.spectrogramConfig.windowFunction)] ?? 0,
   );
   return Number.isFinite(value) ? value : null;
 }
@@ -2168,7 +2523,9 @@ function getActiveSpectrogramFrequencyRange(): {
   }
 
   return {
-    minFrequency: state.session.minFrequency,
+    minFrequency: state.spectrogramConfig.analysisType === 'chroma'
+      ? CQT_DEFAULT_FMIN
+      : state.session.minFrequency,
     maxFrequency: state.session.maxFrequency,
   };
 }
@@ -2212,6 +2569,15 @@ function buildFrequencyTicks(): FrequencyTickUi[] {
       frequency: row,
       label: `C${row}`,
       positionRatio: coefficientCount <= 1 ? 1 : 1 - (row / (coefficientCount - 1)),
+    }));
+  }
+
+  if (isChromaAnalysisType(state.spectrogramConfig.analysisType)) {
+    return Array.from({ length: CHROMA_BIN_COUNT }, (_, row) => ({
+      edge: row === CHROMA_BIN_COUNT - 1 ? 'top' : row === 0 ? 'bottom' : 'middle',
+      frequency: row,
+      label: getChromaLabel(row),
+      positionRatio: CHROMA_BIN_COUNT <= 1 ? 1 : 1 - (row / (CHROMA_BIN_COUNT - 1)),
     }));
   }
 
@@ -2895,8 +3261,10 @@ function disposeWasmSession(module: WaveCoreModule): void {
   state.session.waveformPcmPointer = 0;
   state.session.spectrogramOutputPointer = 0;
   state.session.spectrogramOutputCapacity = 0;
+  state.session.waveformBuildPending = false;
   state.session.waveformBuilt = false;
   state.session.initialized = false;
+  invalidateWaveformCache();
 }
 
 function getHeapF32View(module: WaveCoreModule, pointer: number, length: number): Float32Array {

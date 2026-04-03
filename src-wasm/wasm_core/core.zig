@@ -14,6 +14,9 @@ pub const hard_min_frequency: f32 = 50.0;
 pub const hard_max_frequency: f32 = 20_000.0;
 pub const min_db: f32 = -80.0;
 pub const max_db: f32 = 0.0;
+pub const chroma_bin_count: i32 = 12;
+pub const cqt_default_bins_per_octave: i32 = 36;
+pub const cqt_default_fmin: f32 = 32.70319566257483;
 pub const librosa_default_mel_band_count: i32 = 128;
 pub const low_frequency_enhancement_max_frequency: f32 = 1_200.0;
 pub const morlet_omega0: f32 = 6.0;
@@ -34,12 +37,20 @@ pub const AnalysisType = enum(i32) {
     mel = 1,
     scalogram = 2,
     mfcc = 3,
+    chroma = 4,
 };
 
 pub const FrequencyScale = enum(i32) {
     log = 0,
     linear = 1,
     mixed = 2,
+};
+
+pub const WindowFunction = enum(i32) {
+    hann = 0,
+    hamming = 1,
+    blackman = 2,
+    rectangular = 3,
 };
 
 pub const PffftSetup = opaque {};
@@ -74,12 +85,10 @@ pub const AllocationHeader = extern struct {
 pub const WaveLevel = struct {
     block_size: i32 = 0,
     block_count: i32 = 0,
-    min_peaks: []f32 = &.{},
-    max_peaks: []f32 = &.{},
+    abs_peaks: []f32 = &.{},
 
     pub fn deinit(self: *WaveLevel) void {
-        if (self.min_peaks.len > 0) allocator.free(self.min_peaks);
-        if (self.max_peaks.len > 0) allocator.free(self.max_peaks);
+        if (self.abs_peaks.len > 0) allocator.free(self.abs_peaks);
         self.* = .{};
     }
 };
@@ -87,6 +96,7 @@ pub const WaveLevel = struct {
 pub const FftResource = struct {
     fft_size: usize = 0,
     maximum_bin: usize = 0,
+    window_function: WindowFunction = .hann,
     power_scale: f32 = 0.0,
     setup: ?*PffftSetup = null,
     input: ?[]align(16) f32 = null,
@@ -145,16 +155,30 @@ pub const ScalogramKernelBank = struct {
     norm_weights: []f32 = &.{},
 
     pub fn init(row_count: i32, min_frequency: f32, max_frequency: f32, omega0: f32) !ScalogramKernelBank {
+        const frequencies = try allocator.alloc(f32, @as(usize, @intCast(row_count)));
+        defer allocator.free(frequencies);
+
+        for (frequencies, 0..) |*frequency, row_usize| {
+            frequency.* = frequencyForScalogramRow(
+                @as(i32, @intCast(row_usize)),
+                row_count,
+                min_frequency,
+                max_frequency,
+            );
+        }
+
+        return initMorletFromFrequencies(frequencies, omega0);
+    }
+
+    pub fn initMorletFromFrequencies(frequencies: []const f32, omega0: f32) !ScalogramKernelBank {
         var bank: ScalogramKernelBank = .{};
         errdefer bank.deinit();
 
-        bank.rows = try allocator.alloc(ScalogramRowKernel, @as(usize, @intCast(row_count)));
+        bank.rows = try allocator.alloc(ScalogramRowKernel, frequencies.len);
         for (bank.rows) |*row| row.* = .{};
 
         var total_tap_count: usize = 0;
-        for (bank.rows, 0..) |*row_kernel, row_usize| {
-            const row = @as(i32, @intCast(row_usize));
-            const frequency = frequencyForScalogramRow(row, row_count, min_frequency, max_frequency);
+        for (bank.rows, frequencies) |*row_kernel, frequency| {
             const safe_frequency = maxF32(1.0, frequency);
             const scale_seconds = omega0 / (2.0 * std.math.pi * safe_frequency);
             const support_samples = minI32(
@@ -210,6 +234,84 @@ pub const ScalogramKernelBank = struct {
                 offsets[tap_index] = offset;
                 real_weights[tap_index] = gaussian * phase_cos;
                 imag_weights[tap_index] = -gaussian * phase_sin;
+                norm_weights[tap_index] = norm_weight;
+                normalization += norm_weight;
+
+                const next_phase_cos = (phase_cos * step_cos) - (phase_sin * step_sin);
+                phase_sin = (phase_sin * step_cos) + (phase_cos * step_sin);
+                phase_cos = next_phase_cos;
+                offset += row_kernel.stride;
+            }
+
+            row_kernel.normalization = normalization;
+            tap_cursor += tap_count;
+        }
+
+        return bank;
+    }
+
+    pub fn initFromFrequencies(frequencies: []const f32, window_function: WindowFunction) !ScalogramKernelBank {
+        var bank: ScalogramKernelBank = .{};
+        errdefer bank.deinit();
+
+        bank.rows = try allocator.alloc(ScalogramRowKernel, frequencies.len);
+        for (bank.rows) |*row| row.* = .{};
+
+        var total_tap_count: usize = 0;
+        for (bank.rows, frequencies) |*row_kernel, frequency| {
+            const safe_frequency = maxF32(1.0, frequency);
+            const q_value = @as(f32, @floatFromInt(cqt_default_bins_per_octave)) / (std.math.pow(f32, 2.0, 1.0 / @as(f32, @floatFromInt(cqt_default_bins_per_octave))) - 1.0);
+            const support_samples = minI32(
+                morlet_max_support_samples,
+                maxI32(24, @as(i32, @intFromFloat(@ceil((q_value * g_session.sample_rate) / safe_frequency)))),
+            );
+            const stride = maxI32(1, @divTrunc(support_samples, morlet_target_steps));
+            const tap_count = @as(usize, @intCast(@divFloor(support_samples * 2, stride) + 1));
+
+            row_kernel.* = .{
+                .frequency = frequency,
+                .scale_seconds = @as(f32, @floatFromInt(support_samples)) / g_session.sample_rate,
+                .support_samples = support_samples,
+                .stride = stride,
+            };
+            total_tap_count += tap_count;
+        }
+
+        bank.offsets = try allocator.alloc(i32, total_tap_count);
+        bank.real_weights = try allocator.alloc(f32, total_tap_count);
+        bank.imag_weights = try allocator.alloc(f32, total_tap_count);
+        bank.norm_weights = try allocator.alloc(f32, total_tap_count);
+
+        var tap_cursor: usize = 0;
+        for (bank.rows) |*row_kernel| {
+            const tap_count = @as(usize, @intCast(@divFloor(row_kernel.support_samples * 2, row_kernel.stride) + 1));
+            const offsets = bank.offsets[tap_cursor .. tap_cursor + tap_count];
+            const real_weights = bank.real_weights[tap_cursor .. tap_cursor + tap_count];
+            const imag_weights = bank.imag_weights[tap_cursor .. tap_cursor + tap_count];
+            const norm_weights = bank.norm_weights[tap_cursor .. tap_cursor + tap_count];
+
+            row_kernel.offsets = offsets;
+            row_kernel.real_weights = real_weights;
+            row_kernel.imag_weights = imag_weights;
+            row_kernel.norm_weights = norm_weights;
+
+            const phase_step = (2.0 * std.math.pi * row_kernel.frequency * @as(f32, @floatFromInt(row_kernel.stride))) / g_session.sample_rate;
+            const step_cos = @cos(phase_step);
+            const step_sin = @sin(phase_step);
+            const initial_phase = (2.0 * std.math.pi * row_kernel.frequency * @as(f32, @floatFromInt(-row_kernel.support_samples))) / g_session.sample_rate;
+            var phase_cos = @cos(initial_phase);
+            var phase_sin = @sin(initial_phase);
+            var normalization: f32 = 0.0;
+            var offset = -row_kernel.support_samples;
+            var tap_index: usize = 0;
+
+            while (tap_index < tap_count) : (tap_index += 1) {
+                const window_value = windowValue(window_function, @as(i32, @intCast(tap_index)), @as(i32, @intCast(tap_count)));
+                const norm_weight = window_value * window_value;
+
+                offsets[tap_index] = offset;
+                real_weights[tap_index] = window_value * phase_cos;
+                imag_weights[tap_index] = -window_value * phase_sin;
                 norm_weights[tap_index] = norm_weight;
                 normalization += norm_weight;
 
@@ -287,6 +389,47 @@ pub const ScalogramResource = struct {
     }
 };
 
+pub const ChromaLayoutResource = struct {
+    analysis_type: AnalysisType = .chroma,
+    fft_size: i32 = 0,
+    sample_rate: f32 = 0.0,
+    min_frequency: f32 = 0.0,
+    max_frequency: f32 = 0.0,
+    bin_count: i32 = 0,
+    bins_per_octave: i32 = cqt_default_bins_per_octave,
+    row_offsets: []i32 = &.{},
+    bin_indices: []i32 = &.{},
+    weights: []f32 = &.{},
+    next: ?*ChromaLayoutResource = null,
+
+    pub fn deinit(self: *ChromaLayoutResource) void {
+        if (self.row_offsets.len > 0) allocator.free(self.row_offsets);
+        if (self.bin_indices.len > 0) allocator.free(self.bin_indices);
+        if (self.weights.len > 0) allocator.free(self.weights);
+        self.* = .{};
+    }
+};
+
+pub const ConstantQResource = struct {
+    bin_count: i32 = 0,
+    max_frequency: f32 = 0.0,
+    bins_per_octave: i32 = cqt_default_bins_per_octave,
+    window_function: WindowFunction = .hann,
+    bank: ScalogramKernelBank = .{},
+    next: ?*ConstantQResource = null,
+
+    pub fn deinit(self: *ConstantQResource) void {
+        self.bank.deinit();
+        self.* = .{};
+    }
+};
+
+pub const WaveformBuildState = struct {
+    active: bool = false,
+    current_block_index: i32 = 0,
+    current_level_index: i32 = 0,
+};
+
 pub const WaveSession = struct {
     samples: []f32 = &.{},
     sample_count: i32 = 0,
@@ -295,9 +438,12 @@ pub const WaveSession = struct {
     min_frequency: f32 = hard_min_frequency,
     max_frequency: f32 = hard_max_frequency,
     levels: []WaveLevel = &.{},
+    waveform_build: WaveformBuildState = .{},
     fft_resources: ?*FftResource = null,
     band_layout_resources: ?*BandLayoutResource = null,
+    chroma_layout_resources: ?*ChromaLayoutResource = null,
     scalogram_resources: ?*ScalogramResource = null,
+    constant_q_resources: ?*ConstantQResource = null,
 };
 
 pub var g_session: WaveSession = .{};
@@ -372,6 +518,7 @@ pub fn decodeAnalysisType(value: i32) AnalysisType {
         1 => .mel,
         2 => .scalogram,
         3 => .mfcc,
+        4, 5 => .chroma,
         else => .spectrogram,
     };
 }
@@ -381,6 +528,29 @@ pub fn decodeFrequencyScale(value: i32) FrequencyScale {
         1 => .linear,
         2 => .mixed,
         else => .log,
+    };
+}
+
+pub fn decodeWindowFunction(value: i32) WindowFunction {
+    return switch (value) {
+        1 => .hamming,
+        2 => .blackman,
+        3 => .rectangular,
+        else => .hann,
+    };
+}
+
+pub fn windowValue(window_function: WindowFunction, index: i32, size: i32) f32 {
+    if (size <= 1 or window_function == .rectangular) return 1.0;
+
+    const denominator = @as(f32, @floatFromInt(maxI32(1, size - 1)));
+    const phase = (2.0 * std.math.pi * @as(f32, @floatFromInt(index))) / denominator;
+
+    return switch (window_function) {
+        .hann => 0.5 - (0.5 * @cos(phase)),
+        .hamming => 0.54 - (0.46 * @cos(phase)),
+        .blackman => 0.42 - (0.5 * @cos(phase)) + (0.08 * @cos(phase * 2.0)),
+        .rectangular => 1.0,
     };
 }
 

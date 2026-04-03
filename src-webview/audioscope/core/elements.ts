@@ -55,6 +55,8 @@ export function createAudioscopeElements() {
     spectrogramFftSelect: requireElement<HTMLSelectElement>('spectrogram-fft-select'),
     spectrogramOverlapControl: requireElement<HTMLElement>('spectrogram-overlap-control'),
     spectrogramOverlapSelect: requireElement<HTMLSelectElement>('spectrogram-overlap-select'),
+    spectrogramWindowControl: requireElement<HTMLElement>('spectrogram-window-control'),
+    spectrogramWindowSelect: requireElement<HTMLSelectElement>('spectrogram-window-select'),
     spectrogramScaleControl: requireElement<HTMLElement>('spectrogram-scale-control'),
     spectrogramScaleSelect: requireElement<HTMLSelectElement>('spectrogram-scale-select'),
     spectrogramMelBandsControl: requireElement<HTMLElement>('spectrogram-mel-bands-control'),

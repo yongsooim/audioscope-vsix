@@ -1,7 +1,13 @@
 export type WaveformPlotMode = 'envelope' | 'raw' | 'sample';
-export type SpectrogramAnalysisType = 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
+export type SpectrogramAnalysisType =
+  | 'chroma'
+  | 'mel'
+  | 'mfcc'
+  | 'scalogram'
+  | 'spectrogram';
 export type SpectrogramColormapDistribution = 'balanced' | 'contrast' | 'soft';
 export type SpectrogramFrequencyScale = 'linear' | 'log' | 'mixed';
+export type SpectrogramWindowFunction = 'blackman' | 'hamming' | 'hann' | 'rectangular';
 export type SurfaceKind = 'spectrogram' | 'waveform';
 export type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
 export type AnalysisSurfaceResetReason = 'device-lost' | 'surface-invalid';
@@ -228,6 +234,7 @@ export interface SetSpectrogramConfigMessage {
     melBandCount: number;
     mfccCoefficientCount: number;
     mfccMelBandCount: number;
+    windowFunction: SpectrogramWindowFunction;
     scalogramHopSamples: number;
     scalogramMaxFrequency: number;
     scalogramMinFrequency: number;

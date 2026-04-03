@@ -406,6 +406,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="mel">Mel-Spectrogram</option>
                     <option value="mfcc">MFCC</option>
                     <option value="scalogram">Scalogram</option>
+                    <option value="chroma">Chroma</option>
                   </select>
                 </label>
                 <label id="spectrogram-fft-control" class="spectrogram-control">
@@ -425,6 +426,15 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="0.75" selected>75%</option>
                     <option value="0.875">87.5%</option>
                     <option value="0.9375">93.75%</option>
+                  </select>
+                </label>
+                <label id="spectrogram-window-control" class="spectrogram-control">
+                  <span class="spectrogram-control-label">Window</span>
+                  <select id="spectrogram-window-select" class="spectrogram-control-select" aria-label="Spectrogram window function">
+                    <option value="hann" selected>Hann</option>
+                    <option value="hamming">Hamming</option>
+                    <option value="blackman">Blackman</option>
+                    <option value="rectangular">Rectangular</option>
                   </select>
                 </label>
                 <label id="spectrogram-scale-control" class="spectrogram-control">

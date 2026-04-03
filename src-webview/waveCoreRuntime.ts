@@ -4,7 +4,9 @@ const exportedFunctionNames = [
   'wave_dispose_session',
   'wave_prepare_session',
   'wave_get_pcm_ptr',
+  'wave_begin_waveform_pyramid_build',
   'wave_build_waveform_pyramid',
+  'wave_build_waveform_pyramid_step',
   'wave_extract_waveform_slice',
   'wave_plan_waveform_follow_render',
   'wave_plan_spectrogram_follow_render',
@@ -26,7 +28,9 @@ export interface WaveCoreModule {
   HEAPU8: Uint8Array;
   _free(pointer: number): number;
   _malloc(byteLength: number): number;
+  _wave_begin_waveform_pyramid_build(): number;
   _wave_build_waveform_pyramid(): number;
+  _wave_build_waveform_pyramid_step(maxBlocks: number): number;
   _wave_dispose_session(): number;
   _wave_extract_waveform_slice(
     viewStart: number,
@@ -66,6 +70,7 @@ export interface WaveCoreModule {
     fftSize: number,
     minFrequency: number,
     maxFrequency: number,
+    windowFunction: number,
   ): number;
   _wave_prepare_session(sampleCount: number, sampleRate: number, duration: number): number;
   _wave_render_spectrogram_tile_rgba(
@@ -84,6 +89,7 @@ export interface WaveCoreModule {
     minDecibels: number,
     maxDecibels: number,
     scalogramOmega0: number,
+    windowFunction: number,
     outputPointer: number,
   ): number;
   memory: WebAssembly.Memory;
