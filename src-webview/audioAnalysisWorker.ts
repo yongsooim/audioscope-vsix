@@ -51,7 +51,6 @@ const ANALYSIS_TYPE_CODES = {
 const FREQUENCY_SCALE_CODES = {
   log: 0,
   linear: 1,
-  mel: 0,
   mixed: 2,
 };
 const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
@@ -62,7 +61,7 @@ const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
 
 type QualityPreset = 'balanced' | 'high' | 'max';
 type AnalysisType = 'mel' | 'scalogram' | 'spectrogram';
-type FrequencyScale = 'linear' | 'log' | 'mel' | 'mixed';
+type FrequencyScale = 'linear' | 'log' | 'mixed';
 type LayerKind = 'overview' | 'visible';
 type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
 type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
@@ -166,12 +165,40 @@ fn tileFs(input: VertexOutput) -> @location(0) vec4<f32> {
 
 const WEBGPU_PALETTE_SHADER_HELPERS = /* wgsl */`
 const LOG10_E: f32 = 0.4342944819032518;
-const MIN_DB: f32 = -80.0;
 const MAX_DB: f32 = 0.0;
+const ANALYSIS_TYPE_SPECTROGRAM: u32 = 0u;
+const ANALYSIS_TYPE_MEL: u32 = 1u;
+const ANALYSIS_TYPE_SCALOGRAM: u32 = 2u;
+const MEL_DISPLAY_MIN_DB: f32 = -92.0;
+const MEL_DISPLAY_GAMMA: f32 = 0.92;
+const SCALOGRAM_DISPLAY_MIN_DB: f32 = -72.0;
+const SCALOGRAM_DISPLAY_GAMMA: f32 = 1.08;
 
-fn normalizePower(power: f32) -> f32 {
+fn displayMinDbForAnalysisType(analysisType: u32) -> f32 {
+  if (analysisType == ANALYSIS_TYPE_MEL) {
+    return MEL_DISPLAY_MIN_DB;
+  }
+  if (analysisType == ANALYSIS_TYPE_SCALOGRAM) {
+    return SCALOGRAM_DISPLAY_MIN_DB;
+  }
+  return -80.0;
+}
+
+fn displayGammaForAnalysisType(analysisType: u32) -> f32 {
+  if (analysisType == ANALYSIS_TYPE_MEL) {
+    return MEL_DISPLAY_GAMMA;
+  }
+  if (analysisType == ANALYSIS_TYPE_SCALOGRAM) {
+    return SCALOGRAM_DISPLAY_GAMMA;
+  }
+  return 1.0;
+}
+
+fn normalizePowerForAnalysis(power: f32, analysisType: u32) -> f32 {
   let decibels = 10.0 * (log(max(power + 1e-14, 1e-20)) * LOG10_E);
-  return clamp((decibels - MIN_DB) / (MAX_DB - MIN_DB), 0.0, 1.0);
+  let minDb = displayMinDbForAnalysisType(analysisType);
+  let normalized = clamp((decibels - minDb) / (MAX_DB - minDb), 0.0, 1.0);
+  return pow(normalized, displayGammaForAnalysisType(analysisType));
 }
 
 fn paletteColor(normalized: f32) -> vec4<f32> {
@@ -343,9 +370,7 @@ fn runSpectrogramFftStage(
 `;
 
 const WEBGPU_SPECTROGRAM_RENDER_SHADER = /* wgsl */`
-const LOG10_E: f32 = 0.4342944819032518;
-const MIN_DB: f32 = -80.0;
-const MAX_DB: f32 = 0.0;
+${WEBGPU_PALETTE_SHADER_HELPERS}
 
 struct ComputeParams {
   header0: vec4<u32>,
@@ -370,43 +395,6 @@ struct RowBand {
 @group(0) @binding(2) var<storage, read> enhancedSpectrum: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read> rowBands: array<RowBand>;
 @group(0) @binding(4) var outputTexture: texture_storage_2d<rgba8unorm, write>;
-
-fn normalizePower(power: f32) -> f32 {
-  let decibels = 10.0 * (log(max(power + 1e-14, 1e-20)) * LOG10_E);
-  return clamp((decibels - MIN_DB) / (MAX_DB - MIN_DB), 0.0, 1.0);
-}
-
-fn paletteColor(normalized: f32) -> vec4<f32> {
-  let t = clamp(normalized, 0.0, 1.0);
-  var localT = 0.0;
-  var startColor = vec3<f32>(0.0, 0.0, 0.0);
-  var endColor = vec3<f32>(0.0, 0.0, 0.0);
-
-  if (t < 0.14) {
-    localT = t / 0.14;
-    startColor = vec3<f32>(4.0, 4.0, 12.0);
-    endColor = vec3<f32>(34.0, 17.0, 70.0);
-  } else if (t < 0.34) {
-    localT = (t - 0.14) / 0.2;
-    startColor = vec3<f32>(34.0, 17.0, 70.0);
-    endColor = vec3<f32>(91.0, 31.0, 126.0);
-  } else if (t < 0.58) {
-    localT = (t - 0.34) / 0.24;
-    startColor = vec3<f32>(91.0, 31.0, 126.0);
-    endColor = vec3<f32>(179.0, 68.0, 112.0);
-  } else if (t < 0.82) {
-    localT = (t - 0.58) / 0.24;
-    startColor = vec3<f32>(179.0, 68.0, 112.0);
-    endColor = vec3<f32>(248.0, 143.0, 84.0);
-  } else {
-    localT = (t - 0.82) / 0.18;
-    startColor = vec3<f32>(248.0, 143.0, 84.0);
-    endColor = vec3<f32>(252.0, 236.0, 176.0);
-  }
-
-  let rgb = (startColor + ((endColor - startColor) * localT)) / 255.0;
-  return vec4<f32>(rgb, 1.0);
-}
 
 @compute @workgroup_size(8, 8)
 fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
@@ -458,7 +446,7 @@ fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) 
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePower(meanPower)),
+    paletteColor(normalizePowerForAnalysis(meanPower, params.header1.y)),
   );
 }
 `;
@@ -525,7 +513,7 @@ fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePower(meanPower)),
+    paletteColor(normalizePowerForAnalysis(meanPower, ANALYSIS_TYPE_MEL)),
   );
 }
 `;
@@ -611,7 +599,7 @@ fn renderScalogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePower(power)),
+    paletteColor(normalizePowerForAnalysis(power, ANALYSIS_TYPE_SCALOGRAM)),
   );
 }
 `;
@@ -1070,47 +1058,11 @@ function normalizeAnalysisType(value: unknown): AnalysisType {
 }
 
 function normalizeFrequencyScale(value: unknown): FrequencyScale {
-  return value === 'linear' || value === 'mel' || value === 'mixed' ? value : 'log';
-}
-
-function getEffectiveAnalysisType(analysisType: unknown, frequencyScale: unknown): AnalysisType {
-  const normalizedAnalysisType = normalizeAnalysisType(analysisType);
-  const normalizedFrequencyScale = normalizeFrequencyScale(frequencyScale);
-
-  if (normalizedAnalysisType === 'mel') {
-    return normalizedFrequencyScale === 'log' ? 'mel' : 'spectrogram';
-  }
-
-  if (normalizedAnalysisType === 'spectrogram' && normalizedFrequencyScale === 'mel') {
-    return 'mel';
-  }
-
-  return normalizedAnalysisType;
+  return value === 'linear' || value === 'mixed' ? value : 'log';
 }
 
 function getEffectiveFrequencyScale(analysisType: AnalysisType, value: unknown): FrequencyScale {
-  if (analysisType === 'mel') {
-    return 'mel';
-  }
-
   return analysisType === 'spectrogram' ? normalizeFrequencyScale(value) : 'log';
-}
-
-function getExternalAnalysisConfig(analysisType: AnalysisType, frequencyScale: FrequencyScale): {
-  analysisType: AnalysisType;
-  frequencyScale: FrequencyScale;
-} {
-  if (analysisType === 'mel') {
-    return {
-      analysisType: 'spectrogram',
-      frequencyScale: 'mel',
-    };
-  }
-
-  return {
-    analysisType,
-    frequencyScale: analysisType === 'spectrogram' ? frequencyScale : 'log',
-  };
 }
 
 function getScalogramHopSamples(quality: QualityPreset): number {
@@ -3839,7 +3791,7 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
   const pixelWidth = Math.max(1, Math.round(Number(request?.pixelWidth) || surfaceState.pixelWidth || 1));
   const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1));
   const dprBucket = Math.max(2, Math.round(Number(request?.dpr) || 2));
-  const analysisType = getEffectiveAnalysisType(request?.analysisType, request?.frequencyScale);
+  const analysisType = normalizeAnalysisType(request?.analysisType);
   const frequencyScale = getEffectiveFrequencyScale(analysisType, request?.frequencyScale);
   const fftSize = analysisType === 'scalogram' ? 0 : normalizeFftSize(request?.fftSize);
   const overlapRatio = analysisType === 'scalogram' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
@@ -3913,16 +3865,14 @@ function buildTileCacheKey(plan: RenderRequestPlan, tileIndex: number): string {
 }
 
 function createLayerReadyBody(plan: RenderRequestPlan) {
-  const externalConfig = getExternalAnalysisConfig(plan.analysisType, plan.frequencyScale);
-
   return {
-    analysisType: externalConfig.analysisType,
+    analysisType: plan.analysisType,
     configVersion: plan.configVersion,
     decimationFactor: plan.decimationFactor,
     displayEnd: plan.displayEnd,
     displayStart: plan.displayStart,
     fftSize: plan.fftSize,
-    frequencyScale: externalConfig.frequencyScale,
+    frequencyScale: plan.frequencyScale,
     generation: plan.generation,
     hopSamples: plan.hopSamples,
     hopSeconds: plan.hopSeconds,

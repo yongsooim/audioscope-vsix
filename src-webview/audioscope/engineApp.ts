@@ -356,32 +356,12 @@ function normalizeSpectrogramFftSize(value: unknown): number {
 }
 
 function normalizeSpectrogramFrequencyScale(value: unknown): SpectrogramFrequencyScale {
-  return value === 'linear' || value === 'mel' || value === 'mixed' ? value : 'log';
+  return value === 'linear' || value === 'mixed' ? value : 'log';
 }
 
 function normalizeSpectrogramOverlapRatio(value: unknown): number {
   const numericValue = Number(value);
   return SPECTROGRAM_OVERLAP_OPTIONS.includes(numericValue) ? numericValue : 0.75;
-}
-
-function getEffectiveSpectrogramAnalysisConfig(
-  analysisType: unknown,
-  frequencyScale: unknown,
-): {
-  analysisType: SpectrogramAnalysisType;
-  frequencyScale: SpectrogramFrequencyScale;
-} {
-  const normalizedAnalysisType = analysisType === 'scalogram' ? 'scalogram' : 'spectrogram';
-  const normalizedFrequencyScale = normalizeSpectrogramFrequencyScale(frequencyScale);
-
-  return {
-    analysisType: normalizedAnalysisType,
-    frequencyScale: normalizedAnalysisType === 'spectrogram'
-      ? (analysisType === 'mel'
-          ? (normalizedFrequencyScale === 'log' ? 'mel' : normalizedFrequencyScale)
-          : normalizedFrequencyScale)
-      : 'log',
-  };
 }
 
 function getEffectiveDurationSeconds(): number {
@@ -1098,31 +1078,28 @@ function renderSpectrogramScale(): void {
 }
 
 function renderSpectrogramMeta(): void {
-  const renderConfig = getEffectiveSpectrogramAnalysisConfig(
-    state.spectrogramConfig.analysisType,
-    state.spectrogramConfig.frequencyScale,
-  );
-  const isScalogram = renderConfig.analysisType === 'scalogram';
+  const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
+  const supportsScale = analysisType === 'spectrogram';
+  const isScalogram = analysisType === 'scalogram';
 
-  elements.spectrogramTypeSelect.value = renderConfig.analysisType;
+  elements.spectrogramTypeSelect.value = analysisType;
   elements.spectrogramFftSelect.value = String(state.spectrogramConfig.fftSize);
   elements.spectrogramOverlapSelect.value = String(state.spectrogramConfig.overlapRatio);
-  elements.spectrogramScaleSelect.value = renderConfig.frequencyScale;
+  elements.spectrogramScaleSelect.value = normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale);
 
   elements.spectrogramFftSelect.disabled = isScalogram;
   elements.spectrogramOverlapSelect.disabled = isScalogram;
-  elements.spectrogramScaleSelect.disabled = isScalogram;
+  elements.spectrogramScaleSelect.disabled = !supportsScale;
 }
 
 function getEffectiveSpectrogramRenderConfig() {
-  const { analysisType, frequencyScale } = getEffectiveSpectrogramAnalysisConfig(
-    state.spectrogramConfig.analysisType,
-    state.spectrogramConfig.frequencyScale,
-  );
+  const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
   return {
     analysisType,
     fftSize: normalizeSpectrogramFftSize(state.spectrogramConfig.fftSize),
-    frequencyScale,
+    frequencyScale: analysisType === 'spectrogram'
+      ? normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale)
+      : 'log' as SpectrogramFrequencyScale,
     overlapRatio: normalizeSpectrogramOverlapRatio(state.spectrogramConfig.overlapRatio),
   };
 }
@@ -1842,18 +1819,17 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
 
   if (message?.type === 'visibleReady') {
     const body = message.body ?? {};
-    const renderConfig = getEffectiveSpectrogramAnalysisConfig(body.analysisType, body.frequencyScale);
     if (Number(body.generation) !== state.analysis.generation) {
       return;
     }
 
     state.analysis.activeVisibleRequest = {
-      analysisType: renderConfig.analysisType,
+      analysisType: normalizeSpectrogramAnalysisType(body.analysisType),
       configVersion: Number(body.configVersion) || 0,
       displayEnd: Number(body.displayEnd) || 0,
       displayStart: Number(body.displayStart) || 0,
       fftSize: Number(body.fftSize) || 0,
-      frequencyScale: renderConfig.frequencyScale,
+      frequencyScale: body.frequencyScale === 'linear' || body.frequencyScale === 'mixed' ? body.frequencyScale : 'log',
       generation: Number(body.generation) || 0,
       overlapRatio: Number(body.overlapRatio) || 0,
       pixelHeight: Number(body.pixelHeight) || 0,

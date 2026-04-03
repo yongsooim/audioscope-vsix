@@ -394,6 +394,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                 <span class="spectrogram-control-label">Type</span>
                 <select id="spectrogram-type-select" class="spectrogram-control-select" aria-label="Spectrogram analysis type">
                   <option value="spectrogram" selected>Spectrogram</option>
+                  <option value="mel">Mel-Spectrogram</option>
                   <option value="scalogram">Scalogram</option>
                 </select>
               </label>
@@ -420,7 +421,6 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                 <span class="spectrogram-control-label">Scale</span>
                 <select id="spectrogram-scale-select" class="spectrogram-control-select" aria-label="Spectrogram frequency scale">
                   <option value="log" selected>Log</option>
-                  <option value="mel">Mel</option>
                   <option value="mixed">Mixed</option>
                   <option value="linear">Linear</option>
                 </select>

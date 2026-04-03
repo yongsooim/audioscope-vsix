@@ -3,6 +3,10 @@ const core = @import("./core.zig");
 
 const palette_lut_size: usize = 1024;
 const palette_lut = buildPaletteLut();
+const mel_display_min_db: f32 = -92.0;
+const mel_display_gamma: f32 = 0.92;
+const scalogram_display_min_db: f32 = -72.0;
+const scalogram_display_gamma: f32 = 1.08;
 
 pub fn freeFftResources() void {
     var current = core.g_session.fft_resources;
@@ -511,9 +515,27 @@ fn computeMelBandMeanPower(power_spectrum: []const f32, band: core.MelBand, fft_
     return weighted_energy / core.maxF32(total_weight, 1e-8);
 }
 
-fn normalizePowerToDecibels(power: f32) f32 {
+fn displayMinDbForAnalysisType(analysis_type: core.AnalysisType) f32 {
+    return switch (analysis_type) {
+        .mel => mel_display_min_db,
+        .scalogram => scalogram_display_min_db,
+        .spectrogram => core.min_db,
+    };
+}
+
+fn displayGammaForAnalysisType(analysis_type: core.AnalysisType) f32 {
+    return switch (analysis_type) {
+        .mel => mel_display_gamma,
+        .scalogram => scalogram_display_gamma,
+        .spectrogram => 1.0,
+    };
+}
+
+fn normalizePowerForDisplay(power: f32, analysis_type: core.AnalysisType) f32 {
     const decibels = 10.0 * core.approxLog10Positive(power + 1e-14);
-    return (decibels - core.min_db) / (core.max_db - core.min_db);
+    const min_db = displayMinDbForAnalysisType(analysis_type);
+    const normalized = core.clampf32((decibels - min_db) / (core.max_db - min_db), 0.0, 1.0);
+    return std.math.pow(f32, normalized, displayGammaForAnalysisType(analysis_type));
 }
 
 fn computeScalogramKernelPower(center_sample: i32, kernel: *const core.ScalogramRowKernel) f32 {
@@ -752,12 +774,12 @@ fn renderStftDerivedTile(
         var row: i32 = 0;
         while (row < row_count) : (row += 1) {
             const normalized = switch (analysis_type) {
-                .mel => normalizePowerToDecibels(computeMelBandMeanPower(
+                .mel => normalizePowerForDisplay(computeMelBandMeanPower(
                     power_spectrum,
                     layout.mel_bands[@as(usize, @intCast(row))],
                     fft_size,
                     core.g_session.sample_rate,
-                )),
+                ), .mel),
                 .spectrogram => blk: {
                     const base_range = layout.band_ranges[@as(usize, @intCast(row))];
                     const use_low_band = layout.use_low_frequency_enhancement and base_range.end_frequency <= layout.low_frequency_maximum;
@@ -766,7 +788,7 @@ fn renderStftDerivedTile(
                     else
                         base_range;
                     const active_power = if (use_low_band) low_power_spectrum else power_spectrum;
-                    break :blk normalizePowerToDecibels(computeBandMeanPower(active_power, active_range));
+                    break :blk normalizePowerForDisplay(computeBandMeanPower(active_power, active_range), .spectrogram);
                 },
                 .scalogram => 0.0,
             };
@@ -833,11 +855,12 @@ fn renderScalogramTile(
             var active_column: i32 = 0;
 
             while (active_column < column_count) : (active_column += 1) {
-                const normalized = normalizePowerToDecibels(
+                const normalized = normalizePowerForDisplay(
                     computeScalogramKernelPower(
                         center_samples[@as(usize, @intCast(active_column))],
                         kernel,
                     ),
+                    .scalogram,
                 );
                 const pixel_offset = row_offset + (@as(usize, @intCast(active_column)) * 4);
                 writePaletteColor(normalized, output[pixel_offset .. pixel_offset + 4]);
