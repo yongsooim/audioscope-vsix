@@ -255,6 +255,7 @@ const state = {
     overlapRatio: 0.75,
   },
   spectrogramFrame: 0,
+  spectrogramDefaultsPersistTimer: null as number | null,
   spectrogramMetaOpen: false,
   spectrogramRenderForcePending: false,
   spectrogramSurfaceResetPromise: null as Promise<void> | null,
@@ -829,6 +830,10 @@ async function resetSpectrogramSurface(loadToken: number, reason: AnalysisSurfac
 }
 
 function destroySession(): void {
+  if (state.spectrogramDefaultsPersistTimer) {
+    window.clearTimeout(state.spectrogramDefaultsPersistTimer);
+    state.spectrogramDefaultsPersistTimer = null;
+  }
   window.cancelAnimationFrame(state.playbackFrame);
   state.playbackFrame = 0;
   window.cancelAnimationFrame(state.spectrogramFrame);
@@ -1419,6 +1424,47 @@ function getEffectiveSpectrogramRenderConfig() {
   };
 }
 
+function applyPersistedSpectrogramDefaults(defaults: any): void {
+  state.spectrogramConfig.analysisType = normalizeSpectrogramAnalysisType(defaults?.analysisType);
+  state.spectrogramConfig.colormapDistribution = normalizeSpectrogramColormapDistribution(defaults?.colormapDistribution);
+  state.spectrogramConfig.fftSize = normalizeSpectrogramFftSize(defaults?.fftSize);
+  state.spectrogramConfig.frequencyScale = normalizeSpectrogramFrequencyScale(defaults?.frequencyScale);
+  state.spectrogramConfig.maxDecibels = Number.isFinite(Number(defaults?.maxDecibels))
+    ? Math.round(Number(defaults.maxDecibels))
+    : state.spectrogramConfig.maxDecibels;
+  state.spectrogramConfig.melBandCount = normalizeSpectrogramMelBandCount(defaults?.melBandCount);
+  state.spectrogramConfig.mfccCoefficientCount = normalizeSpectrogramMfccCoefficientCount(defaults?.mfccCoefficientCount);
+  state.spectrogramConfig.mfccMelBandCount = normalizeSpectrogramMfccMelBandCount(defaults?.mfccMelBandCount);
+  state.spectrogramConfig.minDecibels = Number.isFinite(Number(defaults?.minDecibels))
+    ? Math.round(Number(defaults.minDecibels))
+    : state.spectrogramConfig.minDecibels;
+  state.spectrogramConfig.overlapRatio = normalizeSpectrogramOverlapRatio(defaults?.overlapRatio);
+  state.spectrogramConfig.scalogramHopSamples = normalizeSpectrogramScalogramHopSetting(defaults?.scalogramHopSamples);
+  const scalogramFrequencyRange = normalizeSpectrogramScalogramFrequencyRange(
+    defaults?.scalogramMinFrequency,
+    defaults?.scalogramMaxFrequency,
+  );
+  state.spectrogramConfig.scalogramMinFrequency = scalogramFrequencyRange.minFrequency;
+  state.spectrogramConfig.scalogramMaxFrequency = scalogramFrequencyRange.maxFrequency;
+  state.spectrogramConfig.scalogramOmega0 = normalizeSpectrogramScalogramOmega0(defaults?.scalogramOmega0);
+  state.spectrogramConfig.scalogramRowDensity = normalizeSpectrogramScalogramRowDensity(defaults?.scalogramRowDensity);
+  state.spectrogramConfig.windowFunction = normalizeSpectrogramWindowFunction(defaults?.windowFunction);
+}
+
+function schedulePersistSpectrogramDefaults(): void {
+  if (state.spectrogramDefaultsPersistTimer) {
+    window.clearTimeout(state.spectrogramDefaultsPersistTimer);
+  }
+
+  state.spectrogramDefaultsPersistTimer = window.setTimeout(() => {
+    state.spectrogramDefaultsPersistTimer = null;
+    vscode.postMessage({
+      type: 'persistSpectrogramDefaults',
+      body: getEffectiveSpectrogramRenderConfig(),
+    });
+  }, 160);
+}
+
 function getSpectrogramRenderPixelHeight(): number {
   const screenHeight = Number(window.screen?.height);
   const fallbackHeight = Math.max(
@@ -1432,7 +1478,7 @@ function getSpectrogramRenderPixelHeight(): number {
   return Math.max(1, Math.round(renderHeight * DISPLAY_PIXEL_RATIO));
 }
 
-function refreshSpectrogramAnalysisConfig(): void {
+function refreshSpectrogramAnalysisConfig({ persist = true } = {}): void {
   const renderConfig = getEffectiveSpectrogramRenderConfig();
 
   if (state.engineWorker) {
@@ -1449,6 +1495,9 @@ function refreshSpectrogramAnalysisConfig(): void {
 
   renderSpectrogramMeta();
   scheduleSpectrogramRender({ force: true });
+  if (persist) {
+    schedulePersistSpectrogramDefaults();
+  }
 }
 
 function getPresentedRangeSeconds(): TimeRange | null {
@@ -2316,7 +2365,7 @@ async function initializePlaybackFromPreparedData(
   renderMediaMetadata();
   renderWaveformUi();
   syncTransport();
-  refreshSpectrogramAnalysisConfig();
+  refreshSpectrogramAnalysisConfig({ persist: false });
   scheduleSpectrogramRender({ force: true });
   setAnalysisStatus('Playback ready');
 }
@@ -2370,6 +2419,8 @@ window.addEventListener('message', (event) => {
     } else {
       state.activeFile = message.body;
     }
+    applyPersistedSpectrogramDefaults(message.body?.spectrogramDefaults);
+    renderSpectrogramMeta();
     state.externalTools = normalizeExternalToolStatus(message.body?.externalTools, EMBEDDED_MEDIA_TOOLS_GUIDANCE);
     void loadAudioFile(message.body);
     return;
@@ -2660,6 +2711,9 @@ function attachUiEvents(): void {
     );
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramMeta.addEventListener('dragstart', (event) => {
+    event.preventDefault();
   });
   elements.spectrogramMinDbSlider.addEventListener('input', () => {
     const window = normalizeSpectrogramDbWindow(

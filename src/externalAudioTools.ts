@@ -30,8 +30,28 @@ export interface AudioscopePayload {
   fileExtension: string;
   fileName: string;
   fileSize: number | null;
+  spectrogramDefaults: SpectrogramDefaultsPayload;
   spectrogramQuality: 'balanced' | 'high' | 'max';
   sourceUri: string;
+}
+
+export interface SpectrogramDefaultsPayload {
+  analysisType: 'chroma' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
+  colormapDistribution: 'balanced' | 'contrast' | 'soft';
+  fftSize: number;
+  frequencyScale: 'linear' | 'log' | 'mixed';
+  maxDecibels: number;
+  melBandCount: number;
+  mfccCoefficientCount: number;
+  mfccMelBandCount: number;
+  minDecibels: number;
+  overlapRatio: number;
+  scalogramHopSamples: number;
+  scalogramMaxFrequency: number;
+  scalogramMinFrequency: number;
+  scalogramOmega0: number;
+  scalogramRowDensity: number;
+  windowFunction: 'blackman' | 'hamming' | 'hann' | 'rectangular';
 }
 
 export interface MediaMetadataSummaryPayload {

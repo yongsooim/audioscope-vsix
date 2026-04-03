@@ -79,6 +79,92 @@
           "default": "high",
           "scope": "resource",
           "description": "Controls spectrogram analysis quality for audioscope. Higher presets request denser time/frequency detail."
+        },
+        "audioscope.spectrogramDefaults": {
+          "type": "object",
+          "scope": "window",
+          "additionalProperties": false,
+          "default": {
+            "analysisType": "spectrogram",
+            "colormapDistribution": "balanced",
+            "fftSize": 4096,
+            "frequencyScale": "log",
+            "maxDecibels": 0,
+            "melBandCount": 256,
+            "mfccCoefficientCount": 20,
+            "mfccMelBandCount": 128,
+            "minDecibels": -80,
+            "overlapRatio": 0.75,
+            "scalogramHopSamples": 0,
+            "scalogramMaxFrequency": 20000,
+            "scalogramMinFrequency": 50,
+            "scalogramOmega0": 6,
+            "scalogramRowDensity": 1,
+            "windowFunction": "hann"
+          },
+          "description": "Stores the default audioscope spectrogram settings that new files open with.",
+          "properties": {
+            "analysisType": {
+              "type": "string",
+              "enum": ["spectrogram", "mel", "mfcc", "scalogram", "chroma"]
+            },
+            "colormapDistribution": {
+              "type": "string",
+              "enum": ["balanced", "contrast", "soft"]
+            },
+            "fftSize": {
+              "type": "number",
+              "enum": [1024, 2048, 4096, 8192, 16384]
+            },
+            "frequencyScale": {
+              "type": "string",
+              "enum": ["log", "mixed", "linear"]
+            },
+            "maxDecibels": {
+              "type": "number"
+            },
+            "melBandCount": {
+              "type": "number",
+              "enum": [128, 256, 512]
+            },
+            "mfccCoefficientCount": {
+              "type": "number",
+              "enum": [13, 20, 32, 40]
+            },
+            "mfccMelBandCount": {
+              "type": "number",
+              "enum": [128, 256, 512]
+            },
+            "minDecibels": {
+              "type": "number"
+            },
+            "overlapRatio": {
+              "type": "number",
+              "enum": [0.5, 0.75, 0.875, 0.9375]
+            },
+            "scalogramHopSamples": {
+              "type": "number",
+              "enum": [0, 256, 512, 1024, 2048, 4096]
+            },
+            "scalogramMaxFrequency": {
+              "type": "number"
+            },
+            "scalogramMinFrequency": {
+              "type": "number"
+            },
+            "scalogramOmega0": {
+              "type": "number",
+              "enum": [4, 5, 6, 7, 8, 10, 12]
+            },
+            "scalogramRowDensity": {
+              "type": "number",
+              "enum": [0.5, 0.75, 1, 1.5, 2, 3, 4]
+            },
+            "windowFunction": {
+              "type": "string",
+              "enum": ["hann", "hamming", "blackman", "rectangular"]
+            }
+          }
         }
       }
     },
