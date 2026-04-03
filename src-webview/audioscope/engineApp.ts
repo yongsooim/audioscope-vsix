@@ -27,6 +27,7 @@ import type {
   SampleInfoPayload,
   SetViewportIntentMessage,
   SpectrogramAnalysisType,
+  SpectrogramColormapDistribution,
   SpectrogramFrequencyScale,
   SurfaceKind,
   TransportCommand,
@@ -57,6 +58,11 @@ const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
 const SPECTROGRAM_OVERVIEW_HEIGHT_SCALE = 0.7;
 const SPECTROGRAM_OVERVIEW_WIDTH_SCALE = 0.45;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
+const SPECTROGRAM_DB_WINDOW_LIMITS = {
+  max: 12,
+  min: -120,
+  minimumSpan: 6,
+} as const;
 
 const elements = createAudioscopeElements();
 
@@ -80,12 +86,15 @@ type TimeRange = {
 
 type SpectrogramVisibleRequest = {
   analysisType: SpectrogramAnalysisType;
+  colormapDistribution: SpectrogramColormapDistribution;
   configVersion: number;
   displayEnd: number;
   displayStart: number;
   fftSize: number;
   frequencyScale: SpectrogramFrequencyScale;
   generation: number;
+  maxDecibels: number;
+  minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
   pixelWidth: number;
@@ -204,11 +213,15 @@ const state = {
   spectrogramCanvas: null as HTMLCanvasElement | null,
   spectrogramConfig: {
     analysisType: 'spectrogram' as SpectrogramAnalysisType,
+    colormapDistribution: 'balanced' as SpectrogramColormapDistribution,
     fftSize: 4096,
     frequencyScale: 'log' as SpectrogramFrequencyScale,
+    maxDecibels: 0,
+    minDecibels: -80,
     overlapRatio: 0.75,
   },
   spectrogramFrame: 0,
+  spectrogramMetaOpen: false,
   spectrogramRenderForcePending: false,
   spectrogramSurfaceResetPromise: null as Promise<void> | null,
   spectrogramSurfaceReadyPromise: null as Promise<void> | null,
@@ -348,6 +361,62 @@ function clearFatalStatus(): void {
 
 function normalizeSpectrogramAnalysisType(value: unknown): SpectrogramAnalysisType {
   return value === 'mel' || value === 'scalogram' ? value : 'spectrogram';
+}
+
+function normalizeSpectrogramColormapDistribution(value: unknown): SpectrogramColormapDistribution {
+  return value === 'contrast' || value === 'soft' ? value : 'balanced';
+}
+
+function getDefaultSpectrogramDbWindow(analysisType: SpectrogramAnalysisType): {
+  maxDecibels: number;
+  minDecibels: number;
+} {
+  if (analysisType === 'mel') {
+    return { minDecibels: -92, maxDecibels: 0 };
+  }
+
+  if (analysisType === 'scalogram') {
+    return { minDecibels: -72, maxDecibels: 0 };
+  }
+
+  return { minDecibels: -80, maxDecibels: 0 };
+}
+
+function normalizeSpectrogramDbWindow(
+  minValue: unknown,
+  maxValue: unknown,
+  analysisType: SpectrogramAnalysisType,
+): {
+  maxDecibels: number;
+  minDecibels: number;
+} {
+  const defaults = getDefaultSpectrogramDbWindow(analysisType);
+  let minDecibels = Number.isFinite(Number(minValue)) ? Math.round(Number(minValue)) : defaults.minDecibels;
+  let maxDecibels = Number.isFinite(Number(maxValue)) ? Math.round(Number(maxValue)) : defaults.maxDecibels;
+
+  minDecibels = clamp(
+    minDecibels,
+    SPECTROGRAM_DB_WINDOW_LIMITS.min,
+    SPECTROGRAM_DB_WINDOW_LIMITS.max - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+  );
+  maxDecibels = clamp(
+    maxDecibels,
+    SPECTROGRAM_DB_WINDOW_LIMITS.min + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+    SPECTROGRAM_DB_WINDOW_LIMITS.max,
+  );
+
+  if (maxDecibels < minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan) {
+    maxDecibels = Math.min(
+      SPECTROGRAM_DB_WINDOW_LIMITS.max,
+      minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+    );
+    minDecibels = Math.min(
+      minDecibels,
+      maxDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+    );
+  }
+
+  return { minDecibels, maxDecibels };
 }
 
 function normalizeSpectrogramFftSize(value: unknown): number {
@@ -1081,25 +1150,63 @@ function renderSpectrogramMeta(): void {
   const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
   const supportsScale = analysisType === 'spectrogram';
   const isScalogram = analysisType === 'scalogram';
+  const dbWindow = normalizeSpectrogramDbWindow(
+    state.spectrogramConfig.minDecibels,
+    state.spectrogramConfig.maxDecibels,
+    analysisType,
+  );
 
   elements.spectrogramTypeSelect.value = analysisType;
   elements.spectrogramFftSelect.value = String(state.spectrogramConfig.fftSize);
   elements.spectrogramOverlapSelect.value = String(state.spectrogramConfig.overlapRatio);
   elements.spectrogramScaleSelect.value = normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale);
+  elements.spectrogramDistributionSelect.value = normalizeSpectrogramColormapDistribution(
+    state.spectrogramConfig.colormapDistribution,
+  );
 
   elements.spectrogramFftSelect.disabled = isScalogram;
   elements.spectrogramOverlapSelect.disabled = isScalogram;
   elements.spectrogramScaleSelect.disabled = !supportsScale;
+  elements.spectrogramMinDbSlider.value = String(dbWindow.minDecibels);
+  elements.spectrogramMaxDbSlider.value = String(dbWindow.maxDecibels);
+  elements.spectrogramMinDbSlider.max = String(dbWindow.maxDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan);
+  elements.spectrogramMaxDbSlider.min = String(dbWindow.minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan);
+  elements.spectrogramMinDbValue.textContent = `${dbWindow.minDecibels} dB`;
+  elements.spectrogramMaxDbValue.textContent = `${dbWindow.maxDecibels} dB`;
+  setSpectrogramMetaOpen(state.spectrogramMetaOpen);
+}
+
+function setSpectrogramMetaOpen(open: boolean): void {
+  state.spectrogramMetaOpen = open;
+  elements.spectrogramMeta.dataset.open = open ? 'true' : 'false';
+  elements.spectrogramMetaControls.hidden = !open;
+  elements.spectrogramMetaToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  elements.spectrogramMetaToggle.setAttribute(
+    'aria-label',
+    open ? 'Hide spectrogram settings' : 'Show spectrogram settings',
+  );
+}
+
+function isSpectrogramMetaTarget(target: EventTarget | null): boolean {
+  return target instanceof Node && elements.spectrogramMeta.contains(target);
 }
 
 function getEffectiveSpectrogramRenderConfig() {
   const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
+  const dbWindow = normalizeSpectrogramDbWindow(
+    state.spectrogramConfig.minDecibels,
+    state.spectrogramConfig.maxDecibels,
+    analysisType,
+  );
   return {
     analysisType,
+    colormapDistribution: normalizeSpectrogramColormapDistribution(state.spectrogramConfig.colormapDistribution),
     fftSize: normalizeSpectrogramFftSize(state.spectrogramConfig.fftSize),
     frequencyScale: analysisType === 'spectrogram'
       ? normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale)
       : 'log' as SpectrogramFrequencyScale,
+    maxDecibels: dbWindow.maxDecibels,
+    minDecibels: dbWindow.minDecibels,
     overlapRatio: normalizeSpectrogramOverlapRatio(state.spectrogramConfig.overlapRatio),
   };
 }
@@ -1219,8 +1326,11 @@ function isCompatibleVisibleRequest(
   const renderConfig = getEffectiveSpectrogramRenderConfig();
   return activeRequest.configVersion === state.analysis.configVersion
     && activeRequest.analysisType === renderConfig.analysisType
+    && activeRequest.colormapDistribution === renderConfig.colormapDistribution
     && activeRequest.fftSize === renderConfig.fftSize
     && activeRequest.frequencyScale === renderConfig.frequencyScale
+    && activeRequest.maxDecibels === renderConfig.maxDecibels
+    && activeRequest.minDecibels === renderConfig.minDecibels
     && Math.abs(activeRequest.overlapRatio - renderConfig.overlapRatio) <= 1e-6
     && Math.abs(activeRequest.pixelWidth - size.pixelWidth) <= 1
     && Math.abs(activeRequest.pixelHeight - size.pixelHeight) <= 1;
@@ -1316,12 +1426,15 @@ function syncSpectrogramView({ force = false } = {}): void {
   state.analysis.generation = generation;
   state.analysis.activeVisibleRequest = {
     analysisType: renderConfig.analysisType,
+    colormapDistribution: renderConfig.colormapDistribution,
     configVersion: state.analysis.configVersion,
     displayEnd: displayRange.end,
     displayStart: displayRange.start,
     fftSize: renderConfig.fftSize,
     frequencyScale: renderConfig.frequencyScale,
     generation,
+    maxDecibels: renderConfig.maxDecibels,
+    minDecibels: renderConfig.minDecibels,
     overlapRatio: renderConfig.overlapRatio,
     pixelHeight,
     pixelWidth,
@@ -1340,6 +1453,7 @@ function syncSpectrogramView({ force = false } = {}): void {
     type: 'renderVisibleRange',
     body: {
       analysisType: renderConfig.analysisType,
+      colormapDistribution: renderConfig.colormapDistribution,
       configVersion: state.analysis.configVersion,
       displayEnd: displayRange.end,
       displayStart: displayRange.start,
@@ -1347,6 +1461,8 @@ function syncSpectrogramView({ force = false } = {}): void {
       fftSize: renderConfig.fftSize,
       frequencyScale: renderConfig.frequencyScale,
       generation,
+      maxDecibels: renderConfig.maxDecibels,
+      minDecibels: renderConfig.minDecibels,
       overlapRatio: renderConfig.overlapRatio,
       pixelHeight,
       pixelWidth: requestPixelWidth,
@@ -1825,12 +1941,15 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
 
     state.analysis.activeVisibleRequest = {
       analysisType: normalizeSpectrogramAnalysisType(body.analysisType),
+      colormapDistribution: normalizeSpectrogramColormapDistribution(body.colormapDistribution),
       configVersion: Number(body.configVersion) || 0,
       displayEnd: Number(body.displayEnd) || 0,
       displayStart: Number(body.displayStart) || 0,
       fftSize: Number(body.fftSize) || 0,
       frequencyScale: body.frequencyScale === 'linear' || body.frequencyScale === 'mixed' ? body.frequencyScale : 'log',
       generation: Number(body.generation) || 0,
+      maxDecibels: Math.round(Number(body.maxDecibels) || 0),
+      minDecibels: Math.round(Number(body.minDecibels) || 0),
       overlapRatio: Number(body.overlapRatio) || 0,
       pixelHeight: Number(body.pixelHeight) || 0,
       pixelWidth: Number(body.pixelWidth) || 0,
@@ -2099,6 +2218,7 @@ function attachUiEvents(): void {
     elements.waveFollow,
     waveFollowToggle,
     elements.waveClearLoop,
+    elements.spectrogramMetaToggle,
   ];
 
   for (const control of nonFocusableClickControls) {
@@ -2148,11 +2268,17 @@ function attachUiEvents(): void {
     if (!isPlaybackRateUiTarget(event.target)) {
       closePlaybackRateMenu();
     }
+    if (state.spectrogramMetaOpen && !isSpectrogramMetaTarget(event.target)) {
+      setSpectrogramMetaOpen(false);
+    }
   }, true);
 
   document.addEventListener('focusin', (event) => {
     if (!isPlaybackRateUiTarget(event.target)) {
       closePlaybackRateMenu();
+    }
+    if (state.spectrogramMetaOpen && !isSpectrogramMetaTarget(event.target)) {
+      setSpectrogramMetaOpen(false);
     }
   });
 
@@ -2164,6 +2290,13 @@ function attachUiEvents(): void {
     if (event.code === 'Space' && !isTextEditableTarget(event.target)) {
       event.preventDefault();
       void togglePlayback();
+      return;
+    }
+
+    if (event.code === 'Escape' && state.spectrogramMetaOpen) {
+      event.preventDefault();
+      setSpectrogramMetaOpen(false);
+      scheduleKeyboardSurfaceFocus();
       return;
     }
 
@@ -2205,7 +2338,25 @@ function attachUiEvents(): void {
   }, { capture: true });
 
   elements.spectrogramTypeSelect.addEventListener('change', () => {
-    state.spectrogramConfig.analysisType = normalizeSpectrogramAnalysisType(elements.spectrogramTypeSelect.value);
+    const previousAnalysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
+    const previousDefaults = getDefaultSpectrogramDbWindow(previousAnalysisType);
+    const previousWindow = normalizeSpectrogramDbWindow(
+      state.spectrogramConfig.minDecibels,
+      state.spectrogramConfig.maxDecibels,
+      previousAnalysisType,
+    );
+    const nextAnalysisType = normalizeSpectrogramAnalysisType(elements.spectrogramTypeSelect.value);
+    state.spectrogramConfig.analysisType = nextAnalysisType;
+
+    if (
+      previousWindow.minDecibels === previousDefaults.minDecibels
+      && previousWindow.maxDecibels === previousDefaults.maxDecibels
+    ) {
+      const nextDefaults = getDefaultSpectrogramDbWindow(nextAnalysisType);
+      state.spectrogramConfig.minDecibels = nextDefaults.minDecibels;
+      state.spectrogramConfig.maxDecibels = nextDefaults.maxDecibels;
+    }
+
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });
@@ -2223,6 +2374,39 @@ function attachUiEvents(): void {
     state.spectrogramConfig.frequencyScale = normalizeSpectrogramFrequencyScale(elements.spectrogramScaleSelect.value);
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramDistributionSelect.addEventListener('change', () => {
+    state.spectrogramConfig.colormapDistribution = normalizeSpectrogramColormapDistribution(
+      elements.spectrogramDistributionSelect.value,
+    );
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramMinDbSlider.addEventListener('input', () => {
+    const window = normalizeSpectrogramDbWindow(
+      elements.spectrogramMinDbSlider.value,
+      state.spectrogramConfig.maxDecibels,
+      normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType),
+    );
+    state.spectrogramConfig.minDecibels = window.minDecibels;
+    state.spectrogramConfig.maxDecibels = window.maxDecibels;
+    refreshSpectrogramAnalysisConfig();
+  });
+  elements.spectrogramMaxDbSlider.addEventListener('input', () => {
+    const window = normalizeSpectrogramDbWindow(
+      state.spectrogramConfig.minDecibels,
+      elements.spectrogramMaxDbSlider.value,
+      normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType),
+    );
+    state.spectrogramConfig.minDecibels = window.minDecibels;
+    state.spectrogramConfig.maxDecibels = window.maxDecibels;
+    refreshSpectrogramAnalysisConfig();
+  });
+  elements.spectrogramMetaToggle.addEventListener('click', () => {
+    setSpectrogramMetaOpen(!state.spectrogramMetaOpen);
+    if (!state.spectrogramMetaOpen) {
+      scheduleKeyboardSurfaceFocus();
+    }
   });
 
   elements.seekBackward.addEventListener('click', () => seekBy(-5));

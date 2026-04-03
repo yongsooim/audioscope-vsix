@@ -1,5 +1,6 @@
 export type WaveformPlotMode = 'envelope' | 'raw' | 'sample';
 export type SpectrogramAnalysisType = 'mel' | 'scalogram' | 'spectrogram';
+export type SpectrogramColormapDistribution = 'balanced' | 'contrast' | 'soft';
 export type SpectrogramFrequencyScale = 'linear' | 'log' | 'mixed';
 export type SurfaceKind = 'spectrogram' | 'waveform';
 export type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
@@ -220,8 +221,11 @@ export interface SetViewportIntentMessage {
 export interface SetSpectrogramConfigMessage {
   body: {
     analysisType: SpectrogramAnalysisType;
+    colormapDistribution: SpectrogramColormapDistribution;
     fftSize: number;
     frequencyScale: SpectrogramFrequencyScale;
+    maxDecibels: number;
+    minDecibels: number;
     overlapRatio: number;
   };
   type: 'SetSpectrogramConfig';

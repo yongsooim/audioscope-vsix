@@ -43,6 +43,11 @@ const MIXED_FREQUENCY_PIVOT_HZ = 1000;
 const MIXED_FREQUENCY_PIVOT_RATIO = 0.5;
 const MIN_DECIBELS = -80;
 const MAX_DECIBELS = 0;
+const SPECTROGRAM_DB_WINDOW_LIMITS = {
+  max: 12,
+  min: -120,
+  minimumSpan: 6,
+} as const;
 const ANALYSIS_TYPE_CODES = {
   spectrogram: 0,
   mel: 1,
@@ -58,9 +63,15 @@ const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
   high: 1024,
   max: 512,
 };
+const COLORMAP_DISTRIBUTION_GAMMAS = {
+  balanced: 1,
+  contrast: 1.18,
+  soft: 0.84,
+} as const;
 
 type QualityPreset = 'balanced' | 'high' | 'max';
 type AnalysisType = 'mel' | 'scalogram' | 'spectrogram';
+type ColormapDistribution = keyof typeof COLORMAP_DISTRIBUTION_GAMMAS;
 type FrequencyScale = 'linear' | 'log' | 'mixed';
 type LayerKind = 'overview' | 'visible';
 type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
@@ -194,11 +205,18 @@ fn displayGammaForAnalysisType(analysisType: u32) -> f32 {
   return 1.0;
 }
 
-fn normalizePowerForAnalysis(power: f32, analysisType: u32) -> f32 {
+fn normalizePowerForAnalysis(
+  power: f32,
+  analysisType: u32,
+  distributionGamma: f32,
+  minDb: f32,
+  maxDb: f32,
+) -> f32 {
   let decibels = 10.0 * (log(max(power + 1e-14, 1e-20)) * LOG10_E);
-  let minDb = displayMinDbForAnalysisType(analysisType);
-  let normalized = clamp((decibels - minDb) / (MAX_DB - minDb), 0.0, 1.0);
-  return pow(normalized, displayGammaForAnalysisType(analysisType));
+  let clampedMaxDb = max(minDb + 1.0, maxDb);
+  let normalized = clamp((decibels - minDb) / (clampedMaxDb - minDb), 0.0, 1.0);
+  let gamma = max(0.2, displayGammaForAnalysisType(analysisType) * distributionGamma);
+  return pow(normalized, gamma);
 }
 
 fn paletteColor(normalized: f32) -> vec4<f32> {
@@ -446,7 +464,7 @@ fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) 
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePowerForAnalysis(meanPower, params.header1.y)),
+    paletteColor(normalizePowerForAnalysis(meanPower, params.header1.y, params.padding.x, params.padding.y, params.padding.z)),
   );
 }
 `;
@@ -513,7 +531,7 @@ fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePowerForAnalysis(meanPower, ANALYSIS_TYPE_MEL)),
+    paletteColor(normalizePowerForAnalysis(meanPower, ANALYSIS_TYPE_MEL, params.padding.x, params.padding.y, params.padding.z)),
   );
 }
 `;
@@ -599,7 +617,7 @@ fn renderScalogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePowerForAnalysis(power, ANALYSIS_TYPE_SCALOGRAM)),
+    paletteColor(normalizePowerForAnalysis(power, ANALYSIS_TYPE_SCALOGRAM, params.padding1.x, params.padding1.y, params.padding1.z)),
   );
 }
 `;
@@ -621,6 +639,7 @@ interface AudioSessionOptions {
 
 interface SpectrogramRequest {
   analysisType?: AnalysisType;
+  colormapDistribution?: ColormapDistribution;
   configVersion?: number;
   displayEnd?: number;
   displayStart?: number;
@@ -628,6 +647,8 @@ interface SpectrogramRequest {
   fftSize?: number;
   frequencyScale?: FrequencyScale;
   generation?: number;
+  maxDecibels?: number;
+  minDecibels?: number;
   overlapRatio?: number;
   pixelHeight?: number;
   pixelWidth?: number;
@@ -669,6 +690,7 @@ interface TileRecord {
 
 interface RenderRequestPlan {
   analysisType: AnalysisType;
+  colormapDistribution: ColormapDistribution;
   configKey: string;
   configVersion: number;
   decimationFactor: number;
@@ -681,6 +703,8 @@ interface RenderRequestPlan {
   generation: number;
   hopSamples: number;
   hopSeconds: number;
+  maxDecibels: number;
+  minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
   pixelWidth: number;
@@ -1055,6 +1079,60 @@ function normalizeQualityPreset(value: unknown): QualityPreset {
 
 function normalizeAnalysisType(value: unknown): AnalysisType {
   return value === 'mel' || value === 'scalogram' ? value : 'spectrogram';
+}
+
+function normalizeColormapDistribution(value: unknown): ColormapDistribution {
+  return value === 'contrast' || value === 'soft' ? value : 'balanced';
+}
+
+function getDefaultDbWindowForAnalysisType(analysisType: AnalysisType): {
+  maxDecibels: number;
+  minDecibels: number;
+} {
+  if (analysisType === 'mel') {
+    return { minDecibels: -92, maxDecibels: 0 };
+  }
+  if (analysisType === 'scalogram') {
+    return { minDecibels: -72, maxDecibels: 0 };
+  }
+  return { minDecibels: MIN_DECIBELS, maxDecibels: MAX_DECIBELS };
+}
+
+function normalizeDbWindow(
+  minValue: unknown,
+  maxValue: unknown,
+  analysisType: AnalysisType,
+): {
+  maxDecibels: number;
+  minDecibels: number;
+} {
+  const defaults = getDefaultDbWindowForAnalysisType(analysisType);
+  let minDecibels = Number.isFinite(Number(minValue)) ? Math.round(Number(minValue)) : defaults.minDecibels;
+  let maxDecibels = Number.isFinite(Number(maxValue)) ? Math.round(Number(maxValue)) : defaults.maxDecibels;
+
+  minDecibels = clamp(
+    minDecibels,
+    SPECTROGRAM_DB_WINDOW_LIMITS.min,
+    SPECTROGRAM_DB_WINDOW_LIMITS.max - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+  );
+  maxDecibels = clamp(
+    maxDecibels,
+    SPECTROGRAM_DB_WINDOW_LIMITS.min + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+    SPECTROGRAM_DB_WINDOW_LIMITS.max,
+  );
+
+  if (maxDecibels < minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan) {
+    maxDecibels = Math.min(
+      SPECTROGRAM_DB_WINDOW_LIMITS.max,
+      minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+    );
+    minDecibels = Math.min(
+      minDecibels,
+      maxDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+    );
+  }
+
+  return { minDecibels, maxDecibels };
 }
 
 function normalizeFrequencyScale(value: unknown): FrequencyScale {
@@ -2114,6 +2192,9 @@ function renderTileChunk(
     analysisState.maxFrequency,
     ANALYSIS_TYPE_CODES[plan.analysisType] ?? ANALYSIS_TYPE_CODES.spectrogram,
     FREQUENCY_SCALE_CODES[plan.frequencyScale] ?? FREQUENCY_SCALE_CODES.log,
+    COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution],
+    plan.minDecibels,
+    plan.maxDecibels,
     analysisState.spectrogramOutputPointer,
   );
 
@@ -2778,6 +2859,9 @@ function createStftComputeParamsData(
   view.setFloat32(36, tileSpan, true);
   view.setFloat32(40, sampleRate, true);
   view.setFloat32(44, powerScale, true);
+  view.setFloat32(48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
+  view.setFloat32(52, plan.minDecibels, true);
+  view.setFloat32(56, plan.maxDecibels, true);
   return buffer;
 }
 
@@ -2805,6 +2889,9 @@ function createScalogramComputeParamsData(
   view.setFloat32(16, tileStart, true);
   view.setFloat32(20, tileSpan, true);
   view.setFloat32(24, sampleRate, true);
+  view.setFloat32(48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
+  view.setFloat32(52, plan.minDecibels, true);
+  view.setFloat32(56, plan.maxDecibels, true);
   return buffer;
 }
 
@@ -3792,6 +3879,8 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
   const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1));
   const dprBucket = Math.max(2, Math.round(Number(request?.dpr) || 2));
   const analysisType = normalizeAnalysisType(request?.analysisType);
+  const colormapDistribution = normalizeColormapDistribution(request?.colormapDistribution);
+  const dbWindow = normalizeDbWindow(request?.minDecibels, request?.maxDecibels, analysisType);
   const frequencyScale = getEffectiveFrequencyScale(analysisType, request?.frequencyScale);
   const fftSize = analysisType === 'scalogram' ? 0 : normalizeFftSize(request?.fftSize);
   const overlapRatio = analysisType === 'scalogram' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
@@ -3820,6 +3909,8 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     : 1;
   const configKey = [
     `type${analysisType}`,
+    `dist${colormapDistribution}`,
+    `db${dbWindow.minDecibels}:${dbWindow.maxDecibels}`,
     `scale${frequencyScale}`,
     `fft${fftSize}`,
     `ov${Math.round(overlapRatio * 1000)}`,
@@ -3829,6 +3920,7 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
 
   return {
     analysisType,
+    colormapDistribution,
     decimationFactor,
     configKey,
     configVersion,
@@ -3841,6 +3933,8 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     generation,
     hopSamples,
     hopSeconds: secondsPerColumn,
+    maxDecibels: dbWindow.maxDecibels,
+    minDecibels: dbWindow.minDecibels,
     overlapRatio,
     pixelHeight,
     pixelWidth,
@@ -3867,6 +3961,7 @@ function buildTileCacheKey(plan: RenderRequestPlan, tileIndex: number): string {
 function createLayerReadyBody(plan: RenderRequestPlan) {
   return {
     analysisType: plan.analysisType,
+    colormapDistribution: plan.colormapDistribution,
     configVersion: plan.configVersion,
     decimationFactor: plan.decimationFactor,
     displayEnd: plan.displayEnd,
@@ -3876,6 +3971,8 @@ function createLayerReadyBody(plan: RenderRequestPlan) {
     generation: plan.generation,
     hopSamples: plan.hopSamples,
     hopSeconds: plan.hopSeconds,
+    maxDecibels: plan.maxDecibels,
+    minDecibels: plan.minDecibels,
     overlapRatio: plan.overlapRatio,
     pixelHeight: plan.pixelHeight,
     pixelWidth: plan.pixelWidth,
@@ -3897,6 +3994,7 @@ function isEquivalentPlan(left: RenderRequestPlan | null, right: RenderRequestPl
   return left.requestKind === right.requestKind
     && left.configVersion === right.configVersion
     && left.analysisType === right.analysisType
+    && left.colormapDistribution === right.colormapDistribution
     && left.dprBucket === right.dprBucket
     && left.pixelWidth === right.pixelWidth
     && left.pixelHeight === right.pixelHeight
@@ -3904,6 +4002,8 @@ function isEquivalentPlan(left: RenderRequestPlan | null, right: RenderRequestPl
     && left.targetColumns === right.targetColumns
     && left.fftSize === right.fftSize
     && left.frequencyScale === right.frequencyScale
+    && left.minDecibels === right.minDecibels
+    && left.maxDecibels === right.maxDecibels
     && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-6
     && Math.abs(left.viewStart - right.viewStart) <= 1e-6
     && Math.abs(left.viewEnd - right.viewEnd) <= 1e-6;

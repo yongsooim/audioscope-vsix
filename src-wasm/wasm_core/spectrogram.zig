@@ -531,11 +531,19 @@ fn displayGammaForAnalysisType(analysis_type: core.AnalysisType) f32 {
     };
 }
 
-fn normalizePowerForDisplay(power: f32, analysis_type: core.AnalysisType) f32 {
+fn normalizePowerForDisplay(
+    power: f32,
+    analysis_type: core.AnalysisType,
+    distribution_gamma: f32,
+    min_db: f32,
+    max_db: f32,
+) f32 {
     const decibels = 10.0 * core.approxLog10Positive(power + 1e-14);
-    const min_db = displayMinDbForAnalysisType(analysis_type);
-    const normalized = core.clampf32((decibels - min_db) / (core.max_db - min_db), 0.0, 1.0);
-    return std.math.pow(f32, normalized, displayGammaForAnalysisType(analysis_type));
+    const clamped_min_db = core.clampf32(min_db, -120.0, 12.0 - 1.0);
+    const clamped_max_db = core.maxF32(clamped_min_db + 1.0, core.clampf32(max_db, clamped_min_db + 1.0, 12.0));
+    const normalized = core.clampf32((decibels - clamped_min_db) / (clamped_max_db - clamped_min_db), 0.0, 1.0);
+    const gamma = displayGammaForAnalysisType(analysis_type) * core.clampf32(distribution_gamma, 0.2, 2.5);
+    return std.math.pow(f32, normalized, gamma);
 }
 
 fn computeScalogramKernelPower(center_sample: i32, kernel: *const core.ScalogramRowKernel) f32 {
@@ -716,6 +724,9 @@ fn renderStftDerivedTile(
     decimation_factor: i32,
     min_frequency: f32,
     max_frequency: f32,
+    distribution_gamma: f32,
+    min_db: f32,
+    max_db: f32,
     output_ptr: usize,
 ) i32 {
     if (!core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
@@ -779,7 +790,7 @@ fn renderStftDerivedTile(
                     layout.mel_bands[@as(usize, @intCast(row))],
                     fft_size,
                     core.g_session.sample_rate,
-                ), .mel),
+                ), .mel, distribution_gamma, min_db, max_db),
                 .spectrogram => blk: {
                     const base_range = layout.band_ranges[@as(usize, @intCast(row))];
                     const use_low_band = layout.use_low_frequency_enhancement and base_range.end_frequency <= layout.low_frequency_maximum;
@@ -788,7 +799,7 @@ fn renderStftDerivedTile(
                     else
                         base_range;
                     const active_power = if (use_low_band) low_power_spectrum else power_spectrum;
-                    break :blk normalizePowerForDisplay(computeBandMeanPower(active_power, active_range), .spectrogram);
+                    break :blk normalizePowerForDisplay(computeBandMeanPower(active_power, active_range), .spectrogram, distribution_gamma, min_db, max_db);
                 },
                 .scalogram => 0.0,
             };
@@ -809,6 +820,9 @@ fn renderScalogramTile(
     row_count: i32,
     min_frequency: f32,
     max_frequency: f32,
+    distribution_gamma: f32,
+    min_db: f32,
+    max_db: f32,
     output_ptr: usize,
 ) i32 {
     if (!core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
@@ -861,6 +875,9 @@ fn renderScalogramTile(
                         kernel,
                     ),
                     .scalogram,
+                    distribution_gamma,
+                    min_db,
+                    max_db,
                 );
                 const pixel_offset = row_offset + (@as(usize, @intCast(active_column)) * 4);
                 writePaletteColor(normalized, output[pixel_offset .. pixel_offset + 4]);
@@ -882,9 +899,12 @@ pub export fn wave_render_spectrogram_tile_rgba(
     max_frequency: f32,
     analysis_type_value: i32,
     frequency_scale_value: i32,
+    distribution_gamma: f32,
+    min_db: f32,
+    max_db: f32,
     output_ptr: usize,
 ) i32 {
-    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or decimation_factor <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or !core.isFiniteF32(core.g_session.duration) or core.g_session.sample_rate <= 0.0 or core.g_session.duration <= 0.0 or !core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or tile_end <= tile_start) {
+    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or decimation_factor <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or !core.isFiniteF32(core.g_session.duration) or core.g_session.sample_rate <= 0.0 or core.g_session.duration <= 0.0 or !core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or !core.isFiniteF32(distribution_gamma) or !core.isFiniteF32(min_db) or !core.isFiniteF32(max_db) or tile_end <= tile_start) {
         return 0;
     }
 
@@ -899,6 +919,9 @@ pub export fn wave_render_spectrogram_tile_rgba(
             row_count,
             min_frequency,
             max_frequency,
+            distribution_gamma,
+            min_db,
+            max_db,
             output_ptr,
         ),
         .mel, .spectrogram => if (fft_size > 0)
@@ -913,6 +936,9 @@ pub export fn wave_render_spectrogram_tile_rgba(
                 decimation_factor,
                 min_frequency,
                 max_frequency,
+                distribution_gamma,
+                min_db,
+                max_db,
                 output_ptr,
             )
         else

@@ -389,42 +389,92 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           <div id="spectrogram-axis" class="spectrogram-axis" aria-hidden="true"></div>
           <div id="spectrogram-stage" class="spectrogram-stage">
             <canvas id="spectrogram" class="spectrogram-canvas" aria-label="Spectrogram"></canvas>
-            <div id="spectrogram-meta" class="spectrogram-meta">
-              <label class="spectrogram-control">
-                <span class="spectrogram-control-label">Type</span>
-                <select id="spectrogram-type-select" class="spectrogram-control-select" aria-label="Spectrogram analysis type">
-                  <option value="spectrogram" selected>Spectrogram</option>
-                  <option value="mel">Mel-Spectrogram</option>
-                  <option value="scalogram">Scalogram</option>
-                </select>
-              </label>
-              <label class="spectrogram-control">
-                <span class="spectrogram-control-label">FFT</span>
-                <select id="spectrogram-fft-select" class="spectrogram-control-select" aria-label="Spectrogram FFT size">
-                  <option value="1024">1024</option>
-                  <option value="2048">2048</option>
-                  <option value="4096" selected>4096</option>
-                  <option value="8192">8192</option>
-                  <option value="16384">16384</option>
-                </select>
-              </label>
-              <label class="spectrogram-control">
-                <span class="spectrogram-control-label">Overlap</span>
-                <select id="spectrogram-overlap-select" class="spectrogram-control-select" aria-label="Spectrogram overlap ratio">
-                  <option value="0.5">50%</option>
-                  <option value="0.75" selected>75%</option>
-                  <option value="0.875">87.5%</option>
-                  <option value="0.9375">93.75%</option>
-                </select>
-              </label>
-              <label class="spectrogram-control">
-                <span class="spectrogram-control-label">Scale</span>
-                <select id="spectrogram-scale-select" class="spectrogram-control-select" aria-label="Spectrogram frequency scale">
-                  <option value="log" selected>Log</option>
-                  <option value="mixed">Mixed</option>
-                  <option value="linear">Linear</option>
-                </select>
-              </label>
+            <div id="spectrogram-meta" class="spectrogram-meta" data-open="false">
+              <button
+                id="spectrogram-meta-toggle"
+                class="spectrogram-meta-toggle"
+                type="button"
+                aria-controls="spectrogram-meta-controls"
+                aria-expanded="false"
+                aria-label="Toggle spectrogram settings"
+              >Settings</button>
+              <div id="spectrogram-meta-controls" class="spectrogram-meta-controls" hidden>
+                <label class="spectrogram-control">
+                  <span class="spectrogram-control-label">Type</span>
+                  <select id="spectrogram-type-select" class="spectrogram-control-select" aria-label="Spectrogram analysis type">
+                    <option value="spectrogram" selected>Spectrogram</option>
+                    <option value="mel">Mel-Spectrogram</option>
+                    <option value="scalogram">Scalogram</option>
+                  </select>
+                </label>
+                <label class="spectrogram-control">
+                  <span class="spectrogram-control-label">FFT</span>
+                  <select id="spectrogram-fft-select" class="spectrogram-control-select" aria-label="Spectrogram FFT size">
+                    <option value="1024">1024</option>
+                    <option value="2048">2048</option>
+                    <option value="4096" selected>4096</option>
+                    <option value="8192">8192</option>
+                    <option value="16384">16384</option>
+                  </select>
+                </label>
+                <label class="spectrogram-control">
+                  <span class="spectrogram-control-label">Overlap</span>
+                  <select id="spectrogram-overlap-select" class="spectrogram-control-select" aria-label="Spectrogram overlap ratio">
+                    <option value="0.5">50%</option>
+                    <option value="0.75" selected>75%</option>
+                    <option value="0.875">87.5%</option>
+                    <option value="0.9375">93.75%</option>
+                  </select>
+                </label>
+                <label class="spectrogram-control">
+                  <span class="spectrogram-control-label">Scale</span>
+                  <select id="spectrogram-scale-select" class="spectrogram-control-select" aria-label="Spectrogram frequency scale">
+                    <option value="log" selected>Log</option>
+                    <option value="mixed">Mixed</option>
+                    <option value="linear">Linear</option>
+                  </select>
+                </label>
+                <label class="spectrogram-control">
+                  <span class="spectrogram-control-label">Curve</span>
+                  <select id="spectrogram-distribution-select" class="spectrogram-control-select" aria-label="Spectrogram colormap distribution">
+                    <option value="balanced" selected>Balanced</option>
+                    <option value="soft">Soft</option>
+                    <option value="contrast">Contrast</option>
+                  </select>
+                </label>
+                <label class="spectrogram-control spectrogram-control-slider">
+                  <span class="spectrogram-control-label">Min dB</span>
+                  <span class="spectrogram-control-slider-group">
+                    <input
+                      id="spectrogram-min-db-slider"
+                      class="spectrogram-control-range"
+                      type="range"
+                      min="-120"
+                      max="-6"
+                      step="1"
+                      value="-80"
+                      aria-label="Spectrogram minimum decibel"
+                    />
+                    <span id="spectrogram-min-db-value" class="spectrogram-control-slider-value">-80 dB</span>
+                  </span>
+                </label>
+                <label class="spectrogram-control spectrogram-control-slider">
+                  <span class="spectrogram-control-label">Max dB</span>
+                  <span class="spectrogram-control-slider-group">
+                    <input
+                      id="spectrogram-max-db-slider"
+                      class="spectrogram-control-range"
+                      type="range"
+                      min="-74"
+                      max="12"
+                      step="1"
+                      value="0"
+                      aria-label="Spectrogram maximum decibel"
+                    />
+                    <span id="spectrogram-max-db-value" class="spectrogram-control-slider-value">0 dB</span>
+                  </span>
+                </label>
+              </div>
             </div>
             <div id="spectrogram-hover-tooltip" class="surface-hover-tooltip surface-hover-tooltip-detail" aria-hidden="true"></div>
             <div id="spectrogram-selection" class="spectrogram-selection" aria-hidden="true"></div>

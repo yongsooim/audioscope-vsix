@@ -69,6 +69,9 @@ export interface WaveCoreModule {
     maxFrequency: number,
     analysisType: number,
     frequencyScale: number,
+    distributionGamma: number,
+    minDecibels: number,
+    maxDecibels: number,
     outputPointer: number,
   ): number;
   memory: WebAssembly.Memory;

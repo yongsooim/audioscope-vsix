@@ -19,6 +19,7 @@ import type {
   SampleInfoPayload,
   SetViewportIntentMessage,
   SpectrogramAnalysisType,
+  SpectrogramColormapDistribution,
   SpectrogramFrequencyScale,
   SurfaceKind,
   TransportCommand,
@@ -107,6 +108,16 @@ const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
 const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SPECTROGRAM_TICKS = [20000, 16000, 12000, 8000, 4000, 2000, 1000, 400, 100, 50];
+const SPECTROGRAM_DB_WINDOW_LIMITS = {
+  max: 12,
+  min: -120,
+  minimumSpan: 6,
+} as const;
+const COLORMAP_DISTRIBUTION_GAMMAS: Record<SpectrogramColormapDistribution, number> = {
+  balanced: 1,
+  contrast: 1.18,
+  soft: 0.84,
+};
 
 interface WaveformSurfaceState {
   canvas: OffscreenCanvas | null;
@@ -141,6 +152,7 @@ interface TileRecord {
 
 interface SpectrogramPlan {
   analysisType: SpectrogramAnalysisType;
+  colormapDistribution: SpectrogramColormapDistribution;
   configKey: string;
   decimationFactor: number;
   dprBucket: number;
@@ -149,6 +161,8 @@ interface SpectrogramPlan {
   frequencyScale: SpectrogramFrequencyScale;
   hopSamples: number;
   hopSeconds: number;
+  maxDecibels: number;
+  minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
   pixelWidth: number;
@@ -221,8 +235,11 @@ interface EngineState {
   session: EngineSessionState;
   spectrogramConfig: {
     analysisType: SpectrogramAnalysisType;
+    colormapDistribution: SpectrogramColormapDistribution;
     fftSize: number;
     frequencyScale: SpectrogramFrequencyScale;
+    maxDecibels: number;
+    minDecibels: number;
     overlapRatio: number;
   };
   uiRevision: number;
@@ -276,8 +293,11 @@ const state: EngineState = {
   session: createEmptySessionState(),
   spectrogramConfig: {
     analysisType: 'spectrogram',
+    colormapDistribution: 'balanced',
     fftSize: 4096,
     frequencyScale: 'log',
+    maxDecibels: 0,
+    minDecibels: -80,
     overlapRatio: 0.75,
   },
   uiRevision: 0,
@@ -544,15 +564,71 @@ function handleViewportIntent(message: SetViewportIntentMessage): void {
   applyViewportIntent(message.body);
 }
 
+function getDefaultSpectrogramDbWindow(analysisType: SpectrogramAnalysisType): {
+  maxDecibels: number;
+  minDecibels: number;
+} {
+  if (analysisType === 'mel') {
+    return { minDecibels: -92, maxDecibels: 0 };
+  }
+  if (analysisType === 'scalogram') {
+    return { minDecibels: -72, maxDecibels: 0 };
+  }
+  return { minDecibels: -80, maxDecibels: 0 };
+}
+
+function normalizeSpectrogramDbWindow(
+  minValue: unknown,
+  maxValue: unknown,
+  analysisType: SpectrogramAnalysisType,
+): {
+  maxDecibels: number;
+  minDecibels: number;
+} {
+  const defaults = getDefaultSpectrogramDbWindow(analysisType);
+  let minDecibels = Number.isFinite(Number(minValue)) ? Math.round(Number(minValue)) : defaults.minDecibels;
+  let maxDecibels = Number.isFinite(Number(maxValue)) ? Math.round(Number(maxValue)) : defaults.maxDecibels;
+
+  minDecibels = clamp(
+    minDecibels,
+    SPECTROGRAM_DB_WINDOW_LIMITS.min,
+    SPECTROGRAM_DB_WINDOW_LIMITS.max - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+  );
+  maxDecibels = clamp(
+    maxDecibels,
+    SPECTROGRAM_DB_WINDOW_LIMITS.min + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+    SPECTROGRAM_DB_WINDOW_LIMITS.max,
+  );
+
+  if (maxDecibels < minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan) {
+    maxDecibels = Math.min(
+      SPECTROGRAM_DB_WINDOW_LIMITS.max,
+      minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+    );
+    minDecibels = Math.min(
+      minDecibels,
+      maxDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
+    );
+  }
+
+  return { minDecibels, maxDecibels };
+}
+
 function handleSpectrogramConfig(config: {
   analysisType: SpectrogramAnalysisType;
+  colormapDistribution: SpectrogramColormapDistribution;
   fftSize: number;
   frequencyScale: SpectrogramFrequencyScale;
+  maxDecibels: number;
+  minDecibels: number;
   overlapRatio: number;
 }): void {
   const nextAnalysisType = config.analysisType === 'mel' || config.analysisType === 'scalogram'
     ? config.analysisType
     : 'spectrogram';
+  const nextColormapDistribution = config.colormapDistribution === 'contrast' || config.colormapDistribution === 'soft'
+    ? config.colormapDistribution
+    : 'balanced';
   const nextFftSize = FFT_SIZE_OPTIONS.includes(Number(config.fftSize))
     ? Number(config.fftSize)
     : 4096;
@@ -562,10 +638,18 @@ function handleSpectrogramConfig(config: {
   const nextFrequencyScale = nextAnalysisType === 'spectrogram'
     ? (config.frequencyScale === 'linear' || config.frequencyScale === 'mixed' ? config.frequencyScale : 'log')
     : 'log';
+  const nextDbWindow = normalizeSpectrogramDbWindow(
+    config.minDecibels,
+    config.maxDecibels,
+    nextAnalysisType,
+  );
 
   const changed =
     nextAnalysisType !== state.spectrogramConfig.analysisType
+    || nextColormapDistribution !== state.spectrogramConfig.colormapDistribution
     || nextFftSize !== state.spectrogramConfig.fftSize
+    || nextDbWindow.minDecibels !== state.spectrogramConfig.minDecibels
+    || nextDbWindow.maxDecibels !== state.spectrogramConfig.maxDecibels
     || Math.abs(nextOverlapRatio - state.spectrogramConfig.overlapRatio) > 1e-9
     || nextFrequencyScale !== state.spectrogramConfig.frequencyScale;
 
@@ -576,8 +660,11 @@ function handleSpectrogramConfig(config: {
 
   state.spectrogramConfig = {
     analysisType: nextAnalysisType,
+    colormapDistribution: nextColormapDistribution,
     fftSize: nextFftSize,
     frequencyScale: nextFrequencyScale,
+    maxDecibels: nextDbWindow.maxDecibels,
+    minDecibels: nextDbWindow.minDecibels,
     overlapRatio: nextOverlapRatio,
   };
   clearTileCache();
@@ -1351,6 +1438,12 @@ async function renderSpectrogram(range: RangeFrames, token: number): Promise<voi
 function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
   const preset = QUALITY_PRESETS[state.session.quality];
   const analysisType = state.spectrogramConfig.analysisType;
+  const colormapDistribution = state.spectrogramConfig.colormapDistribution;
+  const dbWindow = normalizeSpectrogramDbWindow(
+    state.spectrogramConfig.minDecibels,
+    state.spectrogramConfig.maxDecibels,
+    analysisType,
+  );
   const frequencyScale = analysisType === 'spectrogram'
     ? state.spectrogramConfig.frequencyScale
     : 'log';
@@ -1382,8 +1475,10 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     : 1;
   const configKey = [
     `type${analysisType}`,
+    `dist${colormapDistribution}`,
     `scale${frequencyScale}`,
     `fft${fftSize}`,
+    `db${dbWindow.minDecibels}:${dbWindow.maxDecibels}`,
     `ov${Math.round(overlapRatio * 1000)}`,
     `hop${hopSamples}`,
     `rows${rowCount}`,
@@ -1391,6 +1486,7 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
 
   return {
     analysisType,
+    colormapDistribution,
     configKey,
     decimationFactor,
     dprBucket: Math.max(2, Math.round(state.waveformSurface.renderScale)),
@@ -1399,6 +1495,8 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     frequencyScale,
     hopSamples,
     hopSeconds,
+    maxDecibels: dbWindow.maxDecibels,
+    minDecibels: dbWindow.minDecibels,
     overlapRatio,
     pixelHeight,
     pixelWidth,
@@ -1474,6 +1572,9 @@ function renderSpectrogramTileChunk(
     state.session.maxFrequency,
     ANALYSIS_TYPE_CODES[plan.analysisType],
     FREQUENCY_SCALE_CODES[plan.frequencyScale],
+    COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution] ?? COLORMAP_DISTRIBUTION_GAMMAS.balanced,
+    plan.minDecibels,
+    plan.maxDecibels,
     state.session.spectrogramOutputPointer,
   );
 
@@ -1683,8 +1784,11 @@ function isEquivalentSpectrogramPlan(left: SpectrogramPlan | null, right: Spectr
   }
 
   return left.analysisType === right.analysisType
+    && left.colormapDistribution === right.colormapDistribution
     && left.frequencyScale === right.frequencyScale
     && left.fftSize === right.fftSize
+    && left.minDecibels === right.minDecibels
+    && left.maxDecibels === right.maxDecibels
     && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-9
     && left.pixelWidth === right.pixelWidth
     && left.pixelHeight === right.pixelHeight
