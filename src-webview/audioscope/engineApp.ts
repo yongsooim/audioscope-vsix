@@ -176,6 +176,85 @@ const state = {
   waveformViewport: createInitialWaveformViewportState(),
 };
 
+function ensureKeyboardSurfaceTarget(): void {
+  if (document.body.tabIndex !== -1) {
+    document.body.tabIndex = -1;
+  }
+}
+
+function focusKeyboardSurface(): void {
+  if (document.visibilityState !== 'visible') {
+    return;
+  }
+
+  ensureKeyboardSurfaceTarget();
+  window.focus();
+
+  if (document.activeElement !== document.body) {
+    document.body.focus({ preventScroll: true });
+  }
+}
+
+function scheduleKeyboardSurfaceFocus(): void {
+  queueMicrotask(() => {
+    window.requestAnimationFrame(() => {
+      focusKeyboardSurface();
+    });
+  });
+}
+
+function initializeKeyboardSurfaceFocus(): void {
+  ensureKeyboardSurfaceTarget();
+  scheduleKeyboardSurfaceFocus();
+  window.setTimeout(() => {
+    focusKeyboardSurface();
+  }, 120);
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      scheduleKeyboardSurfaceFocus();
+    }
+  });
+}
+
+function isTextEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (target.isContentEditable || target.closest('[contenteditable="true"]')) {
+    return true;
+  }
+
+  const field = target.closest('input, textarea');
+
+  if (field instanceof HTMLTextAreaElement) {
+    return true;
+  }
+
+  if (!(field instanceof HTMLInputElement)) {
+    return false;
+  }
+
+  const inputType = field.type.toLowerCase();
+
+  return inputType === 'email'
+    || inputType === 'number'
+    || inputType === 'password'
+    || inputType === 'search'
+    || inputType === 'tel'
+    || inputType === 'text'
+    || inputType === 'url';
+}
+
+function preventPointerFocus(event: PointerEvent): void {
+  if (event.pointerType === 'mouse' && event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+}
+
 const {
   renderLoudnessSummary,
   renderMediaMetadata,
@@ -201,9 +280,9 @@ const {
   openPlaybackRateMenu,
   positionPlaybackRateMenu,
   syncPlaybackRateControl,
-  togglePlaybackRateMenu,
 } = createAudioscopePlaybackRateController({
   elements,
+  scheduleKeyboardSurfaceFocus,
   state,
 });
 
@@ -1812,6 +1891,24 @@ window.addEventListener('message', (event) => {
 
 function attachUiEvents(): void {
   ensureWaveformSampleMarkerElement();
+  const waveFollowToggle = elements.waveFollow.closest<HTMLElement>('.wave-follow-toggle');
+  const nonFocusableClickControls = [
+    elements.mediaMetadataSummary,
+    elements.seekBackward,
+    elements.playToggle,
+    elements.seekForward,
+    elements.playbackRateButton,
+    elements.waveZoomOut,
+    elements.waveZoomReset,
+    elements.waveZoomIn,
+    elements.waveFollow,
+    waveFollowToggle,
+    elements.waveClearLoop,
+  ];
+
+  for (const control of nonFocusableClickControls) {
+    control?.addEventListener('pointerdown', preventPointerFocus);
+  }
 
   elements.mediaMetadataPanel.addEventListener('mouseenter', () => setMediaMetadataDetailOpen(true));
   elements.mediaMetadataPanel.addEventListener('mouseleave', () => setMediaMetadataDetailOpen(false));
@@ -1865,7 +1962,17 @@ function attachUiEvents(): void {
   });
 
   window.addEventListener('keydown', (event) => {
-    if (event.defaultPrevented || event.target instanceof HTMLElement && event.target.closest('input, select, button, textarea, [contenteditable="true"]')) {
+    if (event.defaultPrevented) {
+      return;
+    }
+
+    if (event.code === 'Space' && !isTextEditableTarget(event.target)) {
+      event.preventDefault();
+      void togglePlayback();
+      return;
+    }
+
+    if (event.target instanceof HTMLElement && event.target.closest('input, select, button, textarea, [contenteditable="true"]')) {
       return;
     }
 
@@ -1878,12 +1985,6 @@ function attachUiEvents(): void {
     if (event.code === 'ArrowRight') {
       event.preventDefault();
       seekBy(5);
-      return;
-    }
-
-    if (event.code === 'Space') {
-      event.preventDefault();
-      void togglePlayback();
       return;
     }
 
@@ -1911,24 +2012,36 @@ function attachUiEvents(): void {
   elements.spectrogramTypeSelect.addEventListener('change', () => {
     state.spectrogramConfig.analysisType = normalizeSpectrogramAnalysisType(elements.spectrogramTypeSelect.value);
     refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
   });
   elements.spectrogramFftSelect.addEventListener('change', () => {
     state.spectrogramConfig.fftSize = normalizeSpectrogramFftSize(elements.spectrogramFftSelect.value);
     refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
   });
   elements.spectrogramOverlapSelect.addEventListener('change', () => {
     state.spectrogramConfig.overlapRatio = normalizeSpectrogramOverlapRatio(elements.spectrogramOverlapSelect.value);
     refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
   });
   elements.spectrogramScaleSelect.addEventListener('change', () => {
     state.spectrogramConfig.frequencyScale = normalizeSpectrogramFrequencyScale(elements.spectrogramScaleSelect.value);
     refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
   });
 
   elements.seekBackward.addEventListener('click', () => seekBy(-5));
   elements.seekForward.addEventListener('click', () => seekBy(5));
   elements.playToggle.addEventListener('click', () => { void togglePlayback(); });
-  elements.playbackRateButton.addEventListener('click', () => togglePlaybackRateMenu());
+  elements.playbackRateButton.addEventListener('click', () => {
+    if (state.playbackRateMenuOpen) {
+      closePlaybackRateMenu();
+      scheduleKeyboardSurfaceFocus();
+      return;
+    }
+
+    openPlaybackRateMenu({ focusSelected: false });
+  });
   elements.playbackRateButton.addEventListener('keydown', (event) => {
     if (event.code === 'ArrowDown' || event.code === 'Enter' || event.code === 'Space') {
       event.preventDefault();
@@ -1968,6 +2081,7 @@ function attachUiEvents(): void {
     state.audioTransport?.setPlaybackRate(state.playbackRate);
     renderMediaMetadata();
     syncTransport();
+    scheduleKeyboardSurfaceFocus();
   });
 
   elements.timeline.addEventListener('input', () => {
@@ -1975,6 +2089,9 @@ function attachUiEvents(): void {
       return;
     }
     setPlaybackPositionFromFrame(Math.round(Number(elements.timeline.value) * getDurationFrames()));
+  });
+  elements.timeline.addEventListener('pointerup', () => {
+    scheduleKeyboardSurfaceFocus();
   });
 
   elements.waveformOverview.addEventListener('pointermove', updateTimelineHoverTooltip);
@@ -2092,6 +2209,7 @@ if (
   setFatalStatus('OffscreenCanvas is required for audioscope.');
 } else {
   initializePlaybackRateControl();
+  initializeKeyboardSurfaceFocus();
   attachUiEvents();
   attachResizeObservers();
   applyViewportSplit(true);
