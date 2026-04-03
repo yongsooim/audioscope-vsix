@@ -407,26 +407,18 @@ async function renderWaveform(request) {
   resizeDisplaySurface();
 
   let slice = null;
-  let actualViewStart = viewStart;
-  let actualViewEnd = viewEnd;
-
   if (!rawSamplePlotMode && !samplePlotMode) {
     slice = ensureWaveformSliceCapacity(module, columnCount * 2);
-    const sliceMetaPointer = ensureWaveformSliceMetaPointer(module);
 
     if (!module._wave_extract_waveform_slice(
       viewStart,
       viewEnd,
       columnCount,
       analysisState.waveformSlicePointer,
-      sliceMetaPointer,
+      0,
     )) {
       throw new Error('Waveform slice extraction failed.');
     }
-
-    const sliceMeta = readWaveformSliceMeta(module, sliceMetaPointer);
-    actualViewStart = Number.isFinite(sliceMeta.start) ? sliceMeta.start : viewStart;
-    actualViewEnd = Number.isFinite(sliceMeta.end) ? sliceMeta.end : viewEnd;
   }
 
   if (generation !== latestRequestedGeneration) {
@@ -462,8 +454,8 @@ async function renderWaveform(request) {
       height,
       rawSamplePlotMode,
       samplePlotMode,
-      viewEnd: actualViewEnd,
-      viewStart: actualViewStart,
+      viewEnd,
+      viewStart,
       visibleSpan,
       width,
     });
@@ -489,8 +481,8 @@ async function renderWaveform(request) {
       height,
       rawSamplePlotMode,
       samplePlotMode,
-      viewEnd: actualViewEnd,
-      viewStart: actualViewStart,
+      viewEnd,
+      viewStart,
       visibleSpan,
       width,
     });
@@ -508,8 +500,8 @@ async function renderWaveform(request) {
     height,
     rawSamplePlotMode,
     samplePlotMode,
-    viewEnd: actualViewEnd,
-    viewStart: actualViewStart,
+    viewEnd,
+    viewStart,
     visibleSpan,
     width,
   });
@@ -989,29 +981,6 @@ function ensureWaveformSliceCapacity(module, floatCount) {
   analysisState.waveformSliceCapacity = floatCount;
   analysisState.waveformSlice = getHeapF32View(module, pointer, floatCount);
   return analysisState.waveformSlice;
-}
-
-function ensureWaveformSliceMetaPointer(module) {
-  if (analysisState.waveformSliceMetaPointer) {
-    return analysisState.waveformSliceMetaPointer;
-  }
-
-  const pointer = module._malloc(Float64Array.BYTES_PER_ELEMENT * 2);
-
-  if (!pointer) {
-    throw new Error('Failed to allocate waveform slice metadata buffer.');
-  }
-
-  analysisState.waveformSliceMetaPointer = pointer;
-  return pointer;
-}
-
-function readWaveformSliceMeta(module, pointer) {
-  const offset = Math.floor(pointer / Float64Array.BYTES_PER_ELEMENT);
-  return {
-    end: Number(module.HEAPF64[offset + 1] ?? 0),
-    start: Number(module.HEAPF64[offset] ?? 0),
-  };
 }
 
 function hasRenderableWaveformData(waveformData) {

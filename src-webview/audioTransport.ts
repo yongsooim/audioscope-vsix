@@ -584,7 +584,7 @@ class AudioWorkletCopyTransport {
       const body = message.body as WorkletStateMessage['body'] | undefined;
       this.snapshotState = {
         contextTime: Number(body?.contextTime) || 0,
-        currentFrame: clampFrame(
+        currentFrame: clampFramePrecise(
           Number(body?.currentFrame) || 0,
           this.playbackSession?.sourceLength ?? 0,
         ),
@@ -607,7 +607,7 @@ class AudioWorkletCopyTransport {
     const sourceLength = this.playbackSession?.sourceLength ?? 0;
 
     if (!snapshotState?.playing || snapshotState.ended) {
-      return clampFrame(snapshotState?.currentFrame ?? 0, sourceLength);
+      return clampFramePrecise(snapshotState?.currentFrame ?? 0, sourceLength);
     }
 
     const nowContextTime = Number(this.audioContext?.currentTime) || 0;
@@ -617,13 +617,13 @@ class AudioWorkletCopyTransport {
     if (this.loopRange && this.loopRange.end > this.loopRange.start) {
       const { loopEndFrame, loopStartFrame } = this.getControlLoopFrames();
       const loopSpan = Math.max(1, loopEndFrame - loopStartFrame);
-      return clampFrame(
+      return clampFramePrecise(
         loopStartFrame + positiveModulo(projectedFrame - loopStartFrame, loopSpan),
         sourceLength,
       );
     }
 
-    return clampFrame(projectedFrame, sourceLength);
+    return clampFramePrecise(projectedFrame, sourceLength);
   }
 
   applyObservedState(currentFrame: number, playing: boolean, ended: boolean): number {
@@ -662,7 +662,7 @@ class AudioWorkletCopyTransport {
 
   sourceFrameToSeconds(frame: number): number {
     const sourceLength = this.playbackSession?.sourceLength ?? 0;
-    const safeFrame = clampFrame(frame, sourceLength);
+    const safeFrame = clampFramePrecise(frame, sourceLength);
     const duration = this.getDuration();
     return clamp(safeFrame / this.getSourceSampleRate(), 0, duration);
   }
@@ -1427,6 +1427,12 @@ function clamp(value: number, min: number, max: number): number {
 function clampFrame(frame: number, sourceLength: number): number {
   const maxFrame = Math.max(0, Math.trunc(Number(sourceLength) || 0));
   const normalizedFrame = Math.round(Number(frame) || 0);
+  return clamp(normalizedFrame, 0, maxFrame);
+}
+
+function clampFramePrecise(frame: number, sourceLength: number): number {
+  const maxFrame = Math.max(0, Math.trunc(Number(sourceLength) || 0));
+  const normalizedFrame = Number(frame) || 0;
   return clamp(normalizedFrame, 0, maxFrame);
 }
 

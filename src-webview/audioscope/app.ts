@@ -1533,6 +1533,8 @@ function handleWaveformPresented(body) {
     return;
   }
 
+  const currentTime = getCurrentPlaybackTime();
+  const smoothFollowPlaybackActive = isSmoothFollowPlaybackActive(currentTime, isPlaybackActive());
   const pendingRequest = state.waveformPendingRequest?.generation === body.generation
     ? state.waveformPendingRequest
     : null;
@@ -1546,17 +1548,20 @@ function handleWaveformPresented(body) {
   const width = pendingRequest?.width ?? responseWidth ?? fallbackWidth;
   const height = pendingRequest?.height ?? responseHeight ?? fallbackHeight;
   state.waveformPendingRequest = null;
-  const desiredDisplayRange = cloneTimeRange(pendingRequest?.displayRange ?? getWaveformRange());
+  const desiredDisplayRange = cloneTimeRange(
+    getWaveformTargetRange(currentTime, smoothFollowPlaybackActive),
+  );
+  const desiredVisibleSpan = Math.max(0, desiredDisplayRange.end - desiredDisplayRange.start);
   const nextSnapshot: WaveformDisplaySnapshot = {
     axisTicks: createWaveformAxisSnapshot(
       { end: body.viewEnd, start: body.viewStart },
       width,
       getWaveformViewportWidth(),
-      pendingRequest?.visibleSpan ?? Math.max(0, body.viewEnd - body.viewStart),
+      desiredVisibleSpan,
     ).ticks,
     columnCount: Math.max(1, Math.round(Number(body.columnCount) || width * WAVEFORM_RENDER_SCALE || 1)),
     displayOffsetPx: 0,
-    displayRange: cloneTimeRange(pendingRequest?.displayRange ?? desiredDisplayRange),
+    displayRange: cloneTimeRange(desiredDisplayRange),
     displayWidth: getWaveformViewportWidth(),
     rawSamplePlotMode: Boolean(body.rawSamplePlotMode),
     renderHeight: height,
@@ -1566,7 +1571,7 @@ function handleWaveformPresented(body) {
     },
     renderWidth: width,
     samplePlotMode: Boolean(body.samplePlotMode),
-    visibleSpan: pendingRequest?.visibleSpan ?? Math.max(0, body.viewEnd - body.viewStart),
+    visibleSpan: desiredVisibleSpan,
   };
   const displayMetrics = getWaveformSnapshotDisplayMetrics(nextSnapshot, desiredDisplayRange);
   updateWaveformDisplaySnapshotWindow(desiredDisplayRange, nextSnapshot, displayMetrics);
@@ -1582,14 +1587,19 @@ function handleWaveformPresented(body) {
     {
       displaySpan: Math.max(0, desiredDisplayRange.end - desiredDisplayRange.start),
       height: height,
-      renderWidth: getWaveformRenderRequestMetrics(desiredDisplayRange).renderWidth,
+      renderWidth: getWaveformRenderRequestMetrics(desiredDisplayRange, smoothFollowPlaybackActive).renderWidth,
     },
   );
   const allowInitialPartialSnapshot = !state.waveformDisplaySnapshot;
 
   if (!coversDesiredDisplay && !allowInitialPartialSnapshot) {
     if (!hasWaveformRenderCoverage(desiredDisplayRange)) {
-      void syncWaveformView({ force: true });
+      void syncWaveformView({
+        currentTime,
+        displayRange: desiredDisplayRange,
+        force: true,
+        smoothFollowPlaybackActive,
+      });
     }
     return;
   }
@@ -3544,56 +3554,17 @@ function getWaveformFollowRenderPlan(displayRange, duration, displayWidth) {
 
   const expandedRange = expandWaveformRange(displayRange, duration, WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR);
   const renderWidth = getBufferedRenderWidth(displayWidth, visibleSpan, expandedRange);
-  const renderRange = getStableFollowWaveformRenderRange(displayRange, duration, renderWidth);
 
   return {
-    end: renderRange.end,
-    start: renderRange.start,
+    end: expandedRange.end,
+    start: expandedRange.start,
     width: renderWidth,
   };
 }
 
 function getStableFollowWaveformRenderRange(displayRange, duration, renderWidth) {
   const expandedRange = expandWaveformRange(displayRange, duration, WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR);
-  const renderSpan = Math.max(0, expandedRange.end - expandedRange.start);
-  const preferredCandidate = getCommittedWaveformRenderCandidate() ?? getPendingWaveformRenderCandidate();
-
-  if (
-    !preferredCandidate
-    || !(preferredCandidate.end > preferredCandidate.start)
-    || renderSpan <= 0
-    || duration <= 0
-    || renderWidth <= 0
-  ) {
-    return snapWaveformRenderRange(displayRange, expandedRange, duration, renderWidth);
-  }
-
-  const preferredSpan = preferredCandidate.end - preferredCandidate.start;
-  const spanTolerance = Math.max(SPECTROGRAM_RANGE_EPSILON_SECONDS, renderSpan * 0.001);
-
-  if (Math.abs(preferredSpan - renderSpan) > spanTolerance) {
-    return snapWaveformRenderRange(displayRange, expandedRange, duration, renderWidth);
-  }
-
-  const visibleSpan = Math.max(0, displayRange.end - displayRange.start);
-  const maxStart = Math.max(0, duration - renderSpan);
-  const availablePadding = Math.max(0, (renderSpan - visibleSpan) * 0.5);
-  const requestedPadding = Math.max(0, renderSpan * WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO);
-  const effectivePadding = Math.min(availablePadding, requestedPadding);
-  const lowerBound = clamp(displayRange.end - renderSpan + effectivePadding, 0, maxStart);
-  const upperBound = clamp(displayRange.start - effectivePadding, lowerBound, maxStart);
-  const columnCount = Math.max(1, Math.round(renderWidth * WAVEFORM_RENDER_SCALE));
-  const secondsPerColumn = renderSpan / columnCount;
-  const unclampedStart = clamp(preferredCandidate.start, lowerBound, upperBound);
-  const snappedStart = Number.isFinite(secondsPerColumn) && secondsPerColumn > 0
-    ? Math.round(unclampedStart / secondsPerColumn) * secondsPerColumn
-    : unclampedStart;
-  const nextStart = clamp(snappedStart, lowerBound, upperBound);
-
-  return {
-    start: nextStart,
-    end: nextStart + renderSpan,
-  };
+  return snapWaveformRenderRange(displayRange, expandedRange, duration, renderWidth);
 }
 
 function getWaveformSamplesPerPixel(
@@ -3616,6 +3587,7 @@ function estimateWaveformPlotMode(
   renderWidth = getWaveformViewportWidth(),
 ) {
   const samplesPerPixel = getWaveformSamplesPerPixel(displayRange, renderWidth);
+  const smoothFollowPlaybackActive = isSmoothFollowPlaybackActive();
   const stickyRaw = Boolean(
     state.waveformRawSamplePlotMode
     || state.waveformPendingRequest?.rawSamplePlotMode,
@@ -3628,6 +3600,16 @@ function estimateWaveformPlotMode(
 
   if (!Number.isFinite(samplesPerPixel)) {
     return 'envelope';
+  }
+
+  if (smoothFollowPlaybackActive) {
+    if (stickyRaw || samplesPerPixel <= WAVEFORM_RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL) {
+      return 'raw';
+    }
+
+    if (stickySample || samplesPerPixel <= WAVEFORM_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL) {
+      return 'sample';
+    }
   }
 
   if (stickyRaw) {
@@ -3692,21 +3674,26 @@ function getWaveformRenderRequestMetrics(
   let renderWidth = displayWidth;
 
   if (duration > 0 && visibleSpan > 0 && smoothFollowPlaybackActive) {
-    const plannedRender = getWaveformFollowRenderPlan(displayRange, duration, displayWidth);
-
-    if (plannedRender) {
-      renderRange = {
-        end: plannedRender.end,
-        start: plannedRender.start,
-      };
-      renderWidth = plannedRender.width;
+    if (estimatedPlotMode === 'raw' || estimatedPlotMode === 'sample') {
+      renderRange = cloneTimeRange(displayRange);
+      renderWidth = displayWidth;
     } else {
-      const expandedRange = expandWaveformRange(displayRange, duration, WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR);
-      renderWidth = Math.max(
-        displayWidth,
-        Math.ceil(displayWidth * ((expandedRange.end - expandedRange.start) / visibleSpan)),
-      );
-      renderRange = getStableFollowWaveformRenderRange(displayRange, duration, renderWidth);
+      const plannedRender = getWaveformFollowRenderPlan(displayRange, duration, displayWidth);
+
+      if (plannedRender) {
+        renderRange = {
+          end: plannedRender.end,
+          start: plannedRender.start,
+        };
+        renderWidth = plannedRender.width;
+      } else {
+        const expandedRange = expandWaveformRange(displayRange, duration, WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR);
+        renderWidth = Math.max(
+          displayWidth,
+          Math.ceil(displayWidth * ((expandedRange.end - expandedRange.start) / visibleSpan)),
+        );
+        renderRange = getStableFollowWaveformRenderRange(displayRange, duration, renderWidth);
+      }
     }
   } else if (duration > 0 && visibleSpan > 0 && estimatedPlotMode === 'raw') {
     const expandedRange = expandWaveformRange(
