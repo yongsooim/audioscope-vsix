@@ -2,6 +2,8 @@ export type WaveformPlotMode = 'envelope' | 'raw' | 'sample';
 export type SpectrogramAnalysisType = 'mel' | 'scalogram' | 'spectrogram';
 export type SpectrogramFrequencyScale = 'linear' | 'log' | 'mixed';
 export type SurfaceKind = 'spectrogram' | 'waveform';
+export type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
+export type AnalysisSurfaceResetReason = 'device-lost' | 'surface-invalid';
 
 export interface PlaybackClockState {
   currentFrameFloat: number;

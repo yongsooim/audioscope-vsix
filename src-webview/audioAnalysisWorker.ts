@@ -64,6 +64,8 @@ type AnalysisType = 'mel' | 'scalogram' | 'spectrogram';
 type FrequencyScale = 'linear' | 'log' | 'mixed';
 type LayerKind = 'overview' | 'visible';
 type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
+type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
+type SurfaceResetReason = 'device-lost' | 'surface-invalid';
 
 const WEBGPU_BACKGROUND_SHADER = /* wgsl */`
 struct VertexOutput {
@@ -118,39 +120,35 @@ fn backgroundFs(input: VertexOutput) -> @location(0) vec4<f32> {
 `;
 
 const WEBGPU_TILE_SHADER = /* wgsl */`
-struct TileUniforms {
-  destLeft: f32,
-  destRight: f32,
-  uvStart: f32,
-  uvEnd: f32,
-};
-
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
   @location(0) uv: vec2<f32>,
 };
 
-@group(0) @binding(0) var<uniform> tileUniforms: TileUniforms;
-@group(0) @binding(1) var tileSampler: sampler;
-@group(0) @binding(2) var tileTexture: texture_2d<f32>;
+@group(0) @binding(0) var tileSampler: sampler;
+@group(0) @binding(1) var tileTexture: texture_2d<f32>;
 
 @vertex
-fn tileVs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn tileVs(
+  @builtin(vertex_index) vertexIndex: u32,
+  @location(0) destBounds: vec2<f32>,
+  @location(1) uvBounds: vec2<f32>,
+) -> VertexOutput {
   var positions = array<vec2<f32>, 6>(
-    vec2<f32>(tileUniforms.destLeft, 1.0),
-    vec2<f32>(tileUniforms.destRight, 1.0),
-    vec2<f32>(tileUniforms.destLeft, -1.0),
-    vec2<f32>(tileUniforms.destLeft, -1.0),
-    vec2<f32>(tileUniforms.destRight, 1.0),
-    vec2<f32>(tileUniforms.destRight, -1.0),
+    vec2<f32>(destBounds.x, 1.0),
+    vec2<f32>(destBounds.y, 1.0),
+    vec2<f32>(destBounds.x, -1.0),
+    vec2<f32>(destBounds.x, -1.0),
+    vec2<f32>(destBounds.y, 1.0),
+    vec2<f32>(destBounds.y, -1.0),
   );
   var uvs = array<vec2<f32>, 6>(
-    vec2<f32>(tileUniforms.uvStart, 0.0),
-    vec2<f32>(tileUniforms.uvEnd, 0.0),
-    vec2<f32>(tileUniforms.uvStart, 1.0),
-    vec2<f32>(tileUniforms.uvStart, 1.0),
-    vec2<f32>(tileUniforms.uvEnd, 0.0),
-    vec2<f32>(tileUniforms.uvEnd, 1.0),
+    vec2<f32>(uvBounds.x, 0.0),
+    vec2<f32>(uvBounds.y, 0.0),
+    vec2<f32>(uvBounds.x, 1.0),
+    vec2<f32>(uvBounds.x, 1.0),
+    vec2<f32>(uvBounds.y, 0.0),
+    vec2<f32>(uvBounds.y, 1.0),
   );
 
   var output: VertexOutput;
@@ -162,6 +160,49 @@ fn tileVs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 @fragment
 fn tileFs(input: VertexOutput) -> @location(0) vec4<f32> {
   return textureSample(tileTexture, tileSampler, input.uv);
+}
+`;
+
+const WEBGPU_PALETTE_SHADER_HELPERS = /* wgsl */`
+const LOG10_E: f32 = 0.4342944819032518;
+const MIN_DB: f32 = -80.0;
+const MAX_DB: f32 = 0.0;
+
+fn normalizePower(power: f32) -> f32 {
+  let decibels = 10.0 * (log(max(power + 1e-14, 1e-20)) * LOG10_E);
+  return clamp((decibels - MIN_DB) / (MAX_DB - MIN_DB), 0.0, 1.0);
+}
+
+fn paletteColor(normalized: f32) -> vec4<f32> {
+  let t = clamp(normalized, 0.0, 1.0);
+  var localT = 0.0;
+  var startColor = vec3<f32>(0.0, 0.0, 0.0);
+  var endColor = vec3<f32>(0.0, 0.0, 0.0);
+
+  if (t < 0.14) {
+    localT = t / 0.14;
+    startColor = vec3<f32>(4.0, 4.0, 12.0);
+    endColor = vec3<f32>(34.0, 17.0, 70.0);
+  } else if (t < 0.34) {
+    localT = (t - 0.14) / 0.2;
+    startColor = vec3<f32>(34.0, 17.0, 70.0);
+    endColor = vec3<f32>(91.0, 31.0, 126.0);
+  } else if (t < 0.58) {
+    localT = (t - 0.34) / 0.24;
+    startColor = vec3<f32>(91.0, 31.0, 126.0);
+    endColor = vec3<f32>(179.0, 68.0, 112.0);
+  } else if (t < 0.82) {
+    localT = (t - 0.58) / 0.24;
+    startColor = vec3<f32>(179.0, 68.0, 112.0);
+    endColor = vec3<f32>(248.0, 143.0, 84.0);
+  } else {
+    localT = (t - 0.82) / 0.18;
+    startColor = vec3<f32>(248.0, 143.0, 84.0);
+    endColor = vec3<f32>(252.0, 236.0, 176.0);
+  }
+
+  let rgb = (startColor + ((endColor - startColor) * localT)) / 255.0;
+  return vec4<f32>(rgb, 1.0);
 }
 `;
 
@@ -179,29 +220,11 @@ struct ComputeParams {
 @group(0) @binding(1) var<storage, read> pcmSamples: array<f32>;
 @group(0) @binding(2) var<storage, read_write> outputSpectrum: array<vec2<f32>>;
 
-fn bitReverse(value: u32, bitCount: u32) -> u32 {
-  var input = value;
-  var result = 0u;
-  var bit = 0u;
-
-  loop {
-    if (bit >= bitCount) {
-      break;
-    }
-    result = (result << 1u) | (input & 1u);
-    input = input >> 1u;
-    bit += 1u;
-  }
-
-  return result;
-}
-
 @compute @workgroup_size(64)
 fn prepareSpectrogramInput(@builtin(global_invocation_id) globalId: vec3<u32>) {
   let fftSize = params.header0.x;
   let columnCount = params.header0.y;
   let sampleCount = params.header0.w;
-  let fftStages = params.header1.y;
   let decimationFactor = max(params.header1.z, 1u);
   let totalSamples = fftSize * columnCount;
   let linearIndex = globalId.x;
@@ -252,8 +275,7 @@ fn prepareSpectrogramInput(@builtin(global_invocation_id) globalId: vec3<u32>) {
   let denominator = max(f32(max(fftSize, 2u) - 1u), 1.0);
   let phase = TWO_PI * f32(sampleOffset) / denominator;
   let window = 0.54 - (0.46 * cos(phase));
-  let reversedIndex = bitReverse(sampleOffset, fftStages);
-  outputSpectrum[(columnIndex * fftSize) + reversedIndex] = vec2<f32>(sample * window, 0.0);
+  outputSpectrum[(columnIndex * fftSize) + sampleOffset] = vec2<f32>(sample * window, 0.0);
 }
 `;
 
@@ -282,31 +304,34 @@ fn complexMul(left: vec2<f32>, right: vec2<f32>) -> vec2<f32> {
 fn runSpectrogramFftStage(@builtin(global_invocation_id) globalId: vec3<u32>) {
   let fftSize = params.header0.x;
   let columnCount = params.header0.y;
-  let stageSize = max(params.header1.x, 2u);
-  let halfSize = stageSize / 2u;
+  let stageIndex = params.header1.x;
+  let q = 1u << stageIndex;
+  let l = fftSize >> (stageIndex + 1u);
   let butterfliesPerColumn = fftSize / 2u;
   let totalButterflies = butterfliesPerColumn * columnCount;
   let butterflyIndex = globalId.x;
 
-  if (butterflyIndex >= totalButterflies || halfSize == 0u) {
+  if (butterflyIndex >= totalButterflies || l == 0u) {
     return;
   }
 
   let columnIndex = butterflyIndex / butterfliesPerColumn;
   let localIndex = butterflyIndex % butterfliesPerColumn;
-  let groupIndex = localIndex / halfSize;
-  let pairOffset = localIndex % halfSize;
-  let baseIndex = (columnIndex * fftSize) + (groupIndex * stageSize);
-  let evenIndex = baseIndex + pairOffset;
-  let oddIndex = evenIndex + halfSize;
-  let angle = (-TWO_PI * f32(pairOffset)) / f32(stageSize);
+  let j = localIndex / l;
+  let k = localIndex % l;
+  let columnBase = columnIndex * fftSize;
+  let evenIndex = columnBase + ((2u * j * l) + k);
+  let oddIndex = evenIndex + l;
+  let outputEvenIndex = columnBase + ((j * l) + k);
+  let outputOddIndex = columnBase + (((j + q) * l) + k);
+  let angle = (-TWO_PI * f32(j)) / f32(2u * q);
   let twiddle = vec2<f32>(cos(angle), sin(angle));
   let evenValue = sourceSpectrum[evenIndex];
   let oddValue = sourceSpectrum[oddIndex];
   let twiddledOdd = complexMul(oddValue, twiddle);
 
-  targetSpectrum[evenIndex] = evenValue + twiddledOdd;
-  targetSpectrum[oddIndex] = evenValue - twiddledOdd;
+  targetSpectrum[outputEvenIndex] = evenValue + twiddledOdd;
+  targetSpectrum[outputOddIndex] = evenValue - twiddledOdd;
 }
 `;
 
@@ -431,6 +456,159 @@ fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) 
 }
 `;
 
+const WEBGPU_MEL_RENDER_SHADER = /* wgsl */`
+${WEBGPU_PALETTE_SHADER_HELPERS}
+
+struct ComputeParams {
+  header0: vec4<u32>,
+  header1: vec4<u32>,
+  timing: vec4<f32>,
+  padding: vec4<f32>,
+};
+
+struct MelRow {
+  weightOffset: u32,
+  weightCount: u32,
+  pad0: u32,
+  pad1: u32,
+};
+
+@group(0) @binding(0) var<uniform> params: ComputeParams;
+@group(0) @binding(1) var<storage, read> baseSpectrum: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> melRows: array<MelRow>;
+@group(0) @binding(3) var<storage, read> melBins: array<u32>;
+@group(0) @binding(4) var<storage, read> melWeights: array<f32>;
+@group(0) @binding(5) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
+  let columnIndex = globalId.x;
+  let rowIndex = globalId.y;
+  let fftSize = params.header0.x;
+  let columnCount = params.header0.y;
+  let rowCount = params.header0.z;
+
+  if (columnIndex >= columnCount || rowIndex >= rowCount) {
+    return;
+  }
+
+  let row = melRows[rowIndex];
+  let spectrumBaseIndex = columnIndex * fftSize;
+  var weightedEnergy = 0.0;
+  var totalWeight = 0.0;
+  var weightIndex = row.weightOffset;
+  let weightEnd = row.weightOffset + row.weightCount;
+
+  loop {
+    if (weightIndex >= weightEnd) {
+      break;
+    }
+
+    let binIndex = melBins[weightIndex];
+    let weight = melWeights[weightIndex];
+    let spectrum = baseSpectrum[spectrumBaseIndex + binIndex];
+    let power = dot(spectrum, spectrum) * params.timing.w;
+    weightedEnergy += power * weight;
+    totalWeight += weight;
+    weightIndex += 1u;
+  }
+
+  let meanPower = weightedEnergy / max(totalWeight, 1e-8);
+  let targetRow = i32((rowCount - 1u) - rowIndex);
+  textureStore(
+    outputTexture,
+    vec2<i32>(i32(columnIndex), targetRow),
+    paletteColor(normalizePower(meanPower)),
+  );
+}
+`;
+
+const WEBGPU_SCALOGRAM_RENDER_SHADER = /* wgsl */`
+${WEBGPU_PALETTE_SHADER_HELPERS}
+
+struct ComputeParams {
+  header0: vec4<u32>,
+  timing: vec4<f32>,
+  padding0: vec4<u32>,
+  padding1: vec4<f32>,
+};
+
+struct ScalogramRow {
+  tapOffset: u32,
+  tapCount: u32,
+  firstOffset: i32,
+  lastOffset: i32,
+  normalization: f32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+};
+
+@group(0) @binding(0) var<uniform> params: ComputeParams;
+@group(0) @binding(1) var<storage, read> pcmSamples: array<f32>;
+@group(0) @binding(2) var<storage, read> rowMeta: array<ScalogramRow>;
+@group(0) @binding(3) var<storage, read> tapOffsets: array<i32>;
+@group(0) @binding(4) var<storage, read> realWeights: array<f32>;
+@group(0) @binding(5) var<storage, read> imagWeights: array<f32>;
+@group(0) @binding(6) var<storage, read> normWeights: array<f32>;
+@group(0) @binding(7) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn renderScalogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
+  let columnIndex = globalId.x;
+  let rowIndex = globalId.y;
+  let columnCount = params.header0.x;
+  let rowCount = params.header0.y;
+  let sampleCount = params.header0.z;
+
+  if (columnIndex >= columnCount || rowIndex >= rowCount) {
+    return;
+  }
+
+  var centerRatio = 0.5;
+  if (columnCount > 1u) {
+    centerRatio = (f32(columnIndex) + 0.5) / f32(columnCount);
+  }
+
+  let centerTime = params.timing.x + (centerRatio * params.timing.y);
+  let centerSample = i32(round(centerTime * params.timing.z));
+  let row = rowMeta[rowIndex];
+  let firstSample = centerSample + row.firstOffset;
+  let lastSample = centerSample + row.lastOffset;
+  let useFullNormalization = firstSample >= 0 && u32(lastSample) < sampleCount;
+  var real = 0.0;
+  var imaginary = 0.0;
+  var norm = select(0.0, row.normalization, useFullNormalization);
+  var tapIndex = 0u;
+
+  loop {
+    if (tapIndex >= row.tapCount) {
+      break;
+    }
+
+    let packedIndex = row.tapOffset + tapIndex;
+    let sampleIndex = centerSample + tapOffsets[packedIndex];
+    if (sampleIndex >= 0 && u32(sampleIndex) < sampleCount) {
+      let sample = pcmSamples[u32(sampleIndex)];
+      real += sample * realWeights[packedIndex];
+      imaginary += sample * imagWeights[packedIndex];
+      if (!useFullNormalization) {
+        norm += normWeights[packedIndex];
+      }
+    }
+    tapIndex += 1u;
+  }
+
+  let power = select(0.0, ((real * real) + (imaginary * imaginary)) / max(norm, 1e-8), norm > 1e-8);
+  let targetRow = i32((rowCount - 1u) - rowIndex);
+  textureStore(
+    outputTexture,
+    vec2<i32>(i32(columnIndex), targetRow),
+    paletteColor(normalizePower(power)),
+  );
+}
+`;
+
 interface CanvasInitOptions {
   offscreenCanvas?: OffscreenCanvas;
   pixelHeight?: number;
@@ -470,12 +648,13 @@ interface LayerState {
   kind: LayerKind;
   plan: RenderRequestPlan | null;
   ready: boolean;
+  retainedPlan: RenderRequestPlan | null;
   requestPending: boolean;
 }
 
 interface TileRecord {
   byteLength: number;
-  canvas: OffscreenCanvas;
+  canvas: OffscreenCanvas | null;
   columnCount: number;
   complete: boolean;
   context: OffscreenCanvasRenderingContext2D | null;
@@ -484,8 +663,7 @@ interface TileRecord {
   gpuTexture: any;
   gpuTextureUsage: number;
   gpuTextureView: any;
-  gpuUniformBuffer: any;
-  imageData: ImageData;
+  imageData: ImageData | null;
   renderedColumns: number;
   rowCount: number;
   tileEnd: number;
@@ -566,12 +744,55 @@ interface SpectrogramBandLayoutResource {
   key: string;
 }
 
-interface WebGpuSpectrogramComputeState {
-  bandLayoutResources: Map<string, SpectrogramBandLayoutResource>;
+interface MelBandLayoutResource {
+  binBuffer: any;
+  key: string;
+  rowBuffer: any;
+  weightBuffer: any;
+}
+
+type WebGpuStftLayoutResource = MelBandLayoutResource | SpectrogramBandLayoutResource;
+
+interface ScalogramKernelResource {
+  imagWeightBuffer: any;
+  key: string;
+  normWeightBuffer: any;
+  offsetBuffer: any;
+  realWeightBuffer: any;
+  rowBuffer: any;
+}
+
+interface WebGpuStftComputeState {
+  bandLayoutResources: Map<string, WebGpuStftLayoutResource>;
+  baseInputBindGroup: any;
+  basePingBuffer: any;
+  basePongBuffer: any;
+  fftBindGroupForward: any;
+  fftBindGroupReverse: any;
   fftBindGroupLayout: any;
   fftPipeline: any;
   inputBindGroupLayout: any;
   inputPipeline: any;
+  lowInputBindGroup: any;
+  lowPingBuffer: any;
+  lowPongBuffer: any;
+  lowStageBindGroupForward: any;
+  lowStageBindGroupReverse: any;
+  paramBuffer: any;
+  paramStride: number;
+  pcmBuffer: any;
+  pcmSampleCount: number;
+  renderMelBindGroupLayout: any;
+  renderMelPipeline: any;
+  renderSpectrogramBindGroupLayout: any;
+  renderSpectrogramPipeline: any;
+  scratchFftSize: number;
+}
+
+interface WebGpuScalogramComputeState {
+  kernelResources: Map<string, ScalogramKernelResource>;
+  paramBuffer: any;
+  paramStride: number;
   pcmBuffer: any;
   pcmSampleCount: number;
   renderBindGroupLayout: any;
@@ -579,15 +800,19 @@ interface WebGpuSpectrogramComputeState {
 }
 
 interface WebGpuCompositorState {
+  analysisFallbackReasons: Partial<Record<AnalysisType, string>>;
   bindGroupLayout: any;
   canvasContext: any;
   canvasFormat: string;
-  compositorCanvas: OffscreenCanvas;
+  compositorCanvas: OffscreenCanvas | null;
   device: any;
   backgroundPipeline: any;
+  presentInstanceBuffer: any;
+  presentInstanceCapacity: number;
   sampler: any;
-  spectrogramCompute: WebGpuSpectrogramComputeState | null;
-  spectrogramComputeDisabled: boolean;
+  scalogramCompute: WebGpuScalogramComputeState | null;
+  stftCompute: WebGpuStftComputeState | null;
+  surfaceResetPending: boolean;
   tilePipeline: any;
 }
 
@@ -602,6 +827,7 @@ const surfaceState = {
   backend: 'uninitialized' as SurfaceBackend,
   canvas: null as OffscreenCanvas | null,
   context: null as OffscreenCanvasRenderingContext2D | null,
+  fallbackReason: null as string | null,
   pixelWidth: 0,
   pixelHeight: 0,
   webGpu: null as WebGpuCompositorState | null,
@@ -674,6 +900,7 @@ self.onmessage = (event) => {
       destroyWebGpuCompositor();
       surfaceState.canvas = null;
       surfaceState.context = null;
+      surfaceState.fallbackReason = null;
       surfaceState.backend = 'uninitialized';
       analysisState = createEmptyAnalysisState();
       return;
@@ -687,6 +914,7 @@ function createEmptyLayerState(kind: LayerKind): LayerState {
     kind,
     generation: kind === 'overview' ? 0 : -1,
     ready: false,
+    retainedPlan: null,
     requestPending: false,
     plan: null,
   };
@@ -733,7 +961,12 @@ function clearTileCache(): void {
 function getPinnedTileKeys(): Set<string> {
   const pinnedKeys = new Set<string>();
 
-  for (const plan of [analysisState.overview.plan, analysisState.visible.plan]) {
+  for (const plan of [
+    analysisState.overview.retainedPlan,
+    analysisState.overview.plan,
+    analysisState.visible.retainedPlan,
+    analysisState.visible.plan,
+  ]) {
     if (!plan) {
       continue;
     }
@@ -870,62 +1103,185 @@ function getWebGpuGlobals() {
   };
 }
 
-function destroySpectrogramBandLayoutResources(computeState: WebGpuSpectrogramComputeState | null): void {
+function destroySpectrogramBandLayoutResources(computeState: WebGpuStftComputeState | null): void {
   if (!computeState) {
     return;
   }
 
   for (const resource of computeState.bandLayoutResources.values()) {
-    if (resource.buffer && typeof resource.buffer.destroy === 'function') {
+    if ('buffer' in resource && resource.buffer && typeof resource.buffer.destroy === 'function') {
       resource.buffer.destroy();
+    }
+    if ('rowBuffer' in resource && resource.rowBuffer && typeof resource.rowBuffer.destroy === 'function') {
+      resource.rowBuffer.destroy();
+    }
+    if ('binBuffer' in resource && resource.binBuffer && typeof resource.binBuffer.destroy === 'function') {
+      resource.binBuffer.destroy();
+    }
+    if ('weightBuffer' in resource && resource.weightBuffer && typeof resource.weightBuffer.destroy === 'function') {
+      resource.weightBuffer.destroy();
     }
   }
 
   computeState.bandLayoutResources.clear();
 }
 
-function destroyWebGpuSpectrogramComputeState(computeState: WebGpuSpectrogramComputeState | null): void {
+function destroyScalogramKernelResources(computeState: WebGpuScalogramComputeState | null): void {
+  if (!computeState) {
+    return;
+  }
+
+  for (const resource of computeState.kernelResources.values()) {
+    if (resource.rowBuffer && typeof resource.rowBuffer.destroy === 'function') {
+      resource.rowBuffer.destroy();
+    }
+    if (resource.offsetBuffer && typeof resource.offsetBuffer.destroy === 'function') {
+      resource.offsetBuffer.destroy();
+    }
+    if (resource.realWeightBuffer && typeof resource.realWeightBuffer.destroy === 'function') {
+      resource.realWeightBuffer.destroy();
+    }
+    if (resource.imagWeightBuffer && typeof resource.imagWeightBuffer.destroy === 'function') {
+      resource.imagWeightBuffer.destroy();
+    }
+    if (resource.normWeightBuffer && typeof resource.normWeightBuffer.destroy === 'function') {
+      resource.normWeightBuffer.destroy();
+    }
+  }
+
+  computeState.kernelResources.clear();
+}
+
+function destroyWebGpuStftComputeState(computeState: WebGpuStftComputeState | null): void {
   if (!computeState) {
     return;
   }
 
   destroySpectrogramBandLayoutResources(computeState);
-  if (computeState.pcmBuffer && typeof computeState.pcmBuffer.destroy === 'function') {
-    computeState.pcmBuffer.destroy();
+
+  for (const buffer of [
+    computeState.basePingBuffer,
+    computeState.basePongBuffer,
+    computeState.lowPingBuffer,
+    computeState.lowPongBuffer,
+    computeState.paramBuffer,
+    computeState.pcmBuffer,
+  ]) {
+    if (buffer && typeof buffer.destroy === 'function') {
+      buffer.destroy();
+    }
   }
+
+  computeState.basePingBuffer = null;
+  computeState.basePongBuffer = null;
+  computeState.lowPingBuffer = null;
+  computeState.lowPongBuffer = null;
+  computeState.paramBuffer = null;
+  computeState.pcmBuffer = null;
+  computeState.pcmSampleCount = 0;
+  computeState.scratchFftSize = 0;
+}
+
+function destroyWebGpuScalogramComputeState(computeState: WebGpuScalogramComputeState | null): void {
+  if (!computeState) {
+    return;
+  }
+
+  destroyScalogramKernelResources(computeState);
+  for (const buffer of [computeState.paramBuffer, computeState.pcmBuffer]) {
+    if (buffer && typeof buffer.destroy === 'function') {
+      buffer.destroy();
+    }
+  }
+  computeState.paramBuffer = null;
   computeState.pcmBuffer = null;
   computeState.pcmSampleCount = 0;
 }
 
 function resetWebGpuComputeSessionResources(): void {
-  const computeState = surfaceState.webGpu?.spectrogramCompute ?? null;
+  const webGpu = surfaceState.webGpu;
 
-  if (!computeState) {
+  if (!webGpu) {
     return;
   }
 
-  destroySpectrogramBandLayoutResources(computeState);
-  if (computeState.pcmBuffer && typeof computeState.pcmBuffer.destroy === 'function') {
-    computeState.pcmBuffer.destroy();
+  destroySpectrogramBandLayoutResources(webGpu.stftCompute);
+  if (webGpu.stftCompute?.pcmBuffer && typeof webGpu.stftCompute.pcmBuffer.destroy === 'function') {
+    webGpu.stftCompute.pcmBuffer.destroy();
+    webGpu.stftCompute.pcmBuffer = null;
+    webGpu.stftCompute.pcmSampleCount = 0;
   }
-  computeState.pcmBuffer = null;
-  computeState.pcmSampleCount = 0;
+
+  destroyScalogramKernelResources(webGpu.scalogramCompute);
+  if (webGpu.scalogramCompute?.pcmBuffer && typeof webGpu.scalogramCompute.pcmBuffer.destroy === 'function') {
+    webGpu.scalogramCompute.pcmBuffer.destroy();
+    webGpu.scalogramCompute.pcmBuffer = null;
+    webGpu.scalogramCompute.pcmSampleCount = 0;
+  }
+
+  webGpu.analysisFallbackReasons = {};
 }
 
 function destroyTileGpuResources(tileRecord: TileRecord): void {
   if (tileRecord.gpuTexture && typeof tileRecord.gpuTexture.destroy === 'function') {
     tileRecord.gpuTexture.destroy();
   }
-  if (tileRecord.gpuUniformBuffer && typeof tileRecord.gpuUniformBuffer.destroy === 'function') {
-    tileRecord.gpuUniformBuffer.destroy();
-  }
 
   tileRecord.gpuTexture = null;
   tileRecord.gpuTextureUsage = 0;
   tileRecord.gpuTextureView = null;
   tileRecord.gpuBindGroup = null;
-  tileRecord.gpuUniformBuffer = null;
   tileRecord.gpuDirty = true;
+}
+
+function getCurrentRenderBackend(): AnalysisRenderBackend {
+  return surfaceState.backend === 'webgpu' ? 'webgpu-native' : '2d-wasm';
+}
+
+function postAnalysisInitialized(): void {
+  if (!analysisState.initialized) {
+    return;
+  }
+
+  self.postMessage({
+    type: 'analysisInitialized',
+    body: {
+      duration: analysisState.duration,
+      fallbackReason: surfaceState.fallbackReason,
+      maxFrequency: analysisState.maxFrequency,
+      minFrequency: analysisState.minFrequency,
+      quality: analysisState.quality,
+      renderBackend: getCurrentRenderBackend(),
+      runtimeVariant: analysisState.runtimeVariant,
+      sampleCount: analysisState.sampleCount,
+      sampleRate: analysisState.sampleRate,
+    },
+  });
+}
+
+function requestAnalysisSurfaceReset(reason: SurfaceResetReason): void {
+  const webGpu = surfaceState.webGpu;
+  if (webGpu?.surfaceResetPending) {
+    return;
+  }
+
+  if (webGpu) {
+    webGpu.surfaceResetPending = true;
+  }
+
+  clearTileCache();
+  destroyWebGpuCompositor();
+  surfaceState.canvas = null;
+  surfaceState.context = null;
+  surfaceState.backend = 'uninitialized';
+  surfaceState.fallbackReason = reason === 'device-lost'
+    ? 'WebGPU device lost.'
+    : 'WebGPU surface became invalid.';
+
+  self.postMessage({
+    type: 'analysisSurfaceResetRequested',
+    body: { reason },
+  });
 }
 
 function destroyWebGpuCompositor(): void {
@@ -933,7 +1289,11 @@ function destroyWebGpuCompositor(): void {
     destroyTileGpuResources(tileRecord);
   }
 
-  destroyWebGpuSpectrogramComputeState(surfaceState.webGpu?.spectrogramCompute ?? null);
+  destroyWebGpuStftComputeState(surfaceState.webGpu?.stftCompute ?? null);
+  destroyWebGpuScalogramComputeState(surfaceState.webGpu?.scalogramCompute ?? null);
+  if (surfaceState.webGpu?.presentInstanceBuffer && typeof surfaceState.webGpu.presentInstanceBuffer.destroy === 'function') {
+    surfaceState.webGpu.presentInstanceBuffer.destroy();
+  }
   surfaceState.webGpu = null;
   surfaceState.webGpuInitPromise = null;
   if (surfaceState.backend === 'webgpu' || surfaceState.backend === 'initializing') {
@@ -941,7 +1301,7 @@ function destroyWebGpuCompositor(): void {
   }
 }
 
-function initialize2dSurface(): void {
+function initialize2dSurface(fallbackReason: string | null = null): void {
   if (!surfaceState.canvas) {
     surfaceState.context = null;
     surfaceState.backend = 'uninitialized';
@@ -951,8 +1311,10 @@ function initialize2dSurface(): void {
   surfaceState.canvas.width = Math.max(1, surfaceState.pixelWidth);
   surfaceState.canvas.height = Math.max(1, surfaceState.pixelHeight);
   surfaceState.context = surfaceState.canvas.getContext('2d', { alpha: false });
-  if (surfaceState.backend !== 'webgpu') {
-    surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+  surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+  surfaceState.fallbackReason = surfaceState.context ? fallbackReason : '2D surface unavailable.';
+  if (analysisState.initialized) {
+    postAnalysisInitialized();
   }
 }
 
@@ -1017,23 +1379,24 @@ async function initializeWebGpuCompositor(): Promise<void> {
 
   const globals = getWebGpuGlobals();
   if (!globals) {
-    initialize2dSurface();
+    initialize2dSurface('WebGPU globals unavailable.');
     return;
   }
 
   surfaceState.backend = 'initializing';
   surfaceState.webGpuInitPromise = (async () => {
+    let acquiredSurfaceContext = false;
     try {
       const adapter = await globals.gpu.requestAdapter?.({ powerPreference: 'high-performance' });
       if (!adapter) {
-        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+        initialize2dSurface('WebGPU adapter unavailable.');
         return;
       }
 
       const device = await adapter.requestDevice();
       const canvasFormat = globals.gpu.getPreferredCanvasFormat?.() || 'bgra8unorm';
       if (!(await validateWebGpuPresentation(device, canvasFormat))) {
-        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+        initialize2dSurface('Direct WebGPU presentation validation failed.');
         return;
       }
 
@@ -1043,16 +1406,11 @@ async function initializeWebGpuCompositor(): Promise<void> {
         entries: [
           {
             binding: 0,
-            buffer: { type: 'uniform' },
-            visibility: globals.shaderStage.VERTEX,
-          },
-          {
-            binding: 1,
             sampler: { type: 'filtering' },
             visibility: globals.shaderStage.FRAGMENT,
           },
           {
-            binding: 2,
+            binding: 1,
             texture: { sampleType: 'float' },
             visibility: globals.shaderStage.FRAGMENT,
           },
@@ -1086,21 +1444,38 @@ async function initializeWebGpuCompositor(): Promise<void> {
         }),
         primitive: { topology: 'triangle-list' },
         vertex: {
+          buffers: [
+            {
+              arrayStride: Float32Array.BYTES_PER_ELEMENT * 4,
+              attributes: [
+                {
+                  format: 'float32x2',
+                  offset: 0,
+                  shaderLocation: 0,
+                },
+                {
+                  format: 'float32x2',
+                  offset: Float32Array.BYTES_PER_ELEMENT * 2,
+                  shaderLocation: 1,
+                },
+              ],
+              stepMode: 'instance',
+            },
+          ],
           entryPoint: 'tileVs',
           module: tileModule,
         },
       });
 
-      const compositorCanvas = new OffscreenCanvas(
-        Math.max(1, surfaceState.pixelWidth),
-        Math.max(1, surfaceState.pixelHeight),
-      );
-      const canvasContext = (compositorCanvas.getContext('webgpu') as any) ?? null;
+      const canvasContext = (surfaceState.canvas.getContext('webgpu') as any) ?? null;
       if (!canvasContext) {
-        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+        initialize2dSurface('Spectrogram surface rejected WebGPU context initialization.');
         return;
       }
+      acquiredSurfaceContext = true;
 
+      surfaceState.canvas.width = Math.max(1, surfaceState.pixelWidth);
+      surfaceState.canvas.height = Math.max(1, surfaceState.pixelHeight);
       canvasContext.configure({
         alphaMode: 'opaque',
         device,
@@ -1108,32 +1483,43 @@ async function initializeWebGpuCompositor(): Promise<void> {
       });
 
       surfaceState.webGpu = {
+        analysisFallbackReasons: {},
         backgroundPipeline,
         bindGroupLayout,
         canvasContext,
         canvasFormat,
-        compositorCanvas,
+        compositorCanvas: null,
         device,
+        presentInstanceBuffer: null,
+        presentInstanceCapacity: 0,
         sampler,
-        spectrogramCompute: null,
-        spectrogramComputeDisabled: false,
+        scalogramCompute: null,
+        stftCompute: null,
+        surfaceResetPending: false,
         tilePipeline,
       };
       surfaceState.backend = 'webgpu';
+      surfaceState.context = null;
+      surfaceState.fallbackReason = null;
       void device.lost.then(() => {
         if (surfaceState.webGpu?.device !== device) {
           return;
         }
 
-        destroyWebGpuCompositor();
-        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
-        paintSpectrogramDisplay();
+        requestAnalysisSurfaceReset('device-lost');
       });
+      if (analysisState.initialized) {
+        postAnalysisInitialized();
+      }
       paintSpectrogramDisplay();
-    } catch {
+    } catch (error) {
       destroyWebGpuCompositor();
-      surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
-      paintSpectrogramDisplay();
+      if (acquiredSurfaceContext) {
+        requestAnalysisSurfaceReset('surface-invalid');
+      } else {
+        initialize2dSurface(error instanceof Error ? error.message : 'WebGPU initialization failed.');
+        paintSpectrogramDisplay();
+      }
     } finally {
       surfaceState.webGpuInitPromise = null;
     }
@@ -1164,231 +1550,13 @@ function createGpuBufferWithData(device: any, usage: number, data: ArrayBufferVi
   buffer.unmap();
   return buffer;
 }
-
-function createSpectrogramComputeParamsBuffer(
-  device: any,
-  globals: NonNullable<ReturnType<typeof getWebGpuGlobals>>,
-  {
-    columnCount,
-    decimationFactor,
-    fftSize,
-    fftStages,
-    rowCount,
-    sampleCount,
-    sampleRate,
-    stageSize,
-    tileSpan,
-    tileStart,
-    useLowFrequencyEnhancement,
-  }: {
-    columnCount: number;
-    decimationFactor: number;
-    fftSize: number;
-    fftStages: number;
-    rowCount: number;
-    sampleCount: number;
-    sampleRate: number;
-    stageSize: number;
-    tileSpan: number;
-    tileStart: number;
-    useLowFrequencyEnhancement: boolean;
-  },
-): any {
-  const buffer = new ArrayBuffer(64);
-  const view = new DataView(buffer);
-  const halfFftSize = Math.max(1, fftSize / 2);
-  const powerScale = 1 / (halfFftSize * halfFftSize);
-
-  view.setUint32(0, fftSize, true);
-  view.setUint32(4, columnCount, true);
-  view.setUint32(8, rowCount, true);
-  view.setUint32(12, sampleCount, true);
-  view.setUint32(16, stageSize, true);
-  view.setUint32(20, fftStages, true);
-  view.setUint32(24, decimationFactor, true);
-  view.setUint32(28, useLowFrequencyEnhancement ? 1 : 0, true);
-  view.setFloat32(32, tileStart, true);
-  view.setFloat32(36, tileSpan, true);
-  view.setFloat32(40, sampleRate, true);
-  view.setFloat32(44, powerScale, true);
-
-  return createGpuBufferWithData(device, globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM, buffer);
-}
-
-function initializeWebGpuSpectrogramCompute(webGpu: WebGpuCompositorState): WebGpuSpectrogramComputeState | null {
-  if (!ENABLE_EXPERIMENTAL_WEBGPU_SPECTROGRAM_COMPUTE || webGpu.spectrogramComputeDisabled) {
-    return null;
-  }
-
-  if (webGpu.spectrogramCompute) {
-    return webGpu.spectrogramCompute;
-  }
-
-  const globals = getWebGpuGlobals();
-  if (!globals) {
-    webGpu.spectrogramComputeDisabled = true;
-    return null;
-  }
-  if (!Number.isFinite(globals.textureUsage.STORAGE_BINDING)) {
-    webGpu.spectrogramComputeDisabled = true;
-    return null;
-  }
-
-  try {
-    const inputModule = webGpu.device.createShaderModule({ code: WEBGPU_SPECTROGRAM_INPUT_SHADER });
-    const fftModule = webGpu.device.createShaderModule({ code: WEBGPU_SPECTROGRAM_FFT_SHADER });
-    const renderModule = webGpu.device.createShaderModule({ code: WEBGPU_SPECTROGRAM_RENDER_SHADER });
-    const inputBindGroupLayout = webGpu.device.createBindGroupLayout({
-      entries: [
-        {
-          binding: 0,
-          buffer: { type: 'uniform' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 1,
-          buffer: { type: 'read-only-storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 2,
-          buffer: { type: 'storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-      ],
-    });
-    const fftBindGroupLayout = webGpu.device.createBindGroupLayout({
-      entries: [
-        {
-          binding: 0,
-          buffer: { type: 'uniform' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 1,
-          buffer: { type: 'read-only-storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 2,
-          buffer: { type: 'storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-      ],
-    });
-    const renderBindGroupLayout = webGpu.device.createBindGroupLayout({
-      entries: [
-        {
-          binding: 0,
-          buffer: { type: 'uniform' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 1,
-          buffer: { type: 'read-only-storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 2,
-          buffer: { type: 'read-only-storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 3,
-          buffer: { type: 'read-only-storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 4,
-          storageTexture: {
-            access: 'write-only',
-            format: WEBGPU_TILE_TEXTURE_FORMAT as any,
-            viewDimension: '2d',
-          },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-      ],
-    });
-
-    webGpu.spectrogramCompute = {
-      bandLayoutResources: new Map(),
-      fftBindGroupLayout,
-      fftPipeline: webGpu.device.createComputePipeline({
-        compute: {
-          entryPoint: 'runSpectrogramFftStage',
-          module: fftModule,
-        },
-        layout: webGpu.device.createPipelineLayout({
-          bindGroupLayouts: [fftBindGroupLayout],
-        }),
-      }),
-      inputBindGroupLayout,
-      inputPipeline: webGpu.device.createComputePipeline({
-        compute: {
-          entryPoint: 'prepareSpectrogramInput',
-          module: inputModule,
-        },
-        layout: webGpu.device.createPipelineLayout({
-          bindGroupLayouts: [inputBindGroupLayout],
-        }),
-      }),
-      pcmBuffer: null,
-      pcmSampleCount: 0,
-      renderBindGroupLayout,
-      renderPipeline: webGpu.device.createComputePipeline({
-        compute: {
-          entryPoint: 'renderSpectrogramTexture',
-          module: renderModule,
-        },
-        layout: webGpu.device.createPipelineLayout({
-          bindGroupLayouts: [renderBindGroupLayout],
-        }),
-      }),
-    };
-  } catch {
-    webGpu.spectrogramComputeDisabled = true;
-    webGpu.spectrogramCompute = null;
-    return null;
-  }
-
-  return webGpu.spectrogramCompute;
-}
-
-function ensureWebGpuPcmBuffer(
-  webGpu: WebGpuCompositorState,
-  computeState: WebGpuSpectrogramComputeState,
-): boolean {
-  const globals = getWebGpuGlobals();
-  const samples = analysisState.samples;
-
-  if (!globals || !samples || samples.length <= 0) {
-    return false;
-  }
-
-  if (computeState.pcmBuffer && computeState.pcmSampleCount === samples.length) {
-    return true;
-  }
-
-  if (computeState.pcmBuffer && typeof computeState.pcmBuffer.destroy === 'function') {
-    computeState.pcmBuffer.destroy();
-  }
-
-  computeState.pcmBuffer = createGpuBufferWithData(
-    webGpu.device,
-    globals.bufferUsage.COPY_DST | globals.bufferUsage.STORAGE,
-    samples,
-  );
-  computeState.pcmSampleCount = samples.length;
-  return true;
-}
-
 function resizeWebGpuSurface(): void {
-  if (!surfaceState.webGpu) {
+  if (!surfaceState.webGpu || !surfaceState.canvas) {
     return;
   }
 
-  surfaceState.webGpu.compositorCanvas.width = Math.max(1, surfaceState.pixelWidth);
-  surfaceState.webGpu.compositorCanvas.height = Math.max(1, surfaceState.pixelHeight);
+  surfaceState.canvas.width = Math.max(1, surfaceState.pixelWidth);
+  surfaceState.canvas.height = Math.max(1, surfaceState.pixelHeight);
   surfaceState.webGpu.canvasContext.configure({
     alphaMode: 'opaque',
     device: surfaceState.webGpu.device,
@@ -1397,8 +1565,11 @@ function resizeWebGpuSurface(): void {
 }
 
 function initializeCanvas(options: CanvasInitOptions | undefined): void {
-  if (options?.offscreenCanvas) {
+  if (options?.offscreenCanvas && options.offscreenCanvas !== surfaceState.canvas) {
+    destroyWebGpuCompositor();
+    surfaceState.context = null;
     surfaceState.canvas = options.offscreenCanvas;
+    surfaceState.backend = 'uninitialized';
   }
 
   surfaceState.pixelWidth = Math.max(1, Math.round(Number(options?.pixelWidth) || surfaceState.pixelWidth || 1));
@@ -1408,13 +1579,15 @@ function initializeCanvas(options: CanvasInitOptions | undefined): void {
     return;
   }
 
-  initialize2dSurface();
-
   if (ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR) {
     void initializeWebGpuCompositor();
+  } else {
+    initialize2dSurface(null);
   }
 
-  paintSpectrogramDisplay();
+  if (surfaceState.backend !== 'initializing') {
+    paintSpectrogramDisplay();
+  }
 }
 
 function resizeCanvas(options: CanvasInitOptions | undefined): void {
@@ -1425,23 +1598,22 @@ function resizeCanvas(options: CanvasInitOptions | undefined): void {
     return;
   }
 
-  surfaceState.canvas.width = surfaceState.pixelWidth;
-  surfaceState.canvas.height = surfaceState.pixelHeight;
   analysisState.currentDisplayRange.pixelWidth = surfaceState.pixelWidth;
   analysisState.currentDisplayRange.pixelHeight = surfaceState.pixelHeight;
+
   if (surfaceState.backend === 'webgpu') {
     resizeWebGpuSurface();
-  }
-
-  initialize2dSurface();
-
-  if (surfaceState.backend === 'uninitialized' && ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR) {
+  } else if (surfaceState.backend === '2d') {
+    initialize2dSurface(surfaceState.fallbackReason);
+  } else if (ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR) {
     void initializeWebGpuCompositor();
-  } else if (surfaceState.backend === 'uninitialized') {
-    initialize2dSurface();
+  } else {
+    initialize2dSurface(surfaceState.fallbackReason);
   }
 
-  paintSpectrogramDisplay();
+  if (surfaceState.backend !== 'initializing') {
+    paintSpectrogramDisplay();
+  }
 }
 
 function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptions | undefined): void {
@@ -1499,19 +1671,7 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
     analysisState.visible = createEmptyLayerState('visible');
   }
 
-  self.postMessage({
-    type: 'analysisInitialized',
-    body: {
-      duration,
-      maxFrequency: analysisState.maxFrequency,
-      minFrequency: analysisState.minFrequency,
-      quality,
-      runtimeVariant: runtime.variant,
-      sampleCount,
-      sampleRate,
-    },
-  });
-
+  postAnalysisInitialized();
 }
 
 function updateCurrentDisplayRange(request: SpectrogramRequest | null): void {
@@ -1599,6 +1759,7 @@ async function pumpOverviewLoop() {
         kind: 'overview',
         plan,
         ready: false,
+        retainedPlan: null,
         requestPending: true,
       };
 
@@ -1615,6 +1776,7 @@ async function pumpOverviewLoop() {
         kind: 'overview',
         plan,
         ready: true,
+        retainedPlan: null,
         requestPending: false,
       };
 
@@ -1664,12 +1826,17 @@ async function pumpVisibleLoop() {
         continue;
       }
 
+      const retainedPlan = analysisState.visible.ready
+        ? analysisState.visible.plan
+        : analysisState.visible.retainedPlan;
+
       analysisState.generationStatus.set(plan.generation, { cancelled: false });
       analysisState.visible = {
         generation: plan.generation,
         kind: 'visible',
         plan,
         ready: false,
+        retainedPlan,
         requestPending: true,
       };
 
@@ -1694,6 +1861,7 @@ async function pumpVisibleLoop() {
         kind: 'visible',
         plan,
         ready: true,
+        retainedPlan: null,
         requestPending: false,
       };
 
@@ -1743,6 +1911,42 @@ function shouldAbortOverviewPlan(plan: RenderRequestPlan): boolean {
   );
 }
 
+function getPlanTileRenderOrder(plan: RenderRequestPlan): number[] {
+  const tileIndices: number[] = [];
+  for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
+    tileIndices.push(tileIndex);
+  }
+
+  if (plan.requestKind !== 'visible' || tileIndices.length <= 2) {
+    return tileIndices;
+  }
+
+  const centerTime = (plan.displayStart + plan.displayEnd) * 0.5;
+  const centerTileIndex = clamp(
+    Math.floor(centerTime / Math.max(plan.tileDuration, 1e-6)),
+    plan.startTileIndex,
+    plan.endTileIndex,
+  );
+  const ordered: number[] = [];
+  const seen = new Set<number>();
+
+  for (let offset = 0; ordered.length < tileIndices.length; offset += 1) {
+    const left = centerTileIndex - offset;
+    const right = centerTileIndex + offset;
+
+    if (left >= plan.startTileIndex && left <= plan.endTileIndex && !seen.has(left)) {
+      seen.add(left);
+      ordered.push(left);
+    }
+    if (right >= plan.startTileIndex && right <= plan.endTileIndex && !seen.has(right)) {
+      seen.add(right);
+      ordered.push(right);
+    }
+  }
+
+  return ordered;
+}
+
 async function ensurePlanTiles(
   runtime: WaveCoreRuntime,
   plan: RenderRequestPlan,
@@ -1750,8 +1954,9 @@ async function ensurePlanTiles(
 ): Promise<boolean> {
   const onTileReady = typeof options.onTileReady === 'function' ? options.onTileReady : null;
   const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
+  const tileIndices = getPlanTileRenderOrder(plan);
 
-  for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
+  for (const tileIndex of tileIndices) {
     if (shouldAbort?.()) {
       return false;
     }
@@ -1794,28 +1999,18 @@ function createTileRecord({
   tileIndex: number;
   tileStart: number;
 }): TileRecord {
-  const canvas = new OffscreenCanvas(TILE_COLUMN_COUNT, rowCount);
-  const context = canvas.getContext('2d', { alpha: false });
-
-  if (!context) {
-    throw new Error('OffscreenCanvas 2D context is unavailable.');
-  }
-
-  const imageData = context.createImageData(TILE_COLUMN_COUNT, rowCount);
-
   return {
     byteLength: TILE_COLUMN_COUNT * rowCount * 4,
-    canvas,
+    canvas: null,
     columnCount: TILE_COLUMN_COUNT,
     complete: false,
-    context,
+    context: null,
     gpuBindGroup: null,
     gpuDirty: true,
     gpuTexture: null,
     gpuTextureUsage: 0,
     gpuTextureView: null,
-    gpuUniformBuffer: null,
-    imageData,
+    imageData: null,
     renderedColumns: 0,
     rowCount,
     tileEnd,
@@ -1825,6 +2020,20 @@ function createTileRecord({
   };
 }
 
+function ensureCpuTileSurface(tileRecord: TileRecord): void {
+  if (tileRecord.context && tileRecord.imageData && tileRecord.canvas) {
+    return;
+  }
+
+  tileRecord.canvas = new OffscreenCanvas(tileRecord.columnCount, tileRecord.rowCount);
+  tileRecord.context = tileRecord.canvas.getContext('2d', { alpha: false });
+  if (!tileRecord.context) {
+    throw new Error('OffscreenCanvas 2D context is unavailable.');
+  }
+  tileRecord.imageData = tileRecord.context.createImageData(tileRecord.columnCount, tileRecord.rowCount);
+  tileRecord.gpuDirty = true;
+}
+
 function drawTileChunk(
   tileRecord: TileRecord,
   rgba: Uint8Array,
@@ -1832,6 +2041,11 @@ function drawTileChunk(
   columnCount: number,
   rowCount: number,
 ): void {
+  ensureCpuTileSurface(tileRecord);
+  if (!tileRecord.imageData || !tileRecord.context) {
+    throw new Error('Tile CPU surface is unavailable.');
+  }
+
   const destination = tileRecord.imageData.data;
 
   if (columnOffset === 0 && columnCount === tileRecord.columnCount) {
@@ -1915,27 +2129,20 @@ async function renderTile(
     tileStart,
   });
 
-  if (!tileRecord.context) {
-    tileRecord.context = tileRecord.canvas.getContext('2d', { alpha: false });
-    if (!tileRecord.context) {
-      throw new Error('OffscreenCanvas 2D context is unavailable.');
-    }
-    tileRecord.imageData = tileRecord.context.createImageData(tileRecord.columnCount, tileRecord.rowCount);
-  }
-
   setTileRecord(cacheKey, tileRecord);
 
-  if (canUseWebGpuSpectrogramCompute(plan)) {
+  if (canUseWebGpuNativeCompute(plan)) {
     if (surfaceState.webGpuInitPromise && !surfaceState.webGpu) {
       await surfaceState.webGpuInitPromise;
     }
 
-    if (surfaceState.webGpu && await renderSpectrogramTileWithWebGpu(plan, tileRecord, tileStart, tileEnd)) {
+    if (surfaceState.webGpu && await renderTileWithWebGpu(plan, tileRecord, tileStart, tileEnd)) {
       onChunkReady?.();
       return tileRecord;
     }
   }
 
+  ensureCpuTileSurface(tileRecord);
   while (tileRecord.renderedColumns < TILE_COLUMN_COUNT) {
     if (shouldAbort?.()) {
       return null;
@@ -1960,7 +2167,7 @@ function paintSpectrogramDisplay(): void {
   const displayRange = analysisState.currentDisplayRange;
   const context = surfaceState.context;
 
-  if (context && surfaceState.webGpu && paintSpectrogramDisplayWithWebGpu(displayRange, context)) {
+  if (surfaceState.webGpu && paintSpectrogramDisplayWithWebGpu(displayRange)) {
     return;
   }
 
@@ -1974,10 +2181,24 @@ function paintSpectrogramDisplay(): void {
     return;
   }
 
+  if (analysisState.overview.retainedPlan) {
+    paintLayer(context, analysisState.overview.retainedPlan, displayRange, {
+      smoothing: true,
+      smoothingQuality: 'high',
+    });
+  }
+
   if (analysisState.overview.plan) {
     paintLayer(context, analysisState.overview.plan, displayRange, {
       smoothing: true,
       smoothingQuality: 'high',
+    });
+  }
+
+  if (analysisState.visible.retainedPlan) {
+    paintLayer(context, analysisState.visible.retainedPlan, displayRange, {
+      smoothing: true,
+      smoothingQuality: 'medium',
     });
   }
 
@@ -1991,7 +2212,6 @@ function paintSpectrogramDisplay(): void {
 
 function paintSpectrogramDisplayWithWebGpu(
   displayRange: AnalysisWorkerState['currentDisplayRange'],
-  context: OffscreenCanvasRenderingContext2D,
 ): boolean {
   const webGpu = surfaceState.webGpu;
 
@@ -2017,10 +2237,16 @@ function paintSpectrogramDisplayWithWebGpu(
     renderPass.draw(6);
 
     if (displayRange.end > displayRange.start) {
+      if (analysisState.overview.retainedPlan) {
+        paintLayerWithWebGpu(renderPass, webGpu, analysisState.overview.retainedPlan, displayRange);
+      }
       if (analysisState.overview.plan) {
         paintLayerWithWebGpu(renderPass, webGpu, analysisState.overview.plan, displayRange);
       }
 
+      if (analysisState.visible.retainedPlan) {
+        paintLayerWithWebGpu(renderPass, webGpu, analysisState.visible.retainedPlan, displayRange);
+      }
       if (analysisState.visible.plan) {
         paintLayerWithWebGpu(renderPass, webGpu, analysisState.visible.plan, displayRange);
       }
@@ -2028,52 +2254,9 @@ function paintSpectrogramDisplayWithWebGpu(
 
     renderPass.end();
     webGpu.device.queue.submit([commandEncoder.finish()]);
-    const presentSerial = surfaceState.webGpuPresentSerial + 1;
-    surfaceState.webGpuPresentSerial = presentSerial;
-    const width = Math.max(1, surfaceState.pixelWidth);
-    const height = Math.max(1, surfaceState.pixelHeight);
-    void webGpu.device.queue.onSubmittedWorkDone()
-      .then(async () => {
-        if (
-          surfaceState.webGpu !== webGpu
-          || surfaceState.webGpuPresentSerial !== presentSerial
-        ) {
-          return;
-        }
-
-        const imageSource = typeof createImageBitmap === 'function'
-          ? await createImageBitmap(webGpu.compositorCanvas)
-          : webGpu.compositorCanvas;
-        try {
-          if (
-            surfaceState.webGpu !== webGpu
-            || surfaceState.webGpuPresentSerial !== presentSerial
-          ) {
-            return;
-          }
-
-          context.setTransform(1, 0, 0, 1, 0, 0);
-          context.clearRect(0, 0, width, height);
-          context.drawImage(imageSource, 0, 0, width, height);
-        } finally {
-          if (imageSource instanceof ImageBitmap) {
-            imageSource.close();
-          }
-        }
-      })
-      .catch(() => {
-        if (surfaceState.webGpu !== webGpu) {
-          return;
-        }
-
-        destroyWebGpuCompositor();
-        surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
-        paintSpectrogramDisplay();
-      });
     return true;
   } catch {
-    destroyWebGpuCompositor();
-    surfaceState.backend = surfaceState.context ? '2d' : 'uninitialized';
+    requestAnalysisSurfaceReset('surface-invalid');
     return false;
   }
 }
@@ -2245,8 +2428,26 @@ function createBandRangesForSampleRate(
   });
 }
 
-function buildSpectrogramBandLayoutCacheKey(plan: RenderRequestPlan): string {
+function hzToMel(frequency: number): number {
+  return 1127 * Math.log(1 + (frequency / 700));
+}
+
+function melToHz(melValue: number): number {
+  return 700 * (Math.exp(melValue / 1127) - 1);
+}
+
+function getScalogramFrequencyForRow(row: number, rows: number, minFrequency: number, maxFrequency: number): number {
+  if (rows <= 1) {
+    return minFrequency;
+  }
+
+  const ratio = row / (rows - 1);
+  return minFrequency * Math.exp(Math.log(maxFrequency / minFrequency) * ratio);
+}
+
+function buildStftLayoutCacheKey(plan: RenderRequestPlan): string {
   return [
+    `type${plan.analysisType}`,
     `fft${plan.fftSize}`,
     `scale${plan.frequencyScale}`,
     `rows${plan.rowCount}`,
@@ -2257,21 +2458,91 @@ function buildSpectrogramBandLayoutCacheKey(plan: RenderRequestPlan): string {
   ].join(':');
 }
 
-function getSpectrogramBandLayoutResource(
+function getStftLayoutResource(
   plan: RenderRequestPlan,
   webGpu: WebGpuCompositorState,
-  computeState: WebGpuSpectrogramComputeState,
-): SpectrogramBandLayoutResource | null {
+  computeState: WebGpuStftComputeState,
+): WebGpuStftLayoutResource | null {
   const globals = getWebGpuGlobals();
 
   if (!globals) {
     return null;
   }
 
-  const cacheKey = buildSpectrogramBandLayoutCacheKey(plan);
+  const cacheKey = buildStftLayoutCacheKey(plan);
   const cached = computeState.bandLayoutResources.get(cacheKey) ?? null;
   if (cached) {
     return cached;
+  }
+
+  if (plan.analysisType === 'mel') {
+    const rows = Math.max(1, plan.rowCount);
+    const nyquist = analysisState.sampleRate / 2;
+    const maximumBin = Math.max(2, Math.trunc(plan.fftSize / 2));
+    const safeMinFrequency = Math.max(1, analysisState.minFrequency);
+    const safeMaxFrequency = Math.max(safeMinFrequency * 1.01, analysisState.maxFrequency);
+    const melMin = hzToMel(safeMinFrequency);
+    const melMax = hzToMel(safeMaxFrequency);
+    const melStep = (melMax - melMin) / (rows + 1);
+    const rowData = new Uint32Array(rows * 4);
+    const bins: number[] = [];
+    const weights: number[] = [];
+
+    for (let row = 0; row < rows; row += 1) {
+      const leftFrequency = melToHz(melMin + (melStep * row));
+      const centerFrequency = melToHz(melMin + (melStep * (row + 1)));
+      const rightFrequency = melToHz(melMin + (melStep * (row + 2)));
+      const startBin = clamp(
+        Math.floor((leftFrequency / nyquist) * maximumBin),
+        1,
+        maximumBin - 1,
+      );
+      const peakBin = clamp(
+        Math.round((centerFrequency / nyquist) * maximumBin),
+        startBin + 1,
+        maximumBin - 1,
+      );
+      const endBin = clamp(
+        Math.ceil((rightFrequency / nyquist) * maximumBin),
+        peakBin + 1,
+        maximumBin,
+      );
+      const rowOffset = bins.length;
+
+      for (let bin = startBin; bin < endBin; bin += 1) {
+        const frequency = (bin / maximumBin) * nyquist;
+        let weight = 0;
+
+        if (frequency <= centerFrequency) {
+          const denominator = Math.max(1e-6, centerFrequency - leftFrequency);
+          weight = (frequency - leftFrequency) / denominator;
+        } else {
+          const denominator = Math.max(1e-6, rightFrequency - centerFrequency);
+          weight = (rightFrequency - frequency) / denominator;
+        }
+
+        weight = clamp(weight, 0, 1);
+        if (weight <= 0) {
+          continue;
+        }
+
+        bins.push(bin);
+        weights.push(weight);
+      }
+
+      const offset = row * 4;
+      rowData[offset] = rowOffset;
+      rowData[offset + 1] = bins.length - rowOffset;
+    }
+
+    const resource: MelBandLayoutResource = {
+      binBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Uint32Array(bins)),
+      key: cacheKey,
+      rowBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, rowData),
+      weightBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Float32Array(weights)),
+    };
+    computeState.bandLayoutResources.set(cacheKey, resource);
+    return resource;
   }
 
   const baseRanges = createSpectrogramBandRanges({
@@ -2324,51 +2595,629 @@ function getSpectrogramBandLayoutResource(
     buffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, bandData),
     hasEnhancedRows,
     key: cacheKey,
-  };
+  } satisfies SpectrogramBandLayoutResource;
   computeState.bandLayoutResources.set(cacheKey, resource);
   return resource;
 }
 
-function destroyGpuBuffers(buffers: any[]): void {
-  for (const buffer of buffers) {
-    if (buffer && typeof buffer.destroy === 'function') {
-      buffer.destroy();
-    }
-  }
+function buildScalogramKernelCacheKey(plan: RenderRequestPlan): string {
+  return [
+    `rows${plan.rowCount}`,
+    `sr${analysisState.sampleRate}`,
+    `min${analysisState.minFrequency}`,
+    `max${analysisState.maxFrequency}`,
+  ].join(':');
 }
 
-function canUseWebGpuSpectrogramCompute(plan: RenderRequestPlan): boolean {
+function getScalogramKernelResource(
+  plan: RenderRequestPlan,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuScalogramComputeState,
+): ScalogramKernelResource | null {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return null;
+  }
+
+  const cacheKey = buildScalogramKernelCacheKey(plan);
+  const cached = computeState.kernelResources.get(cacheKey) ?? null;
+  if (cached) {
+    return cached;
+  }
+
+  const rowCount = Math.max(1, plan.rowCount);
+  const sampleRate = analysisState.sampleRate;
+  const minFrequency = Math.max(1, analysisState.minFrequency);
+  const maxFrequency = Math.max(minFrequency * 1.01, analysisState.maxFrequency);
+  const rowBufferData = new ArrayBuffer(rowCount * 32);
+  const rowView = new DataView(rowBufferData);
+  const offsets: number[] = [];
+  const realWeights: number[] = [];
+  const imagWeights: number[] = [];
+  const normWeights: number[] = [];
+  const twoPi = Math.PI * 2;
+
+  for (let row = 0; row < rowCount; row += 1) {
+    const frequency = getScalogramFrequencyForRow(row, rowCount, minFrequency, maxFrequency);
+    const safeFrequency = Math.max(1, frequency);
+    const scaleSeconds = 6 / (twoPi * safeFrequency);
+    const supportSamples = Math.min(
+      4096,
+      Math.max(24, Math.ceil(scaleSeconds * 3 * sampleRate)),
+    );
+    const stride = Math.max(1, Math.trunc(supportSamples / 96));
+    const tapCount = Math.floor((supportSamples * 2) / stride) + 1;
+    const phaseStep = (twoPi * frequency * stride) / sampleRate;
+    const stepCos = Math.cos(phaseStep);
+    const stepSin = Math.sin(phaseStep);
+    const initialPhase = (twoPi * frequency * -supportSamples) / sampleRate;
+    let phaseCos = Math.cos(initialPhase);
+    let phaseSin = Math.sin(initialPhase);
+    let normalization = 0;
+    let offsetValue = -supportSamples;
+    const tapOffset = offsets.length;
+
+    for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
+      const time = offsetValue / sampleRate;
+      const normalizedTime = time / scaleSeconds;
+      const gaussian = Math.exp(-0.5 * normalizedTime * normalizedTime);
+      const normWeight = gaussian * gaussian;
+
+      offsets.push(offsetValue);
+      realWeights.push(gaussian * phaseCos);
+      imagWeights.push(-gaussian * phaseSin);
+      normWeights.push(normWeight);
+      normalization += normWeight;
+
+      const nextPhaseCos = (phaseCos * stepCos) - (phaseSin * stepSin);
+      phaseSin = (phaseSin * stepCos) + (phaseCos * stepSin);
+      phaseCos = nextPhaseCos;
+      offsetValue += stride;
+    }
+
+    const rowOffset = row * 32;
+    rowView.setUint32(rowOffset, tapOffset, true);
+    rowView.setUint32(rowOffset + 4, tapCount, true);
+    rowView.setInt32(rowOffset + 8, offsets[tapOffset], true);
+    rowView.setInt32(rowOffset + 12, offsets[tapOffset + tapCount - 1], true);
+    rowView.setFloat32(rowOffset + 16, normalization, true);
+  }
+
+  const resource: ScalogramKernelResource = {
+    imagWeightBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Float32Array(imagWeights)),
+    key: cacheKey,
+    normWeightBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Float32Array(normWeights)),
+    offsetBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Int32Array(offsets)),
+    realWeightBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Float32Array(realWeights)),
+    rowBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, rowBufferData),
+  };
+  computeState.kernelResources.set(cacheKey, resource);
+  return resource;
+}
+
+function canUseWebGpuNativeCompute(plan: RenderRequestPlan): boolean {
   return ENABLE_EXPERIMENTAL_WEBGPU_SPECTROGRAM_COMPUTE
-    && plan.analysisType === 'spectrogram'
-    && plan.requestKind === 'overview'
-    && plan.fftSize > 0
-    && plan.fftSize <= MAX_WEBGPU_COMPUTE_FFT_SIZE
+    && surfaceState.backend === 'webgpu'
+    && !surfaceState.webGpu?.analysisFallbackReasons[plan.analysisType]
     && analysisState.sampleRate > 0
     && analysisState.sampleCount > 0
     && analysisState.samples instanceof Float32Array
     && analysisState.samples.length >= analysisState.sampleCount;
 }
 
-async function renderSpectrogramTileWithWebGpu(
+function markAnalysisTypeWebGpuFallback(plan: RenderRequestPlan, reason: string): void {
+  if (surfaceState.webGpu) {
+    surfaceState.webGpu.analysisFallbackReasons[plan.analysisType] = reason;
+  }
+}
+
+function writeBufferAtOffset(target: any, offset: number, data: ArrayBuffer): void {
+  const webGpu = surfaceState.webGpu;
+  if (!webGpu) {
+    return;
+  }
+
+  webGpu.device.queue.writeBuffer(target, offset, data);
+}
+
+function createStftComputeParamsData(
+  plan: RenderRequestPlan,
+  {
+    columnCount,
+    decimationFactor,
+    sampleCount,
+    sampleRate,
+    slotStageIndex,
+    tileSpan,
+    tileStart,
+    useLowFrequencyEnhancement,
+  }: {
+    columnCount: number;
+    decimationFactor: number;
+    sampleCount: number;
+    sampleRate: number;
+    slotStageIndex: number;
+    tileSpan: number;
+    tileStart: number;
+    useLowFrequencyEnhancement: boolean;
+  },
+): ArrayBuffer {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  const halfFftSize = Math.max(1, plan.fftSize / 2);
+  const powerScale = 1 / (halfFftSize * halfFftSize);
+
+  view.setUint32(0, plan.fftSize, true);
+  view.setUint32(4, columnCount, true);
+  view.setUint32(8, plan.rowCount, true);
+  view.setUint32(12, sampleCount, true);
+  view.setUint32(16, slotStageIndex, true);
+  view.setUint32(20, ANALYSIS_TYPE_CODES[plan.analysisType] ?? 0, true);
+  view.setUint32(24, decimationFactor, true);
+  view.setUint32(28, useLowFrequencyEnhancement ? 1 : 0, true);
+  view.setFloat32(32, tileStart, true);
+  view.setFloat32(36, tileSpan, true);
+  view.setFloat32(40, sampleRate, true);
+  view.setFloat32(44, powerScale, true);
+  return buffer;
+}
+
+function createScalogramComputeParamsData(
+  plan: RenderRequestPlan,
+  {
+    columnCount,
+    sampleCount,
+    sampleRate,
+    tileSpan,
+    tileStart,
+  }: {
+    columnCount: number;
+    sampleCount: number;
+    sampleRate: number;
+    tileSpan: number;
+    tileStart: number;
+  },
+): ArrayBuffer {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, columnCount, true);
+  view.setUint32(4, plan.rowCount, true);
+  view.setUint32(8, sampleCount, true);
+  view.setFloat32(16, tileStart, true);
+  view.setFloat32(20, tileSpan, true);
+  view.setFloat32(24, sampleRate, true);
+  return buffer;
+}
+
+function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftComputeState | null {
+  if (webGpu.stftCompute) {
+    return webGpu.stftCompute;
+  }
+
+  const globals = getWebGpuGlobals();
+  if (!globals || !Number.isFinite(globals.textureUsage.STORAGE_BINDING)) {
+    return null;
+  }
+
+  try {
+    const inputModule = webGpu.device.createShaderModule({ code: WEBGPU_SPECTROGRAM_INPUT_SHADER });
+    const fftModule = webGpu.device.createShaderModule({ code: WEBGPU_SPECTROGRAM_FFT_SHADER });
+    const spectrogramRenderModule = webGpu.device.createShaderModule({ code: WEBGPU_SPECTROGRAM_RENDER_SHADER });
+    const melRenderModule = webGpu.device.createShaderModule({ code: WEBGPU_MEL_RENDER_SHADER });
+    const paramStride = 256;
+    const paramBuffer = webGpu.device.createBuffer({
+      size: paramStride * 32,
+      usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM,
+    });
+    const inputBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+    const fftBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+    const renderSpectrogramBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 4,
+          storageTexture: {
+            access: 'write-only',
+            format: WEBGPU_TILE_TEXTURE_FORMAT as any,
+            viewDimension: '2d',
+          },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+    const renderMelBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 4,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 5,
+          storageTexture: {
+            access: 'write-only',
+            format: WEBGPU_TILE_TEXTURE_FORMAT as any,
+            viewDimension: '2d',
+          },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+
+    webGpu.stftCompute = {
+      bandLayoutResources: new Map(),
+      baseInputBindGroup: null,
+      basePingBuffer: null,
+      basePongBuffer: null,
+      fftBindGroupForward: null,
+      fftBindGroupLayout,
+      fftBindGroupReverse: null,
+      fftPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'runSpectrogramFftStage',
+          module: fftModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [fftBindGroupLayout],
+        }),
+      }),
+      inputBindGroupLayout,
+      inputPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'prepareSpectrogramInput',
+          module: inputModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [inputBindGroupLayout],
+        }),
+      }),
+      lowInputBindGroup: null,
+      lowPingBuffer: null,
+      lowPongBuffer: null,
+      lowStageBindGroupForward: null,
+      lowStageBindGroupReverse: null,
+      paramBuffer,
+      paramStride,
+      pcmBuffer: null,
+      pcmSampleCount: 0,
+      renderMelBindGroupLayout,
+      renderMelPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'renderMelTexture',
+          module: melRenderModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [renderMelBindGroupLayout],
+        }),
+      }),
+      renderSpectrogramBindGroupLayout,
+      renderSpectrogramPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'renderSpectrogramTexture',
+          module: spectrogramRenderModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [renderSpectrogramBindGroupLayout],
+        }),
+      }),
+      scratchFftSize: 0,
+    };
+  } catch {
+    return null;
+  }
+
+  return webGpu.stftCompute;
+}
+
+function initializeWebGpuScalogramCompute(webGpu: WebGpuCompositorState): WebGpuScalogramComputeState | null {
+  if (webGpu.scalogramCompute) {
+    return webGpu.scalogramCompute;
+  }
+
+  const globals = getWebGpuGlobals();
+  if (!globals || !Number.isFinite(globals.textureUsage.STORAGE_BINDING)) {
+    return null;
+  }
+
+  try {
+    const renderModule = webGpu.device.createShaderModule({ code: WEBGPU_SCALOGRAM_RENDER_SHADER });
+    const paramStride = 256;
+    const paramBuffer = webGpu.device.createBuffer({
+      size: paramStride,
+      usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM,
+    });
+    const renderBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 4,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 5,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 6,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 7,
+          storageTexture: {
+            access: 'write-only',
+            format: WEBGPU_TILE_TEXTURE_FORMAT as any,
+            viewDimension: '2d',
+          },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+
+    webGpu.scalogramCompute = {
+      kernelResources: new Map(),
+      paramBuffer,
+      paramStride,
+      pcmBuffer: null,
+      pcmSampleCount: 0,
+      renderBindGroupLayout,
+      renderPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'renderScalogramTexture',
+          module: renderModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [renderBindGroupLayout],
+        }),
+      }),
+    };
+  } catch {
+    return null;
+  }
+
+  return webGpu.scalogramCompute;
+}
+
+function ensureWebGpuPcmBuffer(
+  webGpu: WebGpuCompositorState,
+  computeState: { pcmBuffer: any; pcmSampleCount: number },
+): boolean {
+  const globals = getWebGpuGlobals();
+  const samples = analysisState.samples;
+
+  if (!globals || !samples || samples.length <= 0) {
+    return false;
+  }
+
+  if (computeState.pcmBuffer && computeState.pcmSampleCount === samples.length) {
+    return true;
+  }
+
+  if (computeState.pcmBuffer && typeof computeState.pcmBuffer.destroy === 'function') {
+    computeState.pcmBuffer.destroy();
+  }
+
+  computeState.pcmBuffer = createGpuBufferWithData(
+    webGpu.device,
+    globals.bufferUsage.COPY_DST | globals.bufferUsage.STORAGE,
+    samples,
+  );
+  computeState.pcmSampleCount = samples.length;
+  return true;
+}
+
+function ensureWebGpuStftScratchBuffers(
+  plan: RenderRequestPlan,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuStftComputeState,
+): boolean {
+  const globals = getWebGpuGlobals();
+  if (!globals || !computeState.pcmBuffer) {
+    return false;
+  }
+
+  const spectrumByteLength = TILE_COLUMN_COUNT * plan.fftSize * Float32Array.BYTES_PER_ELEMENT * 2;
+  if (computeState.scratchFftSize !== plan.fftSize || !computeState.basePingBuffer || !computeState.basePongBuffer) {
+    for (const buffer of [
+      computeState.basePingBuffer,
+      computeState.basePongBuffer,
+      computeState.lowPingBuffer,
+      computeState.lowPongBuffer,
+    ]) {
+      if (buffer && typeof buffer.destroy === 'function') {
+        buffer.destroy();
+      }
+    }
+
+    computeState.basePingBuffer = webGpu.device.createBuffer({
+      size: spectrumByteLength,
+      usage: globals.bufferUsage.STORAGE,
+    });
+    computeState.basePongBuffer = webGpu.device.createBuffer({
+      size: spectrumByteLength,
+      usage: globals.bufferUsage.STORAGE,
+    });
+    computeState.lowPingBuffer = webGpu.device.createBuffer({
+      size: spectrumByteLength,
+      usage: globals.bufferUsage.STORAGE,
+    });
+    computeState.lowPongBuffer = webGpu.device.createBuffer({
+      size: spectrumByteLength,
+      usage: globals.bufferUsage.STORAGE,
+    });
+    computeState.scratchFftSize = plan.fftSize;
+  }
+
+  computeState.baseInputBindGroup = webGpu.device.createBindGroup({
+    layout: computeState.inputBindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+      { binding: 1, resource: { buffer: computeState.pcmBuffer } },
+      { binding: 2, resource: { buffer: computeState.basePingBuffer } },
+    ],
+  });
+  computeState.lowInputBindGroup = webGpu.device.createBindGroup({
+    layout: computeState.inputBindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+      { binding: 1, resource: { buffer: computeState.pcmBuffer } },
+      { binding: 2, resource: { buffer: computeState.lowPingBuffer } },
+    ],
+  });
+  computeState.fftBindGroupForward = webGpu.device.createBindGroup({
+    layout: computeState.fftBindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+      { binding: 1, resource: { buffer: computeState.basePingBuffer } },
+      { binding: 2, resource: { buffer: computeState.basePongBuffer } },
+    ],
+  });
+  computeState.fftBindGroupReverse = webGpu.device.createBindGroup({
+    layout: computeState.fftBindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+      { binding: 1, resource: { buffer: computeState.basePongBuffer } },
+      { binding: 2, resource: { buffer: computeState.basePingBuffer } },
+    ],
+  });
+  computeState.lowStageBindGroupForward = webGpu.device.createBindGroup({
+    layout: computeState.fftBindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+      { binding: 1, resource: { buffer: computeState.lowPingBuffer } },
+      { binding: 2, resource: { buffer: computeState.lowPongBuffer } },
+    ],
+  });
+  computeState.lowStageBindGroupReverse = webGpu.device.createBindGroup({
+    layout: computeState.fftBindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+      { binding: 1, resource: { buffer: computeState.lowPongBuffer } },
+      { binding: 2, resource: { buffer: computeState.lowPingBuffer } },
+    ],
+  });
+  return true;
+}
+
+async function renderStftTileWithWebGpu(
   plan: RenderRequestPlan,
   tileRecord: TileRecord,
   tileStart: number,
   tileEnd: number,
 ): Promise<boolean> {
   const webGpu = surfaceState.webGpu;
-  const globals = getWebGpuGlobals();
-
-  if (!webGpu || !globals) {
+  if (!webGpu) {
     return false;
   }
 
-  const computeState = initializeWebGpuSpectrogramCompute(webGpu);
-  if (!computeState || !ensureWebGpuPcmBuffer(webGpu, computeState)) {
+  const computeState = initializeWebGpuStftCompute(webGpu);
+  if (!computeState) {
+    markAnalysisTypeWebGpuFallback(plan, 'STFT WebGPU compute initialization failed.');
+    return false;
+  }
+  if (!ensureWebGpuPcmBuffer(webGpu, computeState) || !ensureWebGpuStftScratchBuffers(plan, webGpu, computeState)) {
+    markAnalysisTypeWebGpuFallback(plan, 'STFT WebGPU buffers are unavailable.');
     return false;
   }
 
-  const bandLayoutResource = getSpectrogramBandLayoutResource(plan, webGpu, computeState);
-  if (!bandLayoutResource) {
+  const layoutResource = getStftLayoutResource(plan, webGpu, computeState);
+  if (!layoutResource) {
     return false;
   }
 
@@ -2376,178 +3225,140 @@ async function renderSpectrogramTileWithWebGpu(
     return false;
   }
 
-  const fftStages = getFftStageCount(plan.fftSize);
+  const stageCount = getFftStageCount(plan.fftSize);
   const columnCount = tileRecord.columnCount;
   const sampleCount = analysisState.sampleCount;
   const tileSpan = Math.max((1 / analysisState.sampleRate), tileEnd - tileStart);
-  const spectrumByteLength = columnCount * plan.fftSize * Float32Array.BYTES_PER_ELEMENT * 2;
-  const temporaryBuffers: any[] = [];
-  const parameterBuffers: any[] = [];
+  const useLowFrequencyEnhancement = plan.analysisType === 'spectrogram'
+    && 'hasEnhancedRows' in layoutResource
+    && layoutResource.hasEnhancedRows
+    && plan.decimationFactor > 1;
 
   try {
-    const createSpectrumBuffer = () => {
-      const buffer = webGpu.device.createBuffer({
-        size: spectrumByteLength,
-        usage: globals.bufferUsage.STORAGE,
-      });
-      temporaryBuffers.push(buffer);
-      return buffer;
-    };
+    writeBufferAtOffset(computeState.paramBuffer, 0, createStftComputeParamsData(plan, {
+      columnCount,
+      decimationFactor: 1,
+      sampleCount,
+      sampleRate: analysisState.sampleRate,
+      slotStageIndex: 0,
+      tileSpan,
+      tileStart,
+      useLowFrequencyEnhancement,
+    }));
 
-    const baseBufferA = createSpectrumBuffer();
-    const baseBufferB = createSpectrumBuffer();
-    const useLowFrequencyEnhancement = bandLayoutResource.hasEnhancedRows && plan.decimationFactor > 1;
-    const lowBufferA = useLowFrequencyEnhancement ? createSpectrumBuffer() : null;
-    const lowBufferB = useLowFrequencyEnhancement ? createSpectrumBuffer() : null;
-    const trackParameterBuffer = (buffer: any) => {
-      parameterBuffers.push(buffer);
-      return buffer;
-    };
-    const buildParameterBuffer = (stageSize: number, decimationFactor: number, useLowBands: boolean) => trackParameterBuffer(
-      createSpectrogramComputeParamsBuffer(webGpu.device, globals, {
+    if (useLowFrequencyEnhancement) {
+      writeBufferAtOffset(computeState.paramBuffer, computeState.paramStride, createStftComputeParamsData(plan, {
         columnCount,
-        decimationFactor,
-        fftSize: plan.fftSize,
-        fftStages,
-        rowCount: plan.rowCount,
+        decimationFactor: plan.decimationFactor,
         sampleCount,
         sampleRate: analysisState.sampleRate,
-        stageSize,
+        slotStageIndex: 0,
         tileSpan,
         tileStart,
-        useLowFrequencyEnhancement: useLowBands,
-      }),
-    );
-    const prepareBaseParams = buildParameterBuffer(0, 1, useLowFrequencyEnhancement);
-    const renderParams = buildParameterBuffer(0, 1, useLowFrequencyEnhancement);
+        useLowFrequencyEnhancement,
+      }));
+    }
+
+    for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+      writeBufferAtOffset(
+        computeState.paramBuffer,
+        computeState.paramStride * (2 + stageIndex),
+        createStftComputeParamsData(plan, {
+          columnCount,
+          decimationFactor: 1,
+          sampleCount,
+          sampleRate: analysisState.sampleRate,
+          slotStageIndex: stageIndex,
+          tileSpan,
+          tileStart,
+          useLowFrequencyEnhancement,
+        }),
+      );
+    }
+
+    const renderParamOffset = computeState.paramStride * (2 + stageCount);
+    writeBufferAtOffset(computeState.paramBuffer, renderParamOffset, createStftComputeParamsData(plan, {
+      columnCount,
+      decimationFactor: 1,
+      sampleCount,
+      sampleRate: analysisState.sampleRate,
+      slotStageIndex: 0,
+      tileSpan,
+      tileStart,
+      useLowFrequencyEnhancement,
+    }));
 
     const commandEncoder = webGpu.device.createCommandEncoder();
     const computePass = commandEncoder.beginComputePass();
 
     computePass.setPipeline(computeState.inputPipeline);
-    computePass.setBindGroup(0, webGpu.device.createBindGroup({
-      entries: [
-        {
-          binding: 0,
-          resource: { buffer: prepareBaseParams },
-        },
-        {
-          binding: 1,
-          resource: { buffer: computeState.pcmBuffer },
-        },
-        {
-          binding: 2,
-          resource: { buffer: baseBufferA },
-        },
-      ],
-      layout: computeState.inputBindGroupLayout,
-    }));
+    computePass.setBindGroup(0, computeState.baseInputBindGroup, [0]);
     computePass.dispatchWorkgroups(Math.ceil((columnCount * plan.fftSize) / 64));
 
-    if (useLowFrequencyEnhancement && lowBufferA) {
-      const prepareLowParams = buildParameterBuffer(0, plan.decimationFactor, useLowFrequencyEnhancement);
-      computePass.setBindGroup(0, webGpu.device.createBindGroup({
-        entries: [
-          {
-            binding: 0,
-            resource: { buffer: prepareLowParams },
-          },
-          {
-            binding: 1,
-            resource: { buffer: computeState.pcmBuffer },
-          },
-          {
-            binding: 2,
-            resource: { buffer: lowBufferA },
-          },
-        ],
-        layout: computeState.inputBindGroupLayout,
-      }));
+    if (useLowFrequencyEnhancement && computeState.lowInputBindGroup) {
+      computePass.setBindGroup(0, computeState.lowInputBindGroup, [computeState.paramStride]);
       computePass.dispatchWorkgroups(Math.ceil((columnCount * plan.fftSize) / 64));
     }
 
     computePass.setPipeline(computeState.fftPipeline);
-    let activeBaseSource = baseBufferA;
-    let activeBaseTarget = baseBufferB;
-
-    for (let stage = 0; stage < fftStages; stage += 1) {
-      const stageParams = buildParameterBuffer(1 << (stage + 1), 1, useLowFrequencyEnhancement);
-      computePass.setBindGroup(0, webGpu.device.createBindGroup({
-        entries: [
-          {
-            binding: 0,
-            resource: { buffer: stageParams },
-          },
-          {
-            binding: 1,
-            resource: { buffer: activeBaseSource },
-          },
-          {
-            binding: 2,
-            resource: { buffer: activeBaseTarget },
-          },
-        ],
-        layout: computeState.fftBindGroupLayout,
-      }));
+    for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+      const paramOffset = computeState.paramStride * (2 + stageIndex);
+      computePass.setBindGroup(
+        0,
+        stageIndex % 2 === 0 ? computeState.fftBindGroupForward : computeState.fftBindGroupReverse,
+        [paramOffset],
+      );
       computePass.dispatchWorkgroups(Math.ceil((columnCount * (plan.fftSize / 2)) / 64));
-      [activeBaseSource, activeBaseTarget] = [activeBaseTarget, activeBaseSource];
     }
 
-    let activeLowSource = activeBaseSource;
-    if (useLowFrequencyEnhancement && lowBufferA && lowBufferB) {
-      activeLowSource = lowBufferA;
-      let activeLowTarget = lowBufferB;
-
-      for (let stage = 0; stage < fftStages; stage += 1) {
-        const stageParams = buildParameterBuffer(1 << (stage + 1), plan.decimationFactor, useLowFrequencyEnhancement);
-        computePass.setBindGroup(0, webGpu.device.createBindGroup({
-          entries: [
-            {
-              binding: 0,
-              resource: { buffer: stageParams },
-            },
-            {
-              binding: 1,
-              resource: { buffer: activeLowSource },
-            },
-            {
-              binding: 2,
-              resource: { buffer: activeLowTarget },
-            },
-          ],
-          layout: computeState.fftBindGroupLayout,
-        }));
+    if (useLowFrequencyEnhancement) {
+      for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+        const paramOffset = computeState.paramStride * (2 + stageIndex);
+        computePass.setBindGroup(
+          0,
+          stageIndex % 2 === 0 ? computeState.lowStageBindGroupForward : computeState.lowStageBindGroupReverse,
+          [paramOffset],
+        );
         computePass.dispatchWorkgroups(Math.ceil((columnCount * (plan.fftSize / 2)) / 64));
-        [activeLowSource, activeLowTarget] = [activeLowTarget, activeLowSource];
       }
     }
 
-    computePass.setPipeline(computeState.renderPipeline);
-    computePass.setBindGroup(0, webGpu.device.createBindGroup({
-      entries: [
-        {
-          binding: 0,
-          resource: { buffer: renderParams },
-        },
-        {
-          binding: 1,
-          resource: { buffer: activeBaseSource },
-        },
-        {
-          binding: 2,
-          resource: { buffer: activeLowSource },
-        },
-        {
-          binding: 3,
-          resource: { buffer: bandLayoutResource.buffer },
-        },
-        {
-          binding: 4,
-          resource: tileRecord.gpuTextureView,
-        },
-      ],
-      layout: computeState.renderBindGroupLayout,
-    }));
+    const finalBaseBuffer = stageCount % 2 === 0 ? computeState.basePingBuffer : computeState.basePongBuffer;
+    const finalLowBuffer = useLowFrequencyEnhancement
+      ? (stageCount % 2 === 0 ? computeState.lowPingBuffer : computeState.lowPongBuffer)
+      : finalBaseBuffer;
+
+    if (plan.analysisType === 'mel') {
+      const melResource = layoutResource as MelBandLayoutResource;
+      const bindGroup = webGpu.device.createBindGroup({
+        layout: computeState.renderMelBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+          { binding: 1, resource: { buffer: finalBaseBuffer } },
+          { binding: 2, resource: { buffer: melResource.rowBuffer } },
+          { binding: 3, resource: { buffer: melResource.binBuffer } },
+          { binding: 4, resource: { buffer: melResource.weightBuffer } },
+          { binding: 5, resource: tileRecord.gpuTextureView },
+        ],
+      });
+      computePass.setPipeline(computeState.renderMelPipeline);
+      computePass.setBindGroup(0, bindGroup, [renderParamOffset]);
+    } else {
+      const spectrogramResource = layoutResource as SpectrogramBandLayoutResource;
+      const bindGroup = webGpu.device.createBindGroup({
+        layout: computeState.renderSpectrogramBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+          { binding: 1, resource: { buffer: finalBaseBuffer } },
+          { binding: 2, resource: { buffer: finalLowBuffer } },
+          { binding: 3, resource: { buffer: spectrogramResource.buffer } },
+          { binding: 4, resource: tileRecord.gpuTextureView },
+        ],
+      });
+      computePass.setPipeline(computeState.renderSpectrogramPipeline);
+      computePass.setBindGroup(0, bindGroup, [renderParamOffset]);
+    }
+
     computePass.dispatchWorkgroups(
       Math.ceil(columnCount / 8),
       Math.ceil(plan.rowCount / 8),
@@ -2555,18 +3366,99 @@ async function renderSpectrogramTileWithWebGpu(
     computePass.end();
 
     webGpu.device.queue.submit([commandEncoder.finish()]);
-    await webGpu.device.queue.onSubmittedWorkDone();
     tileRecord.gpuDirty = false;
     tileRecord.renderedColumns = tileRecord.columnCount;
     tileRecord.complete = true;
     return true;
-  } catch {
+  } catch (error) {
     destroyTileGpuResources(tileRecord);
+    markAnalysisTypeWebGpuFallback(plan, error instanceof Error ? error.message : 'STFT GPU compute failed.');
     return false;
-  } finally {
-    destroyGpuBuffers(parameterBuffers);
-    destroyGpuBuffers(temporaryBuffers);
   }
+}
+
+async function renderScalogramTileWithWebGpu(
+  plan: RenderRequestPlan,
+  tileRecord: TileRecord,
+  tileStart: number,
+  tileEnd: number,
+): Promise<boolean> {
+  const webGpu = surfaceState.webGpu;
+  if (!webGpu) {
+    return false;
+  }
+
+  const computeState = initializeWebGpuScalogramCompute(webGpu);
+  if (!computeState) {
+    markAnalysisTypeWebGpuFallback(plan, 'Scalogram WebGPU compute initialization failed.');
+    return false;
+  }
+  if (!ensureWebGpuPcmBuffer(webGpu, computeState)) {
+    markAnalysisTypeWebGpuFallback(plan, 'Scalogram WebGPU buffers are unavailable.');
+    return false;
+  }
+
+  const kernelResource = getScalogramKernelResource(plan, webGpu, computeState);
+  if (!kernelResource) {
+    return false;
+  }
+
+  if (!ensureTileGpuResources(tileRecord, webGpu, { requiresStorage: true, uploadIfDirty: false })) {
+    return false;
+  }
+
+  try {
+    writeBufferAtOffset(computeState.paramBuffer, 0, createScalogramComputeParamsData(plan, {
+      columnCount: tileRecord.columnCount,
+      sampleCount: analysisState.sampleCount,
+      sampleRate: analysisState.sampleRate,
+      tileSpan: Math.max((1 / analysisState.sampleRate), tileEnd - tileStart),
+      tileStart,
+    }));
+
+    const bindGroup = webGpu.device.createBindGroup({
+      layout: computeState.renderBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+        { binding: 1, resource: { buffer: computeState.pcmBuffer } },
+        { binding: 2, resource: { buffer: kernelResource.rowBuffer } },
+        { binding: 3, resource: { buffer: kernelResource.offsetBuffer } },
+        { binding: 4, resource: { buffer: kernelResource.realWeightBuffer } },
+        { binding: 5, resource: { buffer: kernelResource.imagWeightBuffer } },
+        { binding: 6, resource: { buffer: kernelResource.normWeightBuffer } },
+        { binding: 7, resource: tileRecord.gpuTextureView },
+      ],
+    });
+    const commandEncoder = webGpu.device.createCommandEncoder();
+    const computePass = commandEncoder.beginComputePass();
+    computePass.setPipeline(computeState.renderPipeline);
+    computePass.setBindGroup(0, bindGroup, [0]);
+    computePass.dispatchWorkgroups(
+      Math.ceil(tileRecord.columnCount / 8),
+      Math.ceil(plan.rowCount / 8),
+    );
+    computePass.end();
+    webGpu.device.queue.submit([commandEncoder.finish()]);
+    tileRecord.gpuDirty = false;
+    tileRecord.renderedColumns = tileRecord.columnCount;
+    tileRecord.complete = true;
+    return true;
+  } catch (error) {
+    destroyTileGpuResources(tileRecord);
+    markAnalysisTypeWebGpuFallback(plan, error instanceof Error ? error.message : 'Scalogram GPU compute failed.');
+    return false;
+  }
+}
+
+async function renderTileWithWebGpu(
+  plan: RenderRequestPlan,
+  tileRecord: TileRecord,
+  tileStart: number,
+  tileEnd: number,
+): Promise<boolean> {
+  return plan.analysisType === 'scalogram'
+    ? renderScalogramTileWithWebGpu(plan, tileRecord, tileStart, tileEnd)
+    : renderStftTileWithWebGpu(plan, tileRecord, tileStart, tileEnd);
 }
 
 function ensureTileGpuResources(
@@ -2597,13 +3489,6 @@ function ensureTileGpuResources(
     && (tileRecord.gpuTextureUsage & requiredTextureUsage) === requiredTextureUsage,
   );
 
-  if (!tileRecord.gpuUniformBuffer) {
-    tileRecord.gpuUniformBuffer = webGpu.device.createBuffer({
-      size: Float32Array.BYTES_PER_ELEMENT * 4,
-      usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM,
-    });
-  }
-
   if (!hasRequiredTextureUsage) {
     if (tileRecord.gpuTexture && typeof tileRecord.gpuTexture.destroy === 'function') {
       tileRecord.gpuTexture.destroy();
@@ -2626,14 +3511,10 @@ function ensureTileGpuResources(
       entries: [
         {
           binding: 0,
-          resource: { buffer: tileRecord.gpuUniformBuffer },
-        },
-        {
-          binding: 1,
           resource: webGpu.sampler,
         },
         {
-          binding: 2,
+          binding: 1,
           resource: tileRecord.gpuTextureView,
         },
       ],
@@ -2642,6 +3523,10 @@ function ensureTileGpuResources(
   }
 
   if (uploadIfDirty && tileRecord.gpuDirty) {
+    if (!tileRecord.imageData) {
+      return false;
+    }
+
     webGpu.device.queue.writeTexture(
       { texture: tileRecord.gpuTexture },
       tileRecord.imageData.data,
@@ -2661,26 +3546,46 @@ function ensureTileGpuResources(
   return true;
 }
 
-function paintLayerWithWebGpu(
-  renderPass: any,
+function ensurePresentInstanceBuffer(webGpu: WebGpuCompositorState, requiredInstances: number): void {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return;
+  }
+
+  const instanceCount = Math.max(1, requiredInstances);
+  if (webGpu.presentInstanceBuffer && webGpu.presentInstanceCapacity >= instanceCount) {
+    return;
+  }
+
+  if (webGpu.presentInstanceBuffer && typeof webGpu.presentInstanceBuffer.destroy === 'function') {
+    webGpu.presentInstanceBuffer.destroy();
+  }
+
+  webGpu.presentInstanceCapacity = instanceCount;
+  webGpu.presentInstanceBuffer = webGpu.device.createBuffer({
+    size: instanceCount * Float32Array.BYTES_PER_ELEMENT * 4,
+    usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.VERTEX,
+  });
+}
+
+function collectLayerWebGpuInstances(
   webGpu: WebGpuCompositorState,
   plan: RenderRequestPlan | null,
   displayRange: AnalysisWorkerState['currentDisplayRange'],
-): void {
+): Array<{ bindGroup: any; destLeft: number; destRight: number; uvStart: number; uvEnd: number }> {
   if (!plan) {
-    return;
+    return [];
   }
 
   const span = Math.max(1e-6, displayRange.end - displayRange.start);
   const destinationWidth = Math.max(1, surfaceState.pixelWidth);
-
-  renderPass.setPipeline(webGpu.tilePipeline);
+  const instances: Array<{ bindGroup: any; destLeft: number; destRight: number; uvStart: number; uvEnd: number }> = [];
 
   for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
     const cacheKey = buildTileCacheKey(plan, tileIndex);
     const tile = getTileRecord(cacheKey);
 
-    if (!tile || !ensureTileGpuResources(tile, webGpu) || !tile.gpuBindGroup || !tile.gpuUniformBuffer) {
+    if (!tile || !ensureTileGpuResources(tile, webGpu) || !tile.gpuBindGroup) {
       continue;
     }
 
@@ -2717,16 +3622,48 @@ function paintLayerWithWebGpu(
       1,
       Math.ceil((destinationEndRatio - destinationStartRatio) * destinationWidth),
     );
-    const uniforms = new Float32Array([
-      ((destinationX / destinationWidth) * 2) - 1,
-      (((destinationX + destinationWidthPx) / destinationWidth) * 2) - 1,
-      sourceX / tile.columnCount,
-      (sourceX + sourceWidth) / tile.columnCount,
-    ]);
+    instances.push({
+      bindGroup: tile.gpuBindGroup,
+      destLeft: ((destinationX / destinationWidth) * 2) - 1,
+      destRight: (((destinationX + destinationWidthPx) / destinationWidth) * 2) - 1,
+      uvEnd: (sourceX + sourceWidth) / tile.columnCount,
+      uvStart: sourceX / tile.columnCount,
+    });
+  }
 
-    webGpu.device.queue.writeBuffer(tile.gpuUniformBuffer, 0, uniforms);
-    renderPass.setBindGroup(0, tile.gpuBindGroup);
-    renderPass.draw(6);
+  return instances;
+}
+
+function paintLayerWithWebGpu(
+  renderPass: any,
+  webGpu: WebGpuCompositorState,
+  plan: RenderRequestPlan | null,
+  displayRange: AnalysisWorkerState['currentDisplayRange'],
+): void {
+  const instances = collectLayerWebGpuInstances(webGpu, plan, displayRange);
+  if (instances.length === 0) {
+    return;
+  }
+
+  ensurePresentInstanceBuffer(webGpu, instances.length);
+  const instanceData = new Float32Array(instances.length * 4);
+
+  for (let index = 0; index < instances.length; index += 1) {
+    const instance = instances[index];
+    const offset = index * 4;
+    instanceData[offset] = instance.destLeft;
+    instanceData[offset + 1] = instance.destRight;
+    instanceData[offset + 2] = instance.uvStart;
+    instanceData[offset + 3] = instance.uvEnd;
+  }
+
+  webGpu.device.queue.writeBuffer(webGpu.presentInstanceBuffer, 0, instanceData);
+  renderPass.setPipeline(webGpu.tilePipeline);
+  renderPass.setVertexBuffer(0, webGpu.presentInstanceBuffer);
+
+  for (let index = 0; index < instances.length; index += 1) {
+    renderPass.setBindGroup(0, instances[index].bindGroup);
+    renderPass.draw(6, 1, 0, index);
   }
 }
 
@@ -2749,9 +3686,9 @@ function paintLayer(
 
   for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
     const cacheKey = buildTileCacheKey(plan, tileIndex);
-      const tile = getTileRecord(cacheKey);
+    const tile = getTileRecord(cacheKey);
 
-    if (!tile) {
+    if (!tile || !tile.canvas) {
       continue;
     }
 

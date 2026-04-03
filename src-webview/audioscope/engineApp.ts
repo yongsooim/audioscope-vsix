@@ -20,6 +20,8 @@ import {
 } from './controllers/playbackRate';
 import { createAudioscopeLoadController } from './controllers/load';
 import type {
+  AnalysisRenderBackend,
+  AnalysisSurfaceResetReason,
   EngineWorkerToMainMessage,
   PlaybackClockState,
   SampleInfoPayload,
@@ -95,15 +97,52 @@ type SpectrogramAnalysisState = {
   activeVisibleRequest: SpectrogramVisibleRequest | null;
   configVersion: number;
   duration: number;
+  fallbackReason: string | null;
   generation: number;
   initialized: boolean;
   maxFrequency: number;
   minFrequency: number;
   quality: 'balanced' | 'high' | 'max';
+  renderBackend: AnalysisRenderBackend;
   runtimeVariant: string | null;
   sampleCount: number;
   sampleRate: number;
 };
+
+type AnalysisWorkerToMainMessage =
+  | {
+      body: {
+        fallbackReason?: string | null;
+        maxFrequency?: number;
+        minFrequency?: number;
+        quality?: 'balanced' | 'high' | 'max';
+        renderBackend?: AnalysisRenderBackend;
+        runtimeVariant?: string | null;
+        sampleCount?: number;
+        sampleRate?: number;
+      };
+      type: 'analysisInitialized';
+    }
+  | {
+      body: Record<string, unknown>;
+      type: 'runtimeReady';
+    }
+  | {
+      body: {
+        reason?: AnalysisSurfaceResetReason;
+      };
+      type: 'analysisSurfaceResetRequested';
+    }
+  | {
+      body: Record<string, unknown>;
+      type: 'visibleReady';
+    }
+  | {
+      body: {
+        message?: string;
+      };
+      type: 'error';
+    };
 
 const state = {
   activeFile: null,
@@ -171,6 +210,7 @@ const state = {
   },
   spectrogramFrame: 0,
   spectrogramRenderForcePending: false,
+  spectrogramSurfaceResetPromise: null as Promise<void> | null,
   spectrogramSurfaceReadyPromise: null as Promise<void> | null,
   viewportResizeDrag: null as { pointerId: number } | null,
   viewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
@@ -384,6 +424,7 @@ function disposeAnalysisWorker(): void {
   state.analysisRuntimeReadyPromise = null;
   state.resolveAnalysisRuntimeReady = null;
   state.analysis = null;
+  state.spectrogramSurfaceResetPromise = null;
   window.cancelAnimationFrame(state.spectrogramFrame);
   state.spectrogramFrame = 0;
   state.spectrogramRenderForcePending = false;
@@ -404,11 +445,13 @@ function createSpectrogramAnalysisState(
     activeVisibleRequest: null,
     configVersion: 0,
     duration,
+    fallbackReason: null,
     generation: 0,
     initialized: false,
     maxFrequency: Math.min(20000, sampleRate / 2),
     minFrequency: 50,
     quality,
+    renderBackend: '2d-wasm',
     runtimeVariant: null,
     sampleCount,
     sampleRate,
@@ -457,7 +500,7 @@ async function ensureAnalysisWorker(loadToken: number): Promise<Worker | null> {
     state.resolveAnalysisRuntimeReady = resolve;
   });
   state.analysisWorker = worker;
-  worker.addEventListener('message', (event: MessageEvent<any>) => {
+  worker.addEventListener('message', (event: MessageEvent<AnalysisWorkerToMainMessage>) => {
     handleAnalysisWorkerMessage(loadToken, event.data);
   });
   worker.addEventListener('error', (event) => {
@@ -542,6 +585,27 @@ async function initializeSpectrogramSurface(loadToken: number): Promise<void> {
       pixelWidth,
     },
   }, [offscreenCanvas]);
+}
+
+async function resetSpectrogramSurface(loadToken: number, reason: AnalysisSurfaceResetReason): Promise<void> {
+  if (state.spectrogramSurfaceResetPromise) {
+    return state.spectrogramSurfaceResetPromise;
+  }
+
+  setAnalysisStatus(
+    reason === 'device-lost'
+      ? 'Spectrogram surface resetting after WebGPU device loss...'
+      : 'Spectrogram surface resetting...',
+  );
+
+  state.spectrogramSurfaceResetPromise = (async () => {
+    await initializeSpectrogramSurface(loadToken);
+  })()
+    .finally(() => {
+      state.spectrogramSurfaceResetPromise = null;
+    });
+
+  return state.spectrogramSurfaceResetPromise;
 }
 
 function destroySession(): void {
@@ -1701,7 +1765,7 @@ function attachResizeObservers(): void {
   resizeObserver.observe(elements.waveformOverview);
 }
 
-function handleAnalysisWorkerMessage(loadToken: number, message: any): void {
+function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerToMainMessage): void {
   if (loadToken !== state.loadToken) {
     return;
   }
@@ -1718,12 +1782,41 @@ function handleAnalysisWorkerMessage(loadToken: number, message: any): void {
 
   if (message?.type === 'analysisInitialized') {
     state.analysis.initialized = true;
+    state.analysis.fallbackReason = typeof message.body?.fallbackReason === 'string'
+      ? message.body.fallbackReason
+      : null;
+    state.analysis.renderBackend = message.body?.renderBackend === 'webgpu-native'
+      ? 'webgpu-native'
+      : '2d-wasm';
     state.analysis.runtimeVariant = message.body?.runtimeVariant ?? null;
     state.analysis.sampleRate = Number(message.body?.sampleRate) || state.analysis.sampleRate;
     state.analysis.sampleCount = Number(message.body?.sampleCount) || state.analysis.sampleCount;
     state.analysis.minFrequency = Number(message.body?.minFrequency) || state.analysis.minFrequency;
     state.analysis.maxFrequency = Number(message.body?.maxFrequency) || state.analysis.maxFrequency;
     scheduleSpectrogramRender({ force: true });
+    return;
+  }
+
+  if (message?.type === 'analysisSurfaceResetRequested') {
+    const reason = message.body?.reason === 'device-lost' ? 'device-lost' : 'surface-invalid';
+    void resetSpectrogramSurface(loadToken, reason)
+      .then(() => {
+        if (loadToken !== state.loadToken || !state.analysis) {
+          return;
+        }
+
+        scheduleSpectrogramRender({ force: true });
+      })
+      .catch((error) => {
+        if (loadToken !== state.loadToken) {
+          return;
+        }
+
+        setAnalysisStatus(
+          `Spectrogram failed to recover surface: ${error instanceof Error ? error.message : String(error)}`,
+          true,
+        );
+      });
     return;
   }
 
@@ -1734,7 +1827,7 @@ function handleAnalysisWorkerMessage(loadToken: number, message: any): void {
     }
 
     state.analysis.activeVisibleRequest = {
-      analysisType: body.analysisType,
+      analysisType: normalizeSpectrogramAnalysisType(body.analysisType),
       configVersion: Number(body.configVersion) || 0,
       displayEnd: Number(body.displayEnd) || 0,
       displayStart: Number(body.displayStart) || 0,
