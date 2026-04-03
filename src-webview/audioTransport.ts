@@ -20,6 +20,15 @@ export interface PlaybackSession {
   sourceSampleRate: number;
 }
 
+export interface PlaybackClockSnapshot {
+  currentFrameFloat: number;
+  durationFrames: number;
+  loopEndFrame: number | null;
+  loopStartFrame: number | null;
+  playing: boolean;
+  sampleRate: number;
+}
+
 interface PlaybackSnapshotState {
   contextTime: number;
   currentFrame: number;
@@ -35,6 +44,7 @@ interface AudioTransportOptions {
 
 export interface AudioTransport {
   dispose(): Promise<void>;
+  getPlaybackClockState(): PlaybackClockSnapshot | null;
   getCurrentTime(): number;
   getDuration(): number;
   getLastFallbackReason(): string | null;
@@ -267,6 +277,30 @@ class AudioWorkletCopyTransport {
     }
 
     return this.normalizePausedTime(this.pausedAtSeconds);
+  }
+
+  getPlaybackClockState(): PlaybackClockSnapshot | null {
+    if (!this.playbackSession) {
+      return null;
+    }
+
+    const sourceLength = this.playbackSession.sourceLength;
+    const currentFrameFloat = this.snapshotState
+      ? this.projectFrameFromSnapshot(this.snapshotState)
+      : clampFramePrecise(this.pausedAtSeconds * this.getSourceSampleRate(), sourceLength);
+    const hasLoop = this.loopRange && this.loopRange.end > this.loopRange.start;
+    const loopFrames = hasLoop
+      ? this.getControlLoopFrames()
+      : { loopEndFrame: null, loopStartFrame: null };
+
+    return {
+      currentFrameFloat,
+      durationFrames: sourceLength,
+      loopEndFrame: loopFrames.loopEndFrame,
+      loopStartFrame: loopFrames.loopStartFrame,
+      playing: this.isPlaying(),
+      sampleRate: this.getSourceSampleRate(),
+    };
   }
 
   getDuration(): number {
@@ -770,6 +804,10 @@ class HybridAudioTransport implements AudioTransport {
     return this.getActiveTransport().getCurrentTime();
   }
 
+  getPlaybackClockState(): PlaybackClockSnapshot | null {
+    return this.getActiveTransport().getPlaybackClockState();
+  }
+
   getDuration(): number {
     return this.getSelectedTransport().getDuration();
   }
@@ -1003,6 +1041,26 @@ class StretchAudioTransport implements AudioTransport {
     }
 
     return this.normalizePausedTime(this.pausedAtSeconds);
+  }
+
+  getPlaybackClockState(): PlaybackClockSnapshot | null {
+    if (!this.playbackSession) {
+      return null;
+    }
+
+    const sampleRate = this.playbackSession.sourceSampleRate || DEFAULT_SAMPLE_RATE;
+    const sourceLength = this.playbackSession.sourceLength;
+    const currentFrameFloat = clampFramePrecise(this.getCurrentTime() * sampleRate, sourceLength);
+    const hasLoop = this.loopRange && this.loopRange.end > this.loopRange.start;
+
+    return {
+      currentFrameFloat,
+      durationFrames: sourceLength,
+      loopEndFrame: hasLoop ? clampFramePrecise(this.loopRange.end * sampleRate, sourceLength) : null,
+      loopStartFrame: hasLoop ? clampFramePrecise(this.loopRange.start * sampleRate, sourceLength) : null,
+      playing: this.isPlaying(),
+      sampleRate,
+    };
   }
 
   getDuration(): number {
