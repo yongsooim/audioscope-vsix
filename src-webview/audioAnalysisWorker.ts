@@ -548,6 +548,8 @@ fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
 const WEBGPU_SCALOGRAM_RENDER_SHADER = /* wgsl */`
 ${WEBGPU_PALETTE_SHADER_HELPERS}
 
+const SCALOGRAM_TAP_REDUCTION_SIZE: u32 = 32u;
+
 struct ComputeParams {
   header0: vec4<u32>,
   timing: vec4<f32>,
@@ -566,22 +568,34 @@ struct ScalogramRow {
   pad2: u32,
 };
 
+struct ScalogramTap {
+  sampleOffset: i32,
+  realWeight: f32,
+  imagWeight: f32,
+  normWeight: f32,
+};
+
 @group(0) @binding(0) var<uniform> params: ComputeParams;
 @group(0) @binding(1) var<storage, read> pcmSamples: array<f32>;
 @group(0) @binding(2) var<storage, read> rowMeta: array<ScalogramRow>;
-@group(0) @binding(3) var<storage, read> tapOffsets: array<i32>;
-@group(0) @binding(4) var<storage, read> realWeights: array<f32>;
-@group(0) @binding(5) var<storage, read> imagWeights: array<f32>;
-@group(0) @binding(6) var<storage, read> normWeights: array<f32>;
-@group(0) @binding(7) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var<storage, read> taps: array<ScalogramTap>;
+@group(0) @binding(4) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
-@compute @workgroup_size(8, 8)
-fn renderScalogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
-  let columnIndex = globalId.x;
-  let rowIndex = globalId.y;
+var<workgroup> partialReal: array<f32, SCALOGRAM_TAP_REDUCTION_SIZE>;
+var<workgroup> partialImaginary: array<f32, SCALOGRAM_TAP_REDUCTION_SIZE>;
+var<workgroup> partialNorm: array<f32, SCALOGRAM_TAP_REDUCTION_SIZE>;
+
+@compute @workgroup_size(32, 1, 1)
+fn renderScalogramTexture(
+  @builtin(workgroup_id) workgroupId: vec3<u32>,
+  @builtin(local_invocation_id) localId: vec3<u32>,
+) {
+  let columnIndex = workgroupId.x;
+  let rowIndex = workgroupId.y;
   let columnCount = params.header0.x;
   let rowCount = params.header0.y;
   let sampleCount = params.header0.z;
+  let localIndex = localId.x;
 
   if (columnIndex >= columnCount || rowIndex >= rowCount) {
     return;
@@ -601,7 +615,7 @@ fn renderScalogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
   var real = 0.0;
   var imaginary = 0.0;
   var norm = select(0.0, row.normalization, useFullNormalization);
-  var tapIndex = 0u;
+  var tapIndex = localIndex;
 
   loop {
     if (tapIndex >= row.tapCount) {
@@ -609,19 +623,52 @@ fn renderScalogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
 
     let packedIndex = row.tapOffset + tapIndex;
-    let sampleIndex = centerSample + tapOffsets[packedIndex];
+    let tap = taps[packedIndex];
+    let sampleIndex = centerSample + tap.sampleOffset;
     if (sampleIndex >= 0 && u32(sampleIndex) < sampleCount) {
       let sample = pcmSamples[u32(sampleIndex)];
-      real += sample * realWeights[packedIndex];
-      imaginary += sample * imagWeights[packedIndex];
+      real += sample * tap.realWeight;
+      imaginary += sample * tap.imagWeight;
       if (!useFullNormalization) {
-        norm += normWeights[packedIndex];
+        norm += tap.normWeight;
       }
     }
-    tapIndex += 1u;
+    tapIndex += SCALOGRAM_TAP_REDUCTION_SIZE;
   }
 
-  let power = select(0.0, ((real * real) + (imaginary * imaginary)) / max(norm, 1e-8), norm > 1e-8);
+  partialReal[localIndex] = real;
+  partialImaginary[localIndex] = imaginary;
+  partialNorm[localIndex] = norm;
+  workgroupBarrier();
+
+  var reductionStride = SCALOGRAM_TAP_REDUCTION_SIZE / 2u;
+  loop {
+    if (reductionStride == 0u) {
+      break;
+    }
+
+    if (localIndex < reductionStride) {
+      partialReal[localIndex] += partialReal[localIndex + reductionStride];
+      partialImaginary[localIndex] += partialImaginary[localIndex + reductionStride];
+      partialNorm[localIndex] += partialNorm[localIndex + reductionStride];
+    }
+
+    workgroupBarrier();
+    reductionStride = reductionStride / 2u;
+  }
+
+  if (localIndex != 0u) {
+    return;
+  }
+
+  let finalReal = partialReal[0];
+  let finalImaginary = partialImaginary[0];
+  let finalNorm = partialNorm[0];
+  let power = select(
+    0.0,
+    ((finalReal * finalReal) + (finalImaginary * finalImaginary)) / max(finalNorm, 1e-8),
+    finalNorm > 1e-8,
+  );
   let targetRow = i32((rowCount - 1u) - rowIndex);
   textureStore(
     outputTexture,
@@ -786,12 +833,9 @@ interface MelBandLayoutResource {
 type WebGpuStftLayoutResource = MelBandLayoutResource | SpectrogramBandLayoutResource;
 
 interface ScalogramKernelResource {
-  imagWeightBuffer: any;
   key: string;
-  normWeightBuffer: any;
-  offsetBuffer: any;
-  realWeightBuffer: any;
   rowBuffer: any;
+  tapBuffer: any;
 }
 
 interface WebGpuStftScratchSlot {
@@ -1226,17 +1270,8 @@ function destroyScalogramKernelResources(computeState: WebGpuScalogramComputeSta
     if (resource.rowBuffer && typeof resource.rowBuffer.destroy === 'function') {
       resource.rowBuffer.destroy();
     }
-    if (resource.offsetBuffer && typeof resource.offsetBuffer.destroy === 'function') {
-      resource.offsetBuffer.destroy();
-    }
-    if (resource.realWeightBuffer && typeof resource.realWeightBuffer.destroy === 'function') {
-      resource.realWeightBuffer.destroy();
-    }
-    if (resource.imagWeightBuffer && typeof resource.imagWeightBuffer.destroy === 'function') {
-      resource.imagWeightBuffer.destroy();
-    }
-    if (resource.normWeightBuffer && typeof resource.normWeightBuffer.destroy === 'function') {
-      resource.normWeightBuffer.destroy();
+    if (resource.tapBuffer && typeof resource.tapBuffer.destroy === 'function') {
+      resource.tapBuffer.destroy();
     }
   }
 
@@ -2817,10 +2852,7 @@ function getScalogramKernelResource(
   const maxFrequency = Math.max(minFrequency * 1.01, analysisState.maxFrequency);
   const rowBufferData = new ArrayBuffer(rowCount * 32);
   const rowView = new DataView(rowBufferData);
-  const offsets: number[] = [];
-  const realWeights: number[] = [];
-  const imagWeights: number[] = [];
-  const normWeights: number[] = [];
+  const taps: Array<{ imagWeight: number; normWeight: number; realWeight: number; sampleOffset: number }> = [];
   const twoPi = Math.PI * 2;
 
   for (let row = 0; row < rowCount; row += 1) {
@@ -2841,7 +2873,7 @@ function getScalogramKernelResource(
     let phaseSin = Math.sin(initialPhase);
     let normalization = 0;
     let offsetValue = -supportSamples;
-    const tapOffset = offsets.length;
+    const tapOffset = taps.length;
 
     for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
       const time = offsetValue / sampleRate;
@@ -2849,10 +2881,12 @@ function getScalogramKernelResource(
       const gaussian = Math.exp(-0.5 * normalizedTime * normalizedTime);
       const normWeight = gaussian * gaussian;
 
-      offsets.push(offsetValue);
-      realWeights.push(gaussian * phaseCos);
-      imagWeights.push(-gaussian * phaseSin);
-      normWeights.push(normWeight);
+      taps.push({
+        imagWeight: -gaussian * phaseSin,
+        normWeight,
+        realWeight: gaussian * phaseCos,
+        sampleOffset: offsetValue,
+      });
       normalization += normWeight;
 
       const nextPhaseCos = (phaseCos * stepCos) - (phaseSin * stepSin);
@@ -2864,18 +2898,26 @@ function getScalogramKernelResource(
     const rowOffset = row * 32;
     rowView.setUint32(rowOffset, tapOffset, true);
     rowView.setUint32(rowOffset + 4, tapCount, true);
-    rowView.setInt32(rowOffset + 8, offsets[tapOffset], true);
-    rowView.setInt32(rowOffset + 12, offsets[tapOffset + tapCount - 1], true);
+    rowView.setInt32(rowOffset + 8, taps[tapOffset]?.sampleOffset ?? 0, true);
+    rowView.setInt32(rowOffset + 12, taps[tapOffset + tapCount - 1]?.sampleOffset ?? 0, true);
     rowView.setFloat32(rowOffset + 16, normalization, true);
   }
 
+  const tapBufferData = new ArrayBuffer(taps.length * 16);
+  const tapView = new DataView(tapBufferData);
+  for (let tapIndex = 0; tapIndex < taps.length; tapIndex += 1) {
+    const tap = taps[tapIndex]!;
+    const byteOffset = tapIndex * 16;
+    tapView.setInt32(byteOffset, tap.sampleOffset, true);
+    tapView.setFloat32(byteOffset + 4, tap.realWeight, true);
+    tapView.setFloat32(byteOffset + 8, tap.imagWeight, true);
+    tapView.setFloat32(byteOffset + 12, tap.normWeight, true);
+  }
+
   const resource: ScalogramKernelResource = {
-    imagWeightBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Float32Array(imagWeights)),
     key: cacheKey,
-    normWeightBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Float32Array(normWeights)),
-    offsetBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Int32Array(offsets)),
-    realWeightBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Float32Array(realWeights)),
     rowBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, rowBufferData),
+    tapBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, tapBufferData),
   };
   computeState.kernelResources.set(cacheKey, resource);
   return resource;
@@ -3210,21 +3252,6 @@ function initializeWebGpuScalogramCompute(webGpu: WebGpuCompositorState): WebGpu
         },
         {
           binding: 4,
-          buffer: { type: 'read-only-storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 5,
-          buffer: { type: 'read-only-storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 6,
-          buffer: { type: 'read-only-storage' },
-          visibility: globals.shaderStage.COMPUTE,
-        },
-        {
-          binding: 7,
           storageTexture: {
             access: 'write-only',
             format: WEBGPU_TILE_TEXTURE_FORMAT as any,
@@ -3630,11 +3657,8 @@ async function renderScalogramTileWithWebGpu(
         { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
         { binding: 1, resource: { buffer: computeState.pcmBuffer } },
         { binding: 2, resource: { buffer: kernelResource.rowBuffer } },
-        { binding: 3, resource: { buffer: kernelResource.offsetBuffer } },
-        { binding: 4, resource: { buffer: kernelResource.realWeightBuffer } },
-        { binding: 5, resource: { buffer: kernelResource.imagWeightBuffer } },
-        { binding: 6, resource: { buffer: kernelResource.normWeightBuffer } },
-        { binding: 7, resource: tileRecord.gpuTextureView },
+        { binding: 3, resource: { buffer: kernelResource.tapBuffer } },
+        { binding: 4, resource: tileRecord.gpuTextureView },
       ],
     });
     const commandEncoder = webGpu.device.createCommandEncoder();
@@ -3642,8 +3666,8 @@ async function renderScalogramTileWithWebGpu(
     computePass.setPipeline(computeState.renderPipeline);
     computePass.setBindGroup(0, bindGroup, [0]);
     computePass.dispatchWorkgroups(
-      Math.ceil(tileRecord.columnCount / 8),
-      Math.ceil(plan.rowCount / 8),
+      tileRecord.columnCount,
+      plan.rowCount,
     );
     computePass.end();
     webGpu.device.queue.submit([commandEncoder.finish()]);
