@@ -719,6 +719,10 @@ function applyTransportCommand(command: TransportCommand | null): void {
     case 'seek':
       setPlaybackPositionFromFrame(command.frame);
       return;
+    case 'clearLoopAndSeek':
+      state.audioTransport?.setLoop(null);
+      setPlaybackPositionFromFrame(command.frame);
+      return;
     case 'setLoop':
       state.audioTransport?.setLoop({
         end: frameToSeconds(command.endFrame),

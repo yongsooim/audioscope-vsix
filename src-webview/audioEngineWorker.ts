@@ -717,7 +717,7 @@ function handleWheelIntent(intent: Extract<ViewportIntent, { kind: 'wheel' }>): 
       ? WAVEFORM_FOLLOW_RATIO
       : clamp01(intent.pointerRatioX);
     const anchorFrame = state.viewport.followEnabled
-      ? clamp(Math.round(state.playbackClock.currentFrameFloat), 0, state.session.durationFrames)
+      ? getClampedPlaybackFrame()
       : getFrameAtPresentedRatio(intent.pointerRatioX);
 
     state.viewport.followEnabled = state.viewport.followEnabled && verticalMagnitude > 0.01;
@@ -753,7 +753,7 @@ function handleZoomStepIntent(direction: 'in' | 'out'): void {
     ? WAVEFORM_FOLLOW_RATIO
     : (state.hoverWaveformRatioX ?? 0.5);
   const anchorFrame = state.viewport.followEnabled
-    ? clamp(Math.round(state.playbackClock.currentFrameFloat), 0, state.session.durationFrames)
+    ? getClampedPlaybackFrame()
     : getFrameAtPresentedRatio(anchorRatio);
 
   applyZoomAroundFrame(anchorFrame, nextSpanFrames, anchorRatio);
@@ -811,6 +811,17 @@ function finishSelectionDrag(pointerRatioX: number, cancelled: boolean): void {
   }
 
   state.selectionDraftRangeFrames = null;
+
+  if (state.loopRangeFrames && !isFrameWithinRange(anchorFrame, state.loopRangeFrames)) {
+    state.loopRangeFrames = null;
+    queueTransportCommand({
+      frame: anchorFrame,
+      serial: nextTransportCommandSerial(),
+      type: 'clearLoopAndSeek',
+    });
+    return;
+  }
+
   queueTransportCommand({
     frame: anchorFrame,
     serial: nextTransportCommandSerial(),
@@ -864,6 +875,14 @@ function applyZoomAroundFrame(anchorFrame: number, requestedSpanFrames: number, 
   setTargetRange(nextStartFrame, nextStartFrame + nextSpanFrames);
 }
 
+function getClampedPlaybackFrame(): number {
+  return clamp(
+    Number.isFinite(state.playbackClock.currentFrameFloat) ? state.playbackClock.currentFrameFloat : 0,
+    0,
+    Math.max(0, state.session.durationFrames),
+  );
+}
+
 function getAdjustedLoopRange(baseRange: RangeFrames, edge: 'end' | 'start', pointerRatioX: number): RangeFrames {
   const nextFrame = getFrameAtPresentedRatio(pointerRatioX);
   const minLoopFrames = getMinimumLoopFrames();
@@ -893,6 +912,10 @@ function normalizeCommittedLoopRange(startFrame: number, endFrame: number): Rang
   return nextRange.endFrame - nextRange.startFrame >= getMinimumLoopFrames()
     ? nextRange
     : null;
+}
+
+function isFrameWithinRange(frame: number, range: RangeFrames): boolean {
+  return frame >= range.startFrame && frame < range.endFrame;
 }
 
 function getMinimumLoopFrames(): number {
@@ -932,11 +955,7 @@ function applyFollowSolver(): void {
 
   const currentRange = getTargetRange();
   const spanFrames = Math.max(1, currentRange.endFrame - currentRange.startFrame);
-  const anchorFrame = clamp(
-    Math.round(state.playbackClock.currentFrameFloat),
-    0,
-    Math.max(0, state.session.durationFrames),
-  );
+  const anchorFrame = getClampedPlaybackFrame();
   const nextStartFrame = clamp(
     Math.round(anchorFrame - spanFrames * WAVEFORM_FOLLOW_RATIO),
     0,
@@ -1853,14 +1872,23 @@ function buildWaveformAxisTicks(range: RangeFrames): ViewportUiState['waveformAx
 
 function emitUiState(): void {
   const presentedRange = getPresentedRangeForInteraction();
-  const range = getTargetRange();
+  const range = presentedRange;
+  const playbackFrame = getClampedPlaybackFrame();
   const spanFrames = Math.max(0, range.endFrame - range.startFrame);
+  const followCursorLocked = state.viewport.followEnabled
+    && !isInteractionActive()
+    && range.startFrame > 0
+    && range.endFrame < state.session.durationFrames;
   const cursorPercent = spanFrames > 0
-    ? clamp(((state.playbackClock.currentFrameFloat - range.startFrame) / spanFrames) * 100, 0, 100)
+    ? followCursorLocked
+      ? WAVEFORM_FOLLOW_RATIO * 100
+      : clamp(((playbackFrame - range.startFrame) / spanFrames) * 100, 0, 100)
     : 0;
   const cursorVisible = spanFrames > 0
-    && state.playbackClock.currentFrameFloat >= range.startFrame
-    && state.playbackClock.currentFrameFloat <= range.endFrame;
+    && (
+      followCursorLocked
+      || (playbackFrame >= range.startFrame && playbackFrame <= range.endFrame)
+    );
   const selectionRange = state.selectionDraftRangeFrames ?? state.loopRangeFrames;
   const selectionUi = buildSelectionUi(selectionRange, spanFrames, range);
 
@@ -1871,7 +1899,7 @@ function emitUiState(): void {
     frequencyTicks: buildFrequencyTicks(),
     overview: {
       currentPercent: state.session.durationFrames > 0
-        ? clamp((state.playbackClock.currentFrameFloat / state.session.durationFrames) * 100, 0, 100)
+        ? clamp((playbackFrame / state.session.durationFrames) * 100, 0, 100)
         : 0,
       currentVisible: state.session.durationFrames > 0,
       viewportLeftPercent: state.session.durationFrames > 0

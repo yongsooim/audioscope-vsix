@@ -61,6 +61,11 @@ export type TransportCommand =
       type: 'seek';
     }
   | {
+      frame: number;
+      serial: number;
+      type: 'clearLoopAndSeek';
+    }
+  | {
       endFrame: number;
       serial: number;
       startFrame: number;
