@@ -33,7 +33,11 @@ const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SPECTROGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_ROW_BLOCK_SIZE = 32;
+const WEBGPU_OVERVIEW_TILE_SUBMIT_BATCH_SIZE = 2;
+const WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE = 4;
 const WEBGPU_LINEAR_WORKGROUP_SIZE = 64;
+const WEBGPU_STFT_PARAM_ENTRIES_PER_SLOT = 32;
+const WEBGPU_STFT_SCRATCH_SLOT_COUNT = WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE;
 const MAX_TILE_CACHE_ENTRIES = 24;
 const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
 const ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR = true;
@@ -732,6 +736,8 @@ interface RenderTileOptions {
   existingTile?: TileRecord | null;
   onChunkReady?: () => void;
   shouldAbort?: () => boolean;
+  deferWebGpuReady?: boolean;
+  webGpuSlotIndex?: number;
 }
 
 interface AnalysisWorkerState {
@@ -785,23 +791,27 @@ interface ScalogramKernelResource {
   rowBuffer: any;
 }
 
-interface WebGpuStftComputeState {
-  bandLayoutResources: Map<string, WebGpuStftLayoutResource>;
+interface WebGpuStftScratchSlot {
   baseInputBindGroup: any;
   basePingBuffer: any;
   basePongBuffer: any;
   fftBindGroupForward: any;
   fftBindGroupReverse: any;
-  fftBindGroupLayout: any;
-  fftPipeline: any;
-  inputBindGroupLayout: any;
-  inputPipeline: any;
   lowInputBindGroup: any;
   lowPingBuffer: any;
   lowPongBuffer: any;
   lowStageBindGroupForward: any;
   lowStageBindGroupReverse: any;
+}
+
+interface WebGpuStftComputeState {
+  bandLayoutResources: Map<string, WebGpuStftLayoutResource>;
+  fftBindGroupLayout: any;
+  fftPipeline: any;
+  inputBindGroupLayout: any;
+  inputPipeline: any;
   paramBuffer: any;
+  paramSetStride: number;
   paramStride: number;
   pcmBuffer: any;
   pcmSampleCount: number;
@@ -810,6 +820,7 @@ interface WebGpuStftComputeState {
   renderSpectrogramBindGroupLayout: any;
   renderSpectrogramPipeline: any;
   scratchFftSize: number;
+  scratchSlots: WebGpuStftScratchSlot[];
 }
 
 interface WebGpuScalogramComputeState {
@@ -1229,6 +1240,28 @@ function destroyScalogramKernelResources(computeState: WebGpuScalogramComputeSta
   computeState.kernelResources.clear();
 }
 
+function destroyWebGpuStftScratchSlots(computeState: WebGpuStftComputeState | null): void {
+  if (!computeState) {
+    return;
+  }
+
+  for (const slot of computeState.scratchSlots) {
+    for (const buffer of [
+      slot.basePingBuffer,
+      slot.basePongBuffer,
+      slot.lowPingBuffer,
+      slot.lowPongBuffer,
+    ]) {
+      if (buffer && typeof buffer.destroy === 'function') {
+        buffer.destroy();
+      }
+    }
+  }
+
+  computeState.scratchSlots = [];
+  computeState.scratchFftSize = 0;
+}
+
 function destroyWebGpuStftComputeState(computeState: WebGpuStftComputeState | null): void {
   if (!computeState) {
     return;
@@ -1236,11 +1269,9 @@ function destroyWebGpuStftComputeState(computeState: WebGpuStftComputeState | nu
 
   destroySpectrogramBandLayoutResources(computeState);
 
+  destroyWebGpuStftScratchSlots(computeState);
+
   for (const buffer of [
-    computeState.basePingBuffer,
-    computeState.basePongBuffer,
-    computeState.lowPingBuffer,
-    computeState.lowPongBuffer,
     computeState.paramBuffer,
     computeState.pcmBuffer,
   ]) {
@@ -1249,14 +1280,10 @@ function destroyWebGpuStftComputeState(computeState: WebGpuStftComputeState | nu
     }
   }
 
-  computeState.basePingBuffer = null;
-  computeState.basePongBuffer = null;
-  computeState.lowPingBuffer = null;
-  computeState.lowPongBuffer = null;
   computeState.paramBuffer = null;
   computeState.pcmBuffer = null;
   computeState.pcmSampleCount = 0;
-  computeState.scratchFftSize = 0;
+  computeState.paramSetStride = 0;
 }
 
 function destroyWebGpuScalogramComputeState(computeState: WebGpuScalogramComputeState | null): void {
@@ -1283,6 +1310,7 @@ function resetWebGpuComputeSessionResources(): void {
   }
 
   destroySpectrogramBandLayoutResources(webGpu.stftCompute);
+  destroyWebGpuStftScratchSlots(webGpu.stftCompute);
   if (webGpu.stftCompute?.pcmBuffer && typeof webGpu.stftCompute.pcmBuffer.destroy === 'function') {
     webGpu.stftCompute.pcmBuffer.destroy();
     webGpu.stftCompute.pcmBuffer = null;
@@ -2048,6 +2076,20 @@ function getPlanTileRenderOrder(plan: RenderRequestPlan): number[] {
   return ordered;
 }
 
+function getWebGpuTileSubmitBatchSize(plan: RenderRequestPlan): number {
+  if (
+    !surfaceState.webGpu
+    || !canUseWebGpuNativeCompute(plan)
+    || plan.analysisType === 'scalogram'
+  ) {
+    return 1;
+  }
+
+  return plan.requestKind === 'visible'
+    ? WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE
+    : WEBGPU_OVERVIEW_TILE_SUBMIT_BATCH_SIZE;
+}
+
 async function ensurePlanTiles(
   runtime: WaveCoreRuntime,
   plan: RenderRequestPlan,
@@ -2056,31 +2098,47 @@ async function ensurePlanTiles(
   const onTileReady = typeof options.onTileReady === 'function' ? options.onTileReady : null;
   const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
   const tileIndices = getPlanTileRenderOrder(plan);
+  const submitBatchSize = getWebGpuTileSubmitBatchSize(plan);
 
-  for (const tileIndex of tileIndices) {
-    if (shouldAbort?.()) {
-      return false;
-    }
+  for (let batchStart = 0; batchStart < tileIndices.length; batchStart += submitBatchSize) {
+    let batchRendered = false;
+    const batchEnd = Math.min(tileIndices.length, batchStart + submitBatchSize);
 
-    const cacheKey = buildTileCacheKey(plan, tileIndex);
-    const tileStart = tileIndex * plan.tileDuration;
-    const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
-    const existingTile = getTileRecord(cacheKey);
-
-    if (!existingTile || existingTile.complete !== true) {
-      const tileRecord = await renderTile(runtime, plan, tileIndex, tileStart, tileEnd, {
-        cacheKey,
-        existingTile,
-        onChunkReady: onTileReady,
-        shouldAbort,
-      });
-
-      if (!tileRecord) {
+    for (let batchIndex = batchStart; batchIndex < batchEnd; batchIndex += 1) {
+      const tileIndex = tileIndices[batchIndex];
+      if (shouldAbort?.()) {
         return false;
+      }
+
+      const cacheKey = buildTileCacheKey(plan, tileIndex);
+      const tileStart = tileIndex * plan.tileDuration;
+      const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
+      const existingTile = getTileRecord(cacheKey);
+
+      if (!existingTile || existingTile.complete !== true) {
+        const tileRecord = await renderTile(runtime, plan, tileIndex, tileStart, tileEnd, {
+          cacheKey,
+          deferWebGpuReady: submitBatchSize > 1,
+          existingTile,
+          onChunkReady: submitBatchSize > 1 ? undefined : onTileReady,
+          shouldAbort,
+          webGpuSlotIndex: batchIndex - batchStart,
+        });
+
+        if (!tileRecord) {
+          return false;
+        }
+
+        batchRendered = true;
+      } else if (submitBatchSize === 1) {
+        onTileReady?.();
       }
     }
 
-    onTileReady?.();
+    if (submitBatchSize > 1 && batchRendered) {
+      onTileReady?.();
+    }
+
     await yieldToEventLoop();
   }
 
@@ -2221,6 +2279,10 @@ async function renderTile(
   const cacheKey = typeof options.cacheKey === 'string' ? options.cacheKey : buildTileCacheKey(plan, tileIndex);
   const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
   const onChunkReady = typeof options.onChunkReady === 'function' ? options.onChunkReady : null;
+  const deferWebGpuReady = options.deferWebGpuReady === true;
+  const webGpuSlotIndex = Number.isFinite(options.webGpuSlotIndex)
+    ? Math.max(0, Math.min(WEBGPU_STFT_SCRATCH_SLOT_COUNT - 1, Math.trunc(options.webGpuSlotIndex as number)))
+    : 0;
   const chunkColumnCount = plan.analysisType === 'scalogram'
     ? SCALOGRAM_COLUMN_CHUNK_SIZE
     : SPECTROGRAM_COLUMN_CHUNK_SIZE;
@@ -2240,8 +2302,10 @@ async function renderTile(
       await surfaceState.webGpuInitPromise;
     }
 
-    if (surfaceState.webGpu && await renderTileWithWebGpu(plan, tileRecord, tileStart, tileEnd)) {
-      onChunkReady?.();
+    if (surfaceState.webGpu && await renderTileWithWebGpu(plan, tileRecord, tileStart, tileEnd, webGpuSlotIndex)) {
+      if (!deferWebGpuReady) {
+        onChunkReady?.();
+      }
       return tileRecord;
     }
   }
@@ -2930,8 +2994,9 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
     const spectrogramRenderModule = webGpu.device.createShaderModule({ code: WEBGPU_SPECTROGRAM_RENDER_SHADER });
     const melRenderModule = webGpu.device.createShaderModule({ code: WEBGPU_MEL_RENDER_SHADER });
     const paramStride = 256;
+    const paramSetStride = paramStride * WEBGPU_STFT_PARAM_ENTRIES_PER_SLOT;
     const paramBuffer = webGpu.device.createBuffer({
-      size: paramStride * 32,
+      size: paramSetStride * WEBGPU_STFT_SCRATCH_SLOT_COUNT,
       usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM,
     });
     const inputBindGroupLayout = webGpu.device.createBindGroupLayout({
@@ -3046,12 +3111,7 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
 
     webGpu.stftCompute = {
       bandLayoutResources: new Map(),
-      baseInputBindGroup: null,
-      basePingBuffer: null,
-      basePongBuffer: null,
-      fftBindGroupForward: null,
       fftBindGroupLayout,
-      fftBindGroupReverse: null,
       fftPipeline: webGpu.device.createComputePipeline({
         compute: {
           entryPoint: 'runSpectrogramFftStage',
@@ -3071,12 +3131,8 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
           bindGroupLayouts: [inputBindGroupLayout],
         }),
       }),
-      lowInputBindGroup: null,
-      lowPingBuffer: null,
-      lowPongBuffer: null,
-      lowStageBindGroupForward: null,
-      lowStageBindGroupReverse: null,
       paramBuffer,
+      paramSetStride,
       paramStride,
       pcmBuffer: null,
       pcmSampleCount: 0,
@@ -3101,6 +3157,7 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
         }),
       }),
       scratchFftSize: 0,
+      scratchSlots: [],
     };
   } catch {
     return null;
@@ -3224,6 +3281,9 @@ function ensureWebGpuPcmBuffer(
     samples,
   );
   computeState.pcmSampleCount = samples.length;
+  if ('scratchSlots' in computeState) {
+    destroyWebGpuStftScratchSlots(computeState as WebGpuStftComputeState);
+  }
   return true;
 }
 
@@ -3238,85 +3298,90 @@ function ensureWebGpuStftScratchBuffers(
   }
 
   const spectrumByteLength = TILE_COLUMN_COUNT * plan.fftSize * Float32Array.BYTES_PER_ELEMENT * 2;
-  if (computeState.scratchFftSize !== plan.fftSize || !computeState.basePingBuffer || !computeState.basePongBuffer) {
-    for (const buffer of [
-      computeState.basePingBuffer,
-      computeState.basePongBuffer,
-      computeState.lowPingBuffer,
-      computeState.lowPongBuffer,
-    ]) {
-      if (buffer && typeof buffer.destroy === 'function') {
-        buffer.destroy();
-      }
+  const needsScratchRebuild =
+    computeState.scratchFftSize !== plan.fftSize
+    || computeState.scratchSlots.length !== WEBGPU_STFT_SCRATCH_SLOT_COUNT;
+
+  if (needsScratchRebuild) {
+    destroyWebGpuStftScratchSlots(computeState);
+
+    for (let slotIndex = 0; slotIndex < WEBGPU_STFT_SCRATCH_SLOT_COUNT; slotIndex += 1) {
+      const basePingBuffer = webGpu.device.createBuffer({
+        size: spectrumByteLength,
+        usage: globals.bufferUsage.STORAGE,
+      });
+      const basePongBuffer = webGpu.device.createBuffer({
+        size: spectrumByteLength,
+        usage: globals.bufferUsage.STORAGE,
+      });
+      const lowPingBuffer = webGpu.device.createBuffer({
+        size: spectrumByteLength,
+        usage: globals.bufferUsage.STORAGE,
+      });
+      const lowPongBuffer = webGpu.device.createBuffer({
+        size: spectrumByteLength,
+        usage: globals.bufferUsage.STORAGE,
+      });
+
+      computeState.scratchSlots.push({
+        baseInputBindGroup: webGpu.device.createBindGroup({
+          layout: computeState.inputBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+            { binding: 1, resource: { buffer: computeState.pcmBuffer } },
+            { binding: 2, resource: { buffer: basePingBuffer } },
+          ],
+        }),
+        basePingBuffer,
+        basePongBuffer,
+        fftBindGroupForward: webGpu.device.createBindGroup({
+          layout: computeState.fftBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+            { binding: 1, resource: { buffer: basePingBuffer } },
+            { binding: 2, resource: { buffer: basePongBuffer } },
+          ],
+        }),
+        fftBindGroupReverse: webGpu.device.createBindGroup({
+          layout: computeState.fftBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+            { binding: 1, resource: { buffer: basePongBuffer } },
+            { binding: 2, resource: { buffer: basePingBuffer } },
+          ],
+        }),
+        lowInputBindGroup: webGpu.device.createBindGroup({
+          layout: computeState.inputBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+            { binding: 1, resource: { buffer: computeState.pcmBuffer } },
+            { binding: 2, resource: { buffer: lowPingBuffer } },
+          ],
+        }),
+        lowPingBuffer,
+        lowPongBuffer,
+        lowStageBindGroupForward: webGpu.device.createBindGroup({
+          layout: computeState.fftBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+            { binding: 1, resource: { buffer: lowPingBuffer } },
+            { binding: 2, resource: { buffer: lowPongBuffer } },
+          ],
+        }),
+        lowStageBindGroupReverse: webGpu.device.createBindGroup({
+          layout: computeState.fftBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+            { binding: 1, resource: { buffer: lowPongBuffer } },
+            { binding: 2, resource: { buffer: lowPingBuffer } },
+          ],
+        }),
+      });
     }
 
-    computeState.basePingBuffer = webGpu.device.createBuffer({
-      size: spectrumByteLength,
-      usage: globals.bufferUsage.STORAGE,
-    });
-    computeState.basePongBuffer = webGpu.device.createBuffer({
-      size: spectrumByteLength,
-      usage: globals.bufferUsage.STORAGE,
-    });
-    computeState.lowPingBuffer = webGpu.device.createBuffer({
-      size: spectrumByteLength,
-      usage: globals.bufferUsage.STORAGE,
-    });
-    computeState.lowPongBuffer = webGpu.device.createBuffer({
-      size: spectrumByteLength,
-      usage: globals.bufferUsage.STORAGE,
-    });
     computeState.scratchFftSize = plan.fftSize;
   }
 
-  computeState.baseInputBindGroup = webGpu.device.createBindGroup({
-    layout: computeState.inputBindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-      { binding: 1, resource: { buffer: computeState.pcmBuffer } },
-      { binding: 2, resource: { buffer: computeState.basePingBuffer } },
-    ],
-  });
-  computeState.lowInputBindGroup = webGpu.device.createBindGroup({
-    layout: computeState.inputBindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-      { binding: 1, resource: { buffer: computeState.pcmBuffer } },
-      { binding: 2, resource: { buffer: computeState.lowPingBuffer } },
-    ],
-  });
-  computeState.fftBindGroupForward = webGpu.device.createBindGroup({
-    layout: computeState.fftBindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-      { binding: 1, resource: { buffer: computeState.basePingBuffer } },
-      { binding: 2, resource: { buffer: computeState.basePongBuffer } },
-    ],
-  });
-  computeState.fftBindGroupReverse = webGpu.device.createBindGroup({
-    layout: computeState.fftBindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-      { binding: 1, resource: { buffer: computeState.basePongBuffer } },
-      { binding: 2, resource: { buffer: computeState.basePingBuffer } },
-    ],
-  });
-  computeState.lowStageBindGroupForward = webGpu.device.createBindGroup({
-    layout: computeState.fftBindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-      { binding: 1, resource: { buffer: computeState.lowPingBuffer } },
-      { binding: 2, resource: { buffer: computeState.lowPongBuffer } },
-    ],
-  });
-  computeState.lowStageBindGroupReverse = webGpu.device.createBindGroup({
-    layout: computeState.fftBindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-      { binding: 1, resource: { buffer: computeState.lowPongBuffer } },
-      { binding: 2, resource: { buffer: computeState.lowPingBuffer } },
-    ],
-  });
   return true;
 }
 
@@ -3325,6 +3390,7 @@ async function renderStftTileWithWebGpu(
   tileRecord: TileRecord,
   tileStart: number,
   tileEnd: number,
+  scratchSlotIndex: number,
 ): Promise<boolean> {
   const webGpu = surfaceState.webGpu;
   if (!webGpu) {
@@ -3366,9 +3432,15 @@ async function renderStftTileWithWebGpu(
     columnCount * (plan.fftSize / 2),
     webGpu.device,
   );
+  const slotIndex = Math.max(0, Math.min(computeState.scratchSlots.length - 1, scratchSlotIndex));
+  const scratchSlot = computeState.scratchSlots[slotIndex] ?? null;
+  if (!scratchSlot) {
+    return false;
+  }
+  const slotParamOffsetBase = computeState.paramSetStride * slotIndex;
 
   try {
-    writeBufferAtOffset(computeState.paramBuffer, 0, createStftComputeParamsData(plan, {
+    writeBufferAtOffset(computeState.paramBuffer, slotParamOffsetBase, createStftComputeParamsData(plan, {
       columnCount,
       decimationFactor: 1,
       sampleCount,
@@ -3380,7 +3452,7 @@ async function renderStftTileWithWebGpu(
     }));
 
     if (useLowFrequencyEnhancement) {
-      writeBufferAtOffset(computeState.paramBuffer, computeState.paramStride, createStftComputeParamsData(plan, {
+      writeBufferAtOffset(computeState.paramBuffer, slotParamOffsetBase + computeState.paramStride, createStftComputeParamsData(plan, {
         columnCount,
         decimationFactor: plan.decimationFactor,
         sampleCount,
@@ -3395,7 +3467,7 @@ async function renderStftTileWithWebGpu(
     for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
       writeBufferAtOffset(
         computeState.paramBuffer,
-        computeState.paramStride * (2 + stageIndex),
+        slotParamOffsetBase + (computeState.paramStride * (2 + stageIndex)),
         createStftComputeParamsData(plan, {
           columnCount,
           decimationFactor: 1,
@@ -3409,7 +3481,7 @@ async function renderStftTileWithWebGpu(
       );
     }
 
-    const renderParamOffset = computeState.paramStride * (2 + stageCount);
+    const renderParamOffset = slotParamOffsetBase + (computeState.paramStride * (2 + stageCount));
     writeBufferAtOffset(computeState.paramBuffer, renderParamOffset, createStftComputeParamsData(plan, {
       columnCount,
       decimationFactor: 1,
@@ -3425,20 +3497,20 @@ async function renderStftTileWithWebGpu(
     const computePass = commandEncoder.beginComputePass();
 
     computePass.setPipeline(computeState.inputPipeline);
-    computePass.setBindGroup(0, computeState.baseInputBindGroup, [0]);
+    computePass.setBindGroup(0, scratchSlot.baseInputBindGroup, [slotParamOffsetBase]);
     computePass.dispatchWorkgroups(inputDispatchX, inputDispatchY);
 
-    if (useLowFrequencyEnhancement && computeState.lowInputBindGroup) {
-      computePass.setBindGroup(0, computeState.lowInputBindGroup, [computeState.paramStride]);
+    if (useLowFrequencyEnhancement && scratchSlot.lowInputBindGroup) {
+      computePass.setBindGroup(0, scratchSlot.lowInputBindGroup, [slotParamOffsetBase + computeState.paramStride]);
       computePass.dispatchWorkgroups(inputDispatchX, inputDispatchY);
     }
 
     computePass.setPipeline(computeState.fftPipeline);
     for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
-      const paramOffset = computeState.paramStride * (2 + stageIndex);
+      const paramOffset = slotParamOffsetBase + (computeState.paramStride * (2 + stageIndex));
       computePass.setBindGroup(
         0,
-        stageIndex % 2 === 0 ? computeState.fftBindGroupForward : computeState.fftBindGroupReverse,
+        stageIndex % 2 === 0 ? scratchSlot.fftBindGroupForward : scratchSlot.fftBindGroupReverse,
         [paramOffset],
       );
       computePass.dispatchWorkgroups(fftDispatchX, fftDispatchY);
@@ -3446,19 +3518,19 @@ async function renderStftTileWithWebGpu(
 
     if (useLowFrequencyEnhancement) {
       for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
-        const paramOffset = computeState.paramStride * (2 + stageIndex);
+        const paramOffset = slotParamOffsetBase + (computeState.paramStride * (2 + stageIndex));
         computePass.setBindGroup(
           0,
-          stageIndex % 2 === 0 ? computeState.lowStageBindGroupForward : computeState.lowStageBindGroupReverse,
+          stageIndex % 2 === 0 ? scratchSlot.lowStageBindGroupForward : scratchSlot.lowStageBindGroupReverse,
           [paramOffset],
         );
         computePass.dispatchWorkgroups(fftDispatchX, fftDispatchY);
       }
     }
 
-    const finalBaseBuffer = stageCount % 2 === 0 ? computeState.basePingBuffer : computeState.basePongBuffer;
+    const finalBaseBuffer = stageCount % 2 === 0 ? scratchSlot.basePingBuffer : scratchSlot.basePongBuffer;
     const finalLowBuffer = useLowFrequencyEnhancement
-      ? (stageCount % 2 === 0 ? computeState.lowPingBuffer : computeState.lowPongBuffer)
+      ? (stageCount % 2 === 0 ? scratchSlot.lowPingBuffer : scratchSlot.lowPongBuffer)
       : finalBaseBuffer;
 
     if (plan.analysisType === 'mel') {
@@ -3588,10 +3660,11 @@ async function renderTileWithWebGpu(
   tileRecord: TileRecord,
   tileStart: number,
   tileEnd: number,
+  webGpuSlotIndex: number,
 ): Promise<boolean> {
   return plan.analysisType === 'scalogram'
     ? renderScalogramTileWithWebGpu(plan, tileRecord, tileStart, tileEnd)
-    : renderStftTileWithWebGpu(plan, tileRecord, tileStart, tileEnd);
+    : renderStftTileWithWebGpu(plan, tileRecord, tileStart, tileEnd, webGpuSlotIndex);
 }
 
 function ensureTileGpuResources(
