@@ -66,6 +66,7 @@ const WAVEFORM_RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 1.15;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 const MAX_TILE_CACHE_ENTRIES = 24;
 const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
+const WAVEFORM_PREVIEW_SAMPLE_TAPS = [-0.3, 0, 0.3] as const;
 
 const ANALYSIS_TYPE_CODES: Record<SpectrogramAnalysisType, number> = {
   spectrogram: 0,
@@ -197,6 +198,7 @@ interface EngineSessionState {
   spectrogramOutputPointer: number;
   tileCache: Map<string, TileRecord>;
   tileCacheBytes: number;
+  waveformBuildPending: boolean;
   waveformBuilt: boolean;
   waveformPcmPointer: number;
   waveformSlice: Float32Array | null;
@@ -354,6 +356,7 @@ function createEmptySessionState(): EngineSessionState {
     spectrogramOutputPointer: 0,
     tileCache: new Map(),
     tileCacheBytes: 0,
+    waveformBuildPending: false,
     waveformBuilt: false,
     waveformPcmPointer: 0,
     waveformSlice: null,
@@ -438,7 +441,6 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
   }
 
   getHeapF32View(runtime.module, pcmPointer, durationFrames).set(monoSamples);
-  runtime.module._wave_build_waveform_pyramid();
 
   state.session = {
     ...createEmptySessionState(),
@@ -451,7 +453,8 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
     runtimeVariant: runtime.variant,
     sampleRate,
     sessionRevision,
-    waveformBuilt: true,
+    waveformBuildPending: false,
+    waveformBuilt: false,
     waveformPcmPointer: pcmPointer,
   };
 
@@ -475,6 +478,48 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
   state.viewport.renderedEndFrame = 0;
   emitUiState();
   scheduleRender();
+  scheduleWaveformPyramidBuild(sessionRevision);
+}
+
+function scheduleWaveformPyramidBuild(sessionRevision: number): void {
+  if (
+    !state.session.initialized
+    || !state.session.module
+    || state.session.sessionRevision !== sessionRevision
+    || state.session.waveformBuilt
+    || state.session.waveformBuildPending
+  ) {
+    return;
+  }
+
+  state.session.waveformBuildPending = true;
+
+  self.setTimeout(() => {
+    try {
+      if (
+        !state.session.initialized
+        || !state.session.module
+        || state.session.sessionRevision !== sessionRevision
+      ) {
+        return;
+      }
+
+      state.session.module._wave_build_waveform_pyramid();
+
+      if (state.session.sessionRevision !== sessionRevision) {
+        return;
+      }
+
+      state.session.waveformBuilt = true;
+      state.session.waveformBuildPending = false;
+      scheduleRender();
+    } catch (error) {
+      if (state.session.sessionRevision === sessionRevision) {
+        state.session.waveformBuildPending = false;
+      }
+      postError(error);
+    }
+  }, 0);
 }
 
 function handlePlaybackClockTick(clock: PlaybackClockState): void {
@@ -1222,6 +1267,20 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
   const rawSamplePlotMode = plotMode === 'raw';
 
   if (!rawSamplePlotMode && !samplePlotMode) {
+    if (!state.session.waveformBuilt && sampleData instanceof Float32Array) {
+      drawWaveformPreview(
+        context,
+        canvas,
+        sampleData,
+        range.startFrame,
+        visibleSampleCount,
+        renderHeightCssPx,
+        surface.renderScale,
+        surface.color,
+      );
+      return plotMode;
+    }
+
     const slice = ensureWaveformSliceCapacity(module, columnCount * 2);
     if (!module._wave_extract_waveform_slice(
       viewStartSeconds,
@@ -2081,6 +2140,50 @@ function drawWaveformEnvelope(
     const minValue = slice[sourceIndex] ?? 0;
     const maxValue = slice[sourceIndex + 1] ?? 0;
     const symmetricPeak = Math.max(Math.abs(minValue), Math.abs(maxValue)) * SYMMETRIC_ENVELOPE_GAIN;
+    const top = clamp(Math.round(midY - symmetricPeak * amplitudeHeight), chartTop, chartBottom);
+    const bottom = clamp(Math.round(midY + symmetricPeak * amplitudeHeight), chartTop, chartBottom);
+    context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));
+  }
+}
+
+function drawWaveformPreview(
+  context: OffscreenCanvasRenderingContext2D,
+  canvas: OffscreenCanvas,
+  samples: Float32Array,
+  sampleStartFrame: number,
+  visibleSampleCount: number,
+  heightCssPx: number,
+  renderScale: number,
+  color: string,
+): void {
+  const deviceWidth = Math.max(1, canvas.width);
+  const deviceHeight = Math.max(1, canvas.height);
+  const chartTop = Math.round(WAVEFORM_TOP_PADDING_PX * renderScale);
+  const chartBottom = Math.max(chartTop + 1, Math.round((heightCssPx - WAVEFORM_BOTTOM_PADDING_PX) * renderScale));
+  const chartHeight = Math.max(1, chartBottom - chartTop);
+  const midY = chartTop + chartHeight * 0.5;
+  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
+  const drawColumns = Math.max(1, Math.min(deviceWidth, Math.round(deviceWidth)));
+  const samplesPerColumn = Math.max(1, visibleSampleCount / drawColumns);
+
+  context.imageSmoothingEnabled = true;
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, deviceWidth, deviceHeight);
+  context.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;
+  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, renderScale));
+  context.fillStyle = color;
+
+  for (let x = 0; x < drawColumns; x += 1) {
+    const columnCenter = sampleStartFrame + ((x + 0.5) * samplesPerColumn);
+    let peak = 0;
+    for (const tap of WAVEFORM_PREVIEW_SAMPLE_TAPS) {
+      const sampleValue = getInterpolatedSample(
+        samples,
+        columnCenter + (samplesPerColumn * tap),
+      );
+      peak = Math.max(peak, Math.abs(sampleValue));
+    }
+    const symmetricPeak = peak * SYMMETRIC_ENVELOPE_GAIN;
     const top = clamp(Math.round(midY - symmetricPeak * amplitudeHeight), chartTop, chartBottom);
     const bottom = clamp(Math.round(midY + symmetricPeak * amplitudeHeight), chartTop, chartBottom);
     context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));
