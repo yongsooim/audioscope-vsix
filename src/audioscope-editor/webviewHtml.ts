@@ -101,13 +101,21 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               <div id="spectrogram-meta-controls" class="spectrogram-meta-controls" hidden>
                 <label id="spectrogram-type-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Type</span>
-                  <select id="spectrogram-type-select" class="spectrogram-control-select" aria-label="Spectrogram analysis type">
-                    <option value="spectrogram" selected>Spectrogram</option>
-                    <option value="mel">Mel-Spectrogram</option>
-                    <option value="mfcc">MFCC</option>
-                    <option value="scalogram">Scalogram</option>
-                    <option value="chroma">Chroma</option>
-                  </select>
+                  <span class="spectrogram-control-inline">
+                    <select id="spectrogram-type-select" class="spectrogram-control-select" aria-label="Spectrogram analysis type">
+                      <option value="spectrogram" selected>Spectrogram</option>
+                      <option value="mel">Mel-Spectrogram</option>
+                      <option value="mfcc">MFCC</option>
+                      <option value="scalogram">Scalogram</option>
+                      <option value="chroma">Chroma</option>
+                    </select>
+                    <button
+                      id="spectrogram-reset-type-button"
+                      class="spectrogram-control-button"
+                      type="button"
+                      aria-label="Reset current spectrogram type settings to defaults"
+                    >Default</button>
+                  </span>
                 </label>
                 <label id="spectrogram-fft-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">FFT</span>

@@ -70,6 +70,14 @@ const DEFAULT_SCALOGRAM_ROW_DENSITY = 1;
 const DEFAULT_SCALOGRAM_MIN_FREQUENCY = 50;
 const DEFAULT_SCALOGRAM_MAX_FREQUENCY = 20000;
 const DEFAULT_SCALOGRAM_HOP_SAMPLES = 0;
+const DEFAULT_SPECTROGRAM_FFT_SIZE = 4096;
+const DEFAULT_SPECTROGRAM_OVERLAP_RATIO = 0.75;
+const DEFAULT_SPECTROGRAM_WINDOW_FUNCTION: SpectrogramWindowFunction = 'hann';
+const DEFAULT_SPECTROGRAM_FREQUENCY_SCALE: SpectrogramFrequencyScale = 'log';
+const DEFAULT_SPECTROGRAM_COLORMAP_DISTRIBUTION: SpectrogramColormapDistribution = 'balanced';
+const DEFAULT_MEL_BAND_COUNT = 256;
+const DEFAULT_MFCC_COEFFICIENT_COUNT = 20;
+const DEFAULT_MFCC_MEL_BAND_COUNT = 128;
 const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
   balanced: 2048,
   high: 1024,
@@ -406,6 +414,21 @@ function normalizeSpectrogramAnalysisType(value: unknown): SpectrogramAnalysisTy
 
 function normalizeSpectrogramColormapDistribution(value: unknown): SpectrogramColormapDistribution {
   return value === 'contrast' || value === 'soft' ? value : 'balanced';
+}
+
+function getSpectrogramAnalysisTypeLabel(analysisType: SpectrogramAnalysisType): string {
+  switch (analysisType) {
+    case 'mel':
+      return 'Mel-Spectrogram';
+    case 'mfcc':
+      return 'MFCC';
+    case 'scalogram':
+      return 'Scalogram';
+    case 'chroma':
+      return 'Chroma';
+    default:
+      return 'Spectrogram';
+  }
 }
 
 function getDefaultSpectrogramDbWindow(analysisType: SpectrogramAnalysisType): {
@@ -1344,6 +1367,9 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramDistributionSelect.value = normalizeSpectrogramColormapDistribution(
     state.spectrogramConfig.colormapDistribution,
   );
+  const analysisTypeLabel = getSpectrogramAnalysisTypeLabel(analysisType);
+  elements.spectrogramResetTypeButton.setAttribute('aria-label', `Reset ${analysisTypeLabel} settings to defaults`);
+  elements.spectrogramResetTypeButton.title = `Reset ${analysisTypeLabel} settings to defaults`;
 
   elements.spectrogramFftControl.hidden = isScalogram;
   elements.spectrogramOverlapControl.hidden = isScalogram || isChroma;
@@ -1449,6 +1475,55 @@ function applyPersistedSpectrogramDefaults(defaults: any): void {
   state.spectrogramConfig.scalogramOmega0 = normalizeSpectrogramScalogramOmega0(defaults?.scalogramOmega0);
   state.spectrogramConfig.scalogramRowDensity = normalizeSpectrogramScalogramRowDensity(defaults?.scalogramRowDensity);
   state.spectrogramConfig.windowFunction = normalizeSpectrogramWindowFunction(defaults?.windowFunction);
+}
+
+function resetCurrentSpectrogramTypeToDefaults(): void {
+  const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
+  const dbWindow = getDefaultSpectrogramDbWindow(analysisType);
+
+  state.spectrogramConfig.colormapDistribution = DEFAULT_SPECTROGRAM_COLORMAP_DISTRIBUTION;
+
+  switch (analysisType) {
+    case 'spectrogram':
+      state.spectrogramConfig.fftSize = DEFAULT_SPECTROGRAM_FFT_SIZE;
+      state.spectrogramConfig.overlapRatio = DEFAULT_SPECTROGRAM_OVERLAP_RATIO;
+      state.spectrogramConfig.windowFunction = DEFAULT_SPECTROGRAM_WINDOW_FUNCTION;
+      state.spectrogramConfig.frequencyScale = DEFAULT_SPECTROGRAM_FREQUENCY_SCALE;
+      state.spectrogramConfig.minDecibels = dbWindow.minDecibels;
+      state.spectrogramConfig.maxDecibels = dbWindow.maxDecibels;
+      break;
+    case 'mel':
+      state.spectrogramConfig.fftSize = DEFAULT_SPECTROGRAM_FFT_SIZE;
+      state.spectrogramConfig.overlapRatio = DEFAULT_SPECTROGRAM_OVERLAP_RATIO;
+      state.spectrogramConfig.windowFunction = DEFAULT_SPECTROGRAM_WINDOW_FUNCTION;
+      state.spectrogramConfig.melBandCount = DEFAULT_MEL_BAND_COUNT;
+      state.spectrogramConfig.minDecibels = dbWindow.minDecibels;
+      state.spectrogramConfig.maxDecibels = dbWindow.maxDecibels;
+      break;
+    case 'mfcc':
+      state.spectrogramConfig.fftSize = DEFAULT_SPECTROGRAM_FFT_SIZE;
+      state.spectrogramConfig.overlapRatio = DEFAULT_SPECTROGRAM_OVERLAP_RATIO;
+      state.spectrogramConfig.windowFunction = DEFAULT_SPECTROGRAM_WINDOW_FUNCTION;
+      state.spectrogramConfig.mfccCoefficientCount = DEFAULT_MFCC_COEFFICIENT_COUNT;
+      state.spectrogramConfig.mfccMelBandCount = DEFAULT_MFCC_MEL_BAND_COUNT;
+      break;
+    case 'scalogram':
+      state.spectrogramConfig.scalogramHopSamples = DEFAULT_SCALOGRAM_HOP_SAMPLES;
+      state.spectrogramConfig.scalogramMinFrequency = DEFAULT_SCALOGRAM_MIN_FREQUENCY;
+      state.spectrogramConfig.scalogramMaxFrequency = DEFAULT_SCALOGRAM_MAX_FREQUENCY;
+      state.spectrogramConfig.scalogramOmega0 = DEFAULT_SCALOGRAM_OMEGA0;
+      state.spectrogramConfig.scalogramRowDensity = DEFAULT_SCALOGRAM_ROW_DENSITY;
+      state.spectrogramConfig.minDecibels = dbWindow.minDecibels;
+      state.spectrogramConfig.maxDecibels = dbWindow.maxDecibels;
+      break;
+    case 'chroma':
+      state.spectrogramConfig.windowFunction = DEFAULT_SPECTROGRAM_WINDOW_FUNCTION;
+      state.spectrogramConfig.scalogramHopSamples = DEFAULT_SCALOGRAM_HOP_SAMPLES;
+      break;
+  }
+
+  refreshSpectrogramAnalysisConfig();
+  scheduleKeyboardSurfaceFocus();
 }
 
 function schedulePersistSpectrogramDefaults(): void {
@@ -2518,6 +2593,7 @@ function attachUiEvents(): void {
     waveFollowToggle,
     elements.waveClearLoop,
     elements.spectrogramMetaToggle,
+    elements.spectrogramResetTypeButton,
   ];
 
   for (const control of nonFocusableClickControls) {
@@ -2660,6 +2736,9 @@ function attachUiEvents(): void {
     state.spectrogramConfig.windowFunction = normalizeSpectrogramWindowFunction(elements.spectrogramWindowSelect.value);
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramResetTypeButton.addEventListener('click', () => {
+    resetCurrentSpectrogramTypeToDefaults();
   });
   elements.spectrogramMelBandsSelect.addEventListener('change', () => {
     state.spectrogramConfig.melBandCount = normalizeSpectrogramMelBandCount(elements.spectrogramMelBandsSelect.value);

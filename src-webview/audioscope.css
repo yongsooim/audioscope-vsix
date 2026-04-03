@@ -878,6 +878,19 @@ body {
   width: 100%;
 }
 
+.spectrogram-control-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+
+.spectrogram-control-inline .spectrogram-control-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .spectrogram-control-slider {
   align-items: start;
 }
@@ -916,6 +929,32 @@ body {
 .spectrogram-control-select:disabled {
   opacity: 0.56;
   cursor: not-allowed;
+}
+
+.spectrogram-control-button {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid rgba(191, 219, 254, 0.12);
+  border-radius: 7px;
+  background: rgba(10, 16, 29, 0.56);
+  color: rgba(245, 249, 255, 0.98);
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.spectrogram-control-button:hover {
+  border-color: rgba(191, 219, 254, 0.18);
+  background: rgba(12, 18, 33, 0.66);
+}
+
+.spectrogram-control-button:focus,
+.spectrogram-control-button:focus-visible {
+  outline: none !important;
+  border-color: rgba(191, 219, 254, 0.16);
+  box-shadow: none !important;
 }
 
 .spectrogram-control-slider-group {
