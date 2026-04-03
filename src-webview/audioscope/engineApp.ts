@@ -1169,10 +1169,13 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramScaleSelect.disabled = !supportsScale;
   elements.spectrogramMinDbSlider.value = String(dbWindow.minDecibels);
   elements.spectrogramMaxDbSlider.value = String(dbWindow.maxDecibels);
-  elements.spectrogramMinDbSlider.max = String(dbWindow.maxDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan);
-  elements.spectrogramMaxDbSlider.min = String(dbWindow.minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan);
-  elements.spectrogramMinDbValue.textContent = `${dbWindow.minDecibels} dB`;
-  elements.spectrogramMaxDbValue.textContent = `${dbWindow.maxDecibels} dB`;
+  const rangeStartPercent = ((dbWindow.minDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.min)
+    / (SPECTROGRAM_DB_WINDOW_LIMITS.max - SPECTROGRAM_DB_WINDOW_LIMITS.min)) * 100;
+  const rangeEndPercent = ((dbWindow.maxDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.min)
+    / (SPECTROGRAM_DB_WINDOW_LIMITS.max - SPECTROGRAM_DB_WINDOW_LIMITS.min)) * 100;
+  elements.spectrogramDbRangeGroup.style.setProperty('--range-start', `${rangeStartPercent.toFixed(3)}%`);
+  elements.spectrogramDbRangeGroup.style.setProperty('--range-end', `${rangeEndPercent.toFixed(3)}%`);
+  elements.spectrogramDbRangeValue.textContent = `Min ${dbWindow.minDecibels} / Max ${dbWindow.maxDecibels} dB`;
   setSpectrogramMetaOpen(state.spectrogramMetaOpen);
 }
 
@@ -1185,10 +1188,6 @@ function setSpectrogramMetaOpen(open: boolean): void {
     'aria-label',
     open ? 'Hide spectrogram settings' : 'Show spectrogram settings',
   );
-}
-
-function isSpectrogramMetaTarget(target: EventTarget | null): boolean {
-  return target instanceof Node && elements.spectrogramMeta.contains(target);
 }
 
 function getEffectiveSpectrogramRenderConfig() {
@@ -2268,17 +2267,11 @@ function attachUiEvents(): void {
     if (!isPlaybackRateUiTarget(event.target)) {
       closePlaybackRateMenu();
     }
-    if (state.spectrogramMetaOpen && !isSpectrogramMetaTarget(event.target)) {
-      setSpectrogramMetaOpen(false);
-    }
   }, true);
 
   document.addEventListener('focusin', (event) => {
     if (!isPlaybackRateUiTarget(event.target)) {
       closePlaybackRateMenu();
-    }
-    if (state.spectrogramMetaOpen && !isSpectrogramMetaTarget(event.target)) {
-      setSpectrogramMetaOpen(false);
     }
   });
 
@@ -2290,13 +2283,6 @@ function attachUiEvents(): void {
     if (event.code === 'Space' && !isTextEditableTarget(event.target)) {
       event.preventDefault();
       void togglePlayback();
-      return;
-    }
-
-    if (event.code === 'Escape' && state.spectrogramMetaOpen) {
-      event.preventDefault();
-      setSpectrogramMetaOpen(false);
-      scheduleKeyboardSurfaceFocus();
       return;
     }
 

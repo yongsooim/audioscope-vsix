@@ -442,38 +442,33 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="contrast">Contrast</option>
                   </select>
                 </label>
-                <label class="spectrogram-control spectrogram-control-slider">
-                  <span class="spectrogram-control-label">Min dB</span>
-                  <span class="spectrogram-control-slider-group">
+                <div class="spectrogram-control spectrogram-control-slider">
+                  <span class="spectrogram-control-label">Min/Max</span>
+                  <span id="spectrogram-db-range-group" class="spectrogram-control-slider-group spectrogram-control-slider-group-dual">
+                    <span class="spectrogram-control-range-dual" aria-hidden="true"></span>
                     <input
                       id="spectrogram-min-db-slider"
-                      class="spectrogram-control-range"
+                      class="spectrogram-control-range spectrogram-control-range-min"
                       type="range"
                       min="-120"
-                      max="-6"
+                      max="12"
                       step="1"
                       value="-80"
                       aria-label="Spectrogram minimum decibel"
                     />
-                    <span id="spectrogram-min-db-value" class="spectrogram-control-slider-value">-80 dB</span>
-                  </span>
-                </label>
-                <label class="spectrogram-control spectrogram-control-slider">
-                  <span class="spectrogram-control-label">Max dB</span>
-                  <span class="spectrogram-control-slider-group">
                     <input
                       id="spectrogram-max-db-slider"
-                      class="spectrogram-control-range"
+                      class="spectrogram-control-range spectrogram-control-range-max"
                       type="range"
-                      min="-74"
+                      min="-120"
                       max="12"
                       step="1"
                       value="0"
                       aria-label="Spectrogram maximum decibel"
                     />
-                    <span id="spectrogram-max-db-value" class="spectrogram-control-slider-value">0 dB</span>
+                    <span id="spectrogram-db-range-value" class="spectrogram-control-slider-value">Min -80 / Max 0 dB</span>
                   </span>
-                </label>
+                </div>
               </div>
             </div>
             <div id="spectrogram-hover-tooltip" class="surface-hover-tooltip surface-hover-tooltip-detail" aria-hidden="true"></div>

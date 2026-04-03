@@ -915,10 +915,90 @@ body {
   min-width: 118px;
 }
 
+.spectrogram-control-slider-group-dual {
+  position: relative;
+  min-width: 118px;
+  padding-top: 22px;
+}
+
+.spectrogram-control-range-dual {
+  position: absolute;
+  inset: 9px 0 auto 0;
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      90deg,
+      rgba(71, 85, 105, 0.44) 0%,
+      rgba(71, 85, 105, 0.44) var(--range-start, 0%),
+      rgba(96, 165, 250, 0.9) var(--range-start, 0%),
+      rgba(96, 165, 250, 0.9) var(--range-end, 100%),
+      rgba(71, 85, 105, 0.44) var(--range-end, 100%),
+      rgba(71, 85, 105, 0.44) 100%
+    );
+  pointer-events: none;
+}
+
 .spectrogram-control-range {
+  position: absolute;
+  inset: 0 0 auto 0;
   width: 100%;
   margin: 0;
-  accent-color: rgba(96, 165, 250, 0.92);
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+
+.spectrogram-control-range-min {
+  z-index: 2;
+}
+
+.spectrogram-control-range-max {
+  z-index: 3;
+}
+
+.spectrogram-control-range::-webkit-slider-runnable-track {
+  height: 22px;
+  background: transparent;
+}
+
+.spectrogram-control-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: 5px;
+  border: 1px solid rgba(191, 219, 254, 0.78);
+  border-radius: 999px;
+  background: rgba(248, 250, 252, 0.98);
+  box-shadow:
+    0 0 0 1px rgba(8, 13, 24, 0.82),
+    0 1px 4px rgba(15, 23, 42, 0.32);
+  pointer-events: auto;
+}
+
+.spectrogram-control-range::-moz-range-track {
+  height: 22px;
+  background: transparent;
+  border: 0;
+}
+
+.spectrogram-control-range::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: 1px solid rgba(191, 219, 254, 0.78);
+  border-radius: 999px;
+  background: rgba(248, 250, 252, 0.98);
+  box-shadow:
+    0 0 0 1px rgba(8, 13, 24, 0.82),
+    0 1px 4px rgba(15, 23, 42, 0.32);
+  pointer-events: auto;
+}
+
+.spectrogram-control-range:focus,
+.spectrogram-control-range:focus-visible {
+  outline: none !important;
 }
 
 .spectrogram-control-slider-value {
