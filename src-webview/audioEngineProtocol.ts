@@ -228,6 +228,11 @@ export interface SetSpectrogramConfigMessage {
     melBandCount: number;
     mfccCoefficientCount: number;
     mfccMelBandCount: number;
+    scalogramHopSamples: number;
+    scalogramMaxFrequency: number;
+    scalogramMinFrequency: number;
+    scalogramOmega0: number;
+    scalogramRowDensity: number;
     minDecibels: number;
     overlapRatio: number;
   };

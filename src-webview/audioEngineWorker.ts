@@ -55,6 +55,14 @@ const DEFAULT_MFCC_MEL_BAND_COUNT = 128;
 const MFCC_COEFFICIENT_OPTIONS = [13, 20, 32, 40];
 const LIBROSA_DEFAULT_MEL_BAND_COUNT = 256;
 const MEL_BAND_COUNT_OPTIONS = [128, 256, 512];
+const DEFAULT_SCALOGRAM_OMEGA0 = 6;
+const DEFAULT_SCALOGRAM_ROW_DENSITY = 1;
+const DEFAULT_SCALOGRAM_MIN_FREQUENCY = 50;
+const DEFAULT_SCALOGRAM_MAX_FREQUENCY = 20000;
+const DEFAULT_SCALOGRAM_HOP_SAMPLES = 1024;
+const SCALOGRAM_OMEGA_OPTIONS = [4, 5, 6, 7, 8, 10, 12];
+const SCALOGRAM_ROW_DENSITY_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 3, 4];
+const SCALOGRAM_HOP_SAMPLES_OPTIONS = [256, 512, 1024, 2048, 4096];
 const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
 const SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 28;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
@@ -103,12 +111,6 @@ const QUALITY_PRESETS = {
     lowFrequencyDecimationFactor: 4,
     rowsMultiplier: 4,
   },
-} as const;
-
-const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
-  balanced: 2048,
-  high: 1024,
-  max: 512,
 } as const;
 
 const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
@@ -168,12 +170,16 @@ interface SpectrogramPlan {
   hopSamples: number;
   hopSeconds: number;
   maxDecibels: number;
+  maxFrequency: number;
   melBandCount: number;
   minDecibels: number;
+  minFrequency: number;
   overlapRatio: number;
   pixelHeight: number;
   pixelWidth: number;
   rowCount: number;
+  scalogramOmega0: number;
+  scalogramRowDensity: number;
   startTileIndex: number;
   targetColumns: number;
   tileDurationSeconds: number;
@@ -249,6 +255,11 @@ interface EngineState {
     melBandCount: number;
     mfccCoefficientCount: number;
     mfccMelBandCount: number;
+    scalogramHopSamples: number;
+    scalogramMaxFrequency: number;
+    scalogramMinFrequency: number;
+    scalogramOmega0: number;
+    scalogramRowDensity: number;
     minDecibels: number;
     overlapRatio: number;
   };
@@ -310,6 +321,11 @@ const state: EngineState = {
     melBandCount: LIBROSA_DEFAULT_MEL_BAND_COUNT,
     mfccCoefficientCount: DEFAULT_MFCC_COEFFICIENT_COUNT,
     mfccMelBandCount: DEFAULT_MFCC_MEL_BAND_COUNT,
+    scalogramHopSamples: DEFAULT_SCALOGRAM_HOP_SAMPLES,
+    scalogramMaxFrequency: DEFAULT_SCALOGRAM_MAX_FREQUENCY,
+    scalogramMinFrequency: DEFAULT_SCALOGRAM_MIN_FREQUENCY,
+    scalogramOmega0: DEFAULT_SCALOGRAM_OMEGA0,
+    scalogramRowDensity: DEFAULT_SCALOGRAM_ROW_DENSITY,
     minDecibels: -80,
     overlapRatio: 0.75,
   },
@@ -651,6 +667,61 @@ function normalizeMfccMelBandCount(value: unknown): number {
     : DEFAULT_MFCC_MEL_BAND_COUNT;
 }
 
+function normalizeScalogramOmega0(value: unknown): number {
+  const numericValue = Number(value);
+  return SCALOGRAM_OMEGA_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_SCALOGRAM_OMEGA0;
+}
+
+function normalizeScalogramRowDensity(value: unknown): number {
+  const numericValue = Number(value);
+  return SCALOGRAM_ROW_DENSITY_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_SCALOGRAM_ROW_DENSITY;
+}
+
+function normalizeScalogramHopSamples(value: unknown): number {
+  const numericValue = Number(value);
+  return SCALOGRAM_HOP_SAMPLES_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_SCALOGRAM_HOP_SAMPLES;
+}
+
+function normalizeScalogramFrequencyRange(minValue: unknown, maxValue: unknown): {
+  maxFrequency: number;
+  minFrequency: number;
+} {
+  const ceiling = Math.max(
+    DEFAULT_SCALOGRAM_MIN_FREQUENCY + 1,
+    Math.min(MAX_FREQUENCY, Math.round(state.session.maxFrequency || DEFAULT_SCALOGRAM_MAX_FREQUENCY)),
+  );
+  let minFrequency = Number.isFinite(Number(minValue))
+    ? Math.round(Number(minValue))
+    : DEFAULT_SCALOGRAM_MIN_FREQUENCY;
+  let maxFrequency = Number.isFinite(Number(maxValue))
+    ? Math.round(Number(maxValue))
+    : Math.min(DEFAULT_SCALOGRAM_MAX_FREQUENCY, ceiling);
+
+  minFrequency = clamp(
+    minFrequency,
+    DEFAULT_SCALOGRAM_MIN_FREQUENCY,
+    Math.max(DEFAULT_SCALOGRAM_MIN_FREQUENCY, ceiling - 1),
+  );
+  maxFrequency = clamp(
+    maxFrequency,
+    Math.min(ceiling, minFrequency + 1),
+    ceiling,
+  );
+
+  if (maxFrequency <= minFrequency) {
+    maxFrequency = Math.min(ceiling, minFrequency + 1);
+    minFrequency = Math.min(minFrequency, maxFrequency - 1);
+  }
+
+  return { minFrequency, maxFrequency };
+}
+
 function handleSpectrogramConfig(config: {
   analysisType: SpectrogramAnalysisType;
   colormapDistribution: SpectrogramColormapDistribution;
@@ -660,6 +731,11 @@ function handleSpectrogramConfig(config: {
   melBandCount: number;
   mfccCoefficientCount: number;
   mfccMelBandCount: number;
+  scalogramHopSamples: number;
+  scalogramMaxFrequency: number;
+  scalogramMinFrequency: number;
+  scalogramOmega0: number;
+  scalogramRowDensity: number;
   minDecibels: number;
   overlapRatio: number;
 }): void {
@@ -681,6 +757,13 @@ function handleSpectrogramConfig(config: {
   const nextMelBandCount = normalizeMelBandCount(config.melBandCount);
   const nextMfccCoefficientCount = normalizeMfccCoefficientCount(config.mfccCoefficientCount);
   const nextMfccMelBandCount = normalizeMfccMelBandCount(config.mfccMelBandCount ?? config.melBandCount);
+  const nextScalogramHopSamples = normalizeScalogramHopSamples(config.scalogramHopSamples);
+  const nextScalogramOmega0 = normalizeScalogramOmega0(config.scalogramOmega0);
+  const nextScalogramRowDensity = normalizeScalogramRowDensity(config.scalogramRowDensity);
+  const nextScalogramFrequencyRange = normalizeScalogramFrequencyRange(
+    config.scalogramMinFrequency,
+    config.scalogramMaxFrequency,
+  );
   const nextDbWindow = normalizeSpectrogramDbWindow(
     config.minDecibels,
     config.maxDecibels,
@@ -696,6 +779,11 @@ function handleSpectrogramConfig(config: {
     || nextMelBandCount !== state.spectrogramConfig.melBandCount
     || nextMfccCoefficientCount !== state.spectrogramConfig.mfccCoefficientCount
     || nextMfccMelBandCount !== state.spectrogramConfig.mfccMelBandCount
+    || nextScalogramHopSamples !== state.spectrogramConfig.scalogramHopSamples
+    || nextScalogramFrequencyRange.minFrequency !== state.spectrogramConfig.scalogramMinFrequency
+    || nextScalogramFrequencyRange.maxFrequency !== state.spectrogramConfig.scalogramMaxFrequency
+    || Math.abs(nextScalogramOmega0 - state.spectrogramConfig.scalogramOmega0) > 1e-9
+    || Math.abs(nextScalogramRowDensity - state.spectrogramConfig.scalogramRowDensity) > 1e-9
     || Math.abs(nextOverlapRatio - state.spectrogramConfig.overlapRatio) > 1e-9
     || nextFrequencyScale !== state.spectrogramConfig.frequencyScale;
 
@@ -713,6 +801,11 @@ function handleSpectrogramConfig(config: {
     melBandCount: nextMelBandCount,
     mfccCoefficientCount: nextMfccCoefficientCount,
     mfccMelBandCount: nextMfccMelBandCount,
+    scalogramHopSamples: nextScalogramHopSamples,
+    scalogramMaxFrequency: nextScalogramFrequencyRange.maxFrequency,
+    scalogramMinFrequency: nextScalogramFrequencyRange.minFrequency,
+    scalogramOmega0: nextScalogramOmega0,
+    scalogramRowDensity: nextScalogramRowDensity,
     minDecibels: nextDbWindow.minDecibels,
     overlapRatio: nextOverlapRatio,
   };
@@ -1502,10 +1595,16 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     ? normalizeMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount)
     : normalizeMelBandCount(state.spectrogramConfig.melBandCount);
   const mfccCoefficientCount = normalizeMfccCoefficientCount(state.spectrogramConfig.mfccCoefficientCount);
+  const scalogramFrequencyRange = normalizeScalogramFrequencyRange(
+    state.spectrogramConfig.scalogramMinFrequency,
+    state.spectrogramConfig.scalogramMaxFrequency,
+  );
+  const scalogramOmega0 = normalizeScalogramOmega0(state.spectrogramConfig.scalogramOmega0);
+  const scalogramRowDensity = normalizeScalogramRowDensity(state.spectrogramConfig.scalogramRowDensity);
   const pixelWidth = Math.max(1, state.spectrogramSurface.pixelWidth);
   const pixelHeight = Math.max(1, state.spectrogramSurface.pixelHeight);
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
-  const rowOversample = analysisType === 'scalogram' ? 1 : VISIBLE_ROW_OVERSAMPLE;
+  const rowOversample = analysisType === 'scalogram' ? scalogramRowDensity : VISIBLE_ROW_OVERSAMPLE;
   const rowCount = analysisType === 'mel'
     ? effectiveMelBandCount
     : analysisType === 'mfcc'
@@ -1516,7 +1615,7 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
   );
   const hopSamples = analysisType === 'scalogram'
-    ? (SCALOGRAM_HOP_SAMPLES_BY_QUALITY[state.session.quality] ?? SCALOGRAM_HOP_SAMPLES_BY_QUALITY.high)
+    ? normalizeScalogramHopSamples(state.spectrogramConfig.scalogramHopSamples)
     : Math.max(1, Math.round(fftSize * (1 - overlapRatio)));
   const hopSeconds = hopSamples / state.session.sampleRate;
   const viewStartSeconds = framesToSeconds(range.startFrame);
@@ -1537,6 +1636,10 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     `fft${fftSize}`,
     `bands${analysisType === 'mel' || analysisType === 'mfcc' ? effectiveMelBandCount : 0}`,
     `coeff${analysisType === 'mfcc' ? mfccCoefficientCount : 0}`,
+    `min${analysisType === 'scalogram' ? scalogramFrequencyRange.minFrequency : state.session.minFrequency}`,
+    `max${analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : state.session.maxFrequency}`,
+    `omega${analysisType === 'scalogram' ? scalogramOmega0 : 0}`,
+    `density${analysisType === 'scalogram' ? scalogramRowDensity : 0}`,
     `db${dbWindow.minDecibels}:${dbWindow.maxDecibels}`,
     `ov${Math.round(overlapRatio * 1000)}`,
     `hop${hopSamples}`,
@@ -1555,12 +1658,16 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     hopSamples,
     hopSeconds,
     maxDecibels: dbWindow.maxDecibels,
+    maxFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : state.session.maxFrequency,
     melBandCount: effectiveMelBandCount,
     minDecibels: dbWindow.minDecibels,
+    minFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.minFrequency : state.session.minFrequency,
     overlapRatio,
     pixelHeight,
     pixelWidth,
     rowCount,
+    scalogramOmega0,
+    scalogramRowDensity,
     startTileIndex,
     targetColumns,
     tileDurationSeconds,
@@ -1629,13 +1736,14 @@ function renderSpectrogramTileChunk(
     plan.melBandCount,
     plan.fftSize,
     plan.decimationFactor,
-    state.session.minFrequency,
-    state.session.maxFrequency,
+    plan.minFrequency,
+    plan.maxFrequency,
     ANALYSIS_TYPE_CODES[plan.analysisType],
     FREQUENCY_SCALE_CODES[plan.frequencyScale],
     COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution] ?? COLORMAP_DISTRIBUTION_GAMMAS.balanced,
     plan.minDecibels,
     plan.maxDecibels,
+    plan.scalogramOmega0,
     state.session.spectrogramOutputPointer,
   );
 
@@ -1850,6 +1958,12 @@ function isEquivalentSpectrogramPlan(left: SpectrogramPlan | null, right: Spectr
     && left.fftSize === right.fftSize
     && left.minDecibels === right.minDecibels
     && left.maxDecibels === right.maxDecibels
+    && left.melBandCount === right.melBandCount
+    && left.hopSamples === right.hopSamples
+    && left.minFrequency === right.minFrequency
+    && left.maxFrequency === right.maxFrequency
+    && Math.abs(left.scalogramOmega0 - right.scalogramOmega0) <= 1e-9
+    && Math.abs(left.scalogramRowDensity - right.scalogramRowDensity) <= 1e-9
     && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-9
     && left.pixelWidth === right.pixelWidth
     && left.pixelHeight === right.pixelHeight
@@ -2042,9 +2156,25 @@ function sampleMfccValueAtFrame(frame: number, coefficient: number): number | nu
   return Number.isFinite(value) ? value : null;
 }
 
+function getActiveSpectrogramFrequencyRange(): {
+  maxFrequency: number;
+  minFrequency: number;
+} {
+  if (state.spectrogramConfig.analysisType === 'scalogram') {
+    return normalizeScalogramFrequencyRange(
+      state.spectrogramConfig.scalogramMinFrequency,
+      state.spectrogramConfig.scalogramMaxFrequency,
+    );
+  }
+
+  return {
+    minFrequency: state.session.minFrequency,
+    maxFrequency: state.session.maxFrequency,
+  };
+}
+
 function getSpectrogramFrequencyAtPosition(positionRatio: number): number {
-  const minFrequency = state.session.minFrequency;
-  const maxFrequency = state.session.maxFrequency;
+  const { minFrequency, maxFrequency } = getActiveSpectrogramFrequencyRange();
   const scaleMode = getActiveSpectrogramAxisMode();
   switch (scaleMode) {
     case 'linear':
@@ -2085,8 +2215,7 @@ function buildFrequencyTicks(): FrequencyTickUi[] {
     }));
   }
 
-  const minFrequency = state.session.minFrequency;
-  const maxFrequency = state.session.maxFrequency;
+  const { minFrequency, maxFrequency } = getActiveSpectrogramFrequencyRange();
   const axisMode = getActiveSpectrogramAxisMode();
   const frequencies = axisMode === 'linear'
     ? buildLinearFrequencyTicks(minFrequency, maxFrequency, SPECTROGRAM_LINEAR_TICK_COUNT)

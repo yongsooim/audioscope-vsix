@@ -83,6 +83,7 @@ export interface WaveCoreModule {
     distributionGamma: number,
     minDecibels: number,
     maxDecibels: number,
+    scalogramOmega0: number,
     outputPointer: number,
   ): number;
   memory: WebAssembly.Memory;

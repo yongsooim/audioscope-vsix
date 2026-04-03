@@ -144,7 +144,7 @@ pub const ScalogramKernelBank = struct {
     imag_weights: []f32 = &.{},
     norm_weights: []f32 = &.{},
 
-    pub fn init(row_count: i32, min_frequency: f32, max_frequency: f32) !ScalogramKernelBank {
+    pub fn init(row_count: i32, min_frequency: f32, max_frequency: f32, omega0: f32) !ScalogramKernelBank {
         var bank: ScalogramKernelBank = .{};
         errdefer bank.deinit();
 
@@ -156,7 +156,7 @@ pub const ScalogramKernelBank = struct {
             const row = @as(i32, @intCast(row_usize));
             const frequency = frequencyForScalogramRow(row, row_count, min_frequency, max_frequency);
             const safe_frequency = maxF32(1.0, frequency);
-            const scale_seconds = morlet_omega0 / (2.0 * std.math.pi * safe_frequency);
+            const scale_seconds = omega0 / (2.0 * std.math.pi * safe_frequency);
             const support_samples = minI32(
                 morlet_max_support_samples,
                 maxI32(24, @as(i32, @intFromFloat(@ceil(scale_seconds * morlet_support_sigma * g_session.sample_rate)))),
@@ -266,6 +266,7 @@ pub const ScalogramResource = struct {
     row_count: i32 = 0,
     min_frequency: f32 = 0.0,
     max_frequency: f32 = 0.0,
+    omega0: f32 = morlet_omega0,
     bank: ScalogramKernelBank = .{},
     center_samples: []i32 = &.{},
     next: ?*ScalogramResource = null,

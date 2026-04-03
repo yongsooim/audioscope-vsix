@@ -54,12 +54,25 @@ const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. R
 const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const SPECTROGRAM_MEL_BAND_OPTIONS = [128, 256, 512];
 const SPECTROGRAM_MFCC_COEFFICIENT_OPTIONS = [13, 20, 32, 40];
+const SPECTROGRAM_SCALOGRAM_HOP_OPTIONS = [0, 256, 512, 1024, 2048, 4096];
+const SPECTROGRAM_SCALOGRAM_OMEGA_OPTIONS = [4, 5, 6, 7, 8, 10, 12];
+const SPECTROGRAM_SCALOGRAM_ROW_DENSITY_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 3, 4];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
 const SPECTROGRAM_OVERVIEW_HEIGHT_SCALE = 0.7;
 const SPECTROGRAM_OVERVIEW_WIDTH_SCALE = 0.45;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
+const DEFAULT_SCALOGRAM_OMEGA0 = 6;
+const DEFAULT_SCALOGRAM_ROW_DENSITY = 1;
+const DEFAULT_SCALOGRAM_MIN_FREQUENCY = 50;
+const DEFAULT_SCALOGRAM_MAX_FREQUENCY = 20000;
+const DEFAULT_SCALOGRAM_HOP_SAMPLES = 0;
+const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
+  balanced: 2048,
+  high: 1024,
+  max: 512,
+} as const;
 const SPECTROGRAM_DB_WINDOW_LIMITS = {
   max: 12,
   min: -120,
@@ -98,6 +111,11 @@ type SpectrogramVisibleRequest = {
   maxDecibels: number;
   melBandCount: number;
   mfccCoefficientCount: number;
+  scalogramHopSamples: number;
+  scalogramMaxFrequency: number;
+  scalogramMinFrequency: number;
+  scalogramOmega0: number;
+  scalogramRowDensity: number;
   minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
@@ -224,6 +242,11 @@ const state = {
     melBandCount: 256,
     mfccCoefficientCount: 20,
     mfccMelBandCount: 128,
+    scalogramHopSamples: DEFAULT_SCALOGRAM_HOP_SAMPLES,
+    scalogramMaxFrequency: DEFAULT_SCALOGRAM_MAX_FREQUENCY,
+    scalogramMinFrequency: DEFAULT_SCALOGRAM_MIN_FREQUENCY,
+    scalogramOmega0: DEFAULT_SCALOGRAM_OMEGA0,
+    scalogramRowDensity: DEFAULT_SCALOGRAM_ROW_DENSITY,
     minDecibels: -80,
     overlapRatio: 0.75,
   },
@@ -440,6 +463,19 @@ function normalizeSpectrogramMelBandCount(value: unknown): number {
   return SPECTROGRAM_MEL_BAND_OPTIONS.includes(numericValue) ? numericValue : 256;
 }
 
+function getSpectrogramFrequencyCeiling(): number {
+  const analysisMaxFrequency = Number(state.analysis?.maxFrequency);
+  const fallbackCeiling = DEFAULT_SCALOGRAM_MAX_FREQUENCY;
+  if (!Number.isFinite(analysisMaxFrequency) || analysisMaxFrequency <= DEFAULT_SCALOGRAM_MIN_FREQUENCY + 1) {
+    return fallbackCeiling;
+  }
+
+  return Math.max(
+    DEFAULT_SCALOGRAM_MIN_FREQUENCY + 1,
+    Math.min(DEFAULT_SCALOGRAM_MAX_FREQUENCY, Math.round(analysisMaxFrequency)),
+  );
+}
+
 function normalizeSpectrogramMfccCoefficientCount(value: unknown): number {
   const numericValue = Number(value);
   return SPECTROGRAM_MFCC_COEFFICIENT_OPTIONS.includes(numericValue) ? numericValue : 20;
@@ -448,6 +484,70 @@ function normalizeSpectrogramMfccCoefficientCount(value: unknown): number {
 function normalizeSpectrogramMfccMelBandCount(value: unknown): number {
   const numericValue = Number(value);
   return SPECTROGRAM_MEL_BAND_OPTIONS.includes(numericValue) ? numericValue : 128;
+}
+
+function normalizeSpectrogramScalogramOmega0(value: unknown): number {
+  const numericValue = Number(value);
+  return SPECTROGRAM_SCALOGRAM_OMEGA_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_SCALOGRAM_OMEGA0;
+}
+
+function normalizeSpectrogramScalogramRowDensity(value: unknown): number {
+  const numericValue = Number(value);
+  return SPECTROGRAM_SCALOGRAM_ROW_DENSITY_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_SCALOGRAM_ROW_DENSITY;
+}
+
+function normalizeSpectrogramScalogramHopSetting(value: unknown): number {
+  const numericValue = Number(value);
+  return SPECTROGRAM_SCALOGRAM_HOP_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_SCALOGRAM_HOP_SAMPLES;
+}
+
+function getEffectiveScalogramHopSamples(value: unknown): number {
+  const normalizedValue = normalizeSpectrogramScalogramHopSetting(value);
+  if (normalizedValue > 0) {
+    return normalizedValue;
+  }
+
+  const quality = state.analysis?.quality === 'balanced' || state.analysis?.quality === 'max'
+    ? state.analysis.quality
+    : 'high';
+  return SCALOGRAM_HOP_SAMPLES_BY_QUALITY[quality] ?? SCALOGRAM_HOP_SAMPLES_BY_QUALITY.high;
+}
+
+function normalizeSpectrogramScalogramFrequencyRange(minValue: unknown, maxValue: unknown): {
+  maxFrequency: number;
+  minFrequency: number;
+} {
+  const ceiling = getSpectrogramFrequencyCeiling();
+  let minFrequency = Number.isFinite(Number(minValue))
+    ? Math.round(Number(minValue))
+    : DEFAULT_SCALOGRAM_MIN_FREQUENCY;
+  let maxFrequency = Number.isFinite(Number(maxValue))
+    ? Math.round(Number(maxValue))
+    : Math.min(DEFAULT_SCALOGRAM_MAX_FREQUENCY, ceiling);
+
+  minFrequency = clamp(
+    minFrequency,
+    DEFAULT_SCALOGRAM_MIN_FREQUENCY,
+    Math.max(DEFAULT_SCALOGRAM_MIN_FREQUENCY, ceiling - 1),
+  );
+  maxFrequency = clamp(
+    maxFrequency,
+    Math.min(ceiling, minFrequency + 1),
+    ceiling,
+  );
+
+  if (maxFrequency <= minFrequency) {
+    maxFrequency = Math.min(ceiling, minFrequency + 1);
+    minFrequency = Math.min(minFrequency, maxFrequency - 1);
+  }
+
+  return { minFrequency, maxFrequency };
 }
 
 function normalizeSpectrogramFrequencyScale(value: unknown): SpectrogramFrequencyScale {
@@ -1177,12 +1277,17 @@ function renderSpectrogramMeta(): void {
   const supportsScale = analysisType === 'spectrogram';
   const supportsMelBands = analysisType === 'mel';
   const supportsMfccOptions = analysisType === 'mfcc';
+  const supportsScalogramOptions = analysisType === 'scalogram';
   const supportsDbWindow = analysisType !== 'mfcc';
   const isScalogram = analysisType === 'scalogram';
   const dbWindow = normalizeSpectrogramDbWindow(
     state.spectrogramConfig.minDecibels,
     state.spectrogramConfig.maxDecibels,
     analysisType,
+  );
+  const scalogramFrequencyRange = normalizeSpectrogramScalogramFrequencyRange(
+    state.spectrogramConfig.scalogramMinFrequency,
+    state.spectrogramConfig.scalogramMaxFrequency,
   );
 
   elements.spectrogramTypeSelect.value = analysisType;
@@ -1198,6 +1303,17 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMfccMelBandsSelect.value = String(
     normalizeSpectrogramMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount),
   );
+  elements.spectrogramScalogramOmegaSelect.value = String(
+    normalizeSpectrogramScalogramOmega0(state.spectrogramConfig.scalogramOmega0),
+  );
+  elements.spectrogramScalogramDensitySelect.value = String(
+    normalizeSpectrogramScalogramRowDensity(state.spectrogramConfig.scalogramRowDensity),
+  );
+  elements.spectrogramScalogramMinFrequencyInput.value = String(scalogramFrequencyRange.minFrequency);
+  elements.spectrogramScalogramMaxFrequencyInput.value = String(scalogramFrequencyRange.maxFrequency);
+  elements.spectrogramScalogramHopSelect.value = String(
+    normalizeSpectrogramScalogramHopSetting(state.spectrogramConfig.scalogramHopSamples),
+  );
   elements.spectrogramDistributionSelect.value = normalizeSpectrogramColormapDistribution(
     state.spectrogramConfig.colormapDistribution,
   );
@@ -1208,6 +1324,11 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMelBandsControl.hidden = !supportsMelBands;
   elements.spectrogramMfccCoefficientsControl.hidden = !supportsMfccOptions;
   elements.spectrogramMfccMelBandsControl.hidden = !supportsMfccOptions;
+  elements.spectrogramScalogramOmegaControl.hidden = !supportsScalogramOptions;
+  elements.spectrogramScalogramDensityControl.hidden = !supportsScalogramOptions;
+  elements.spectrogramScalogramMinFrequencyControl.hidden = !supportsScalogramOptions;
+  elements.spectrogramScalogramMaxFrequencyControl.hidden = !supportsScalogramOptions;
+  elements.spectrogramScalogramHopControl.hidden = !supportsScalogramOptions;
   elements.spectrogramDbRangeControl.hidden = !supportsDbWindow;
   elements.spectrogramFftSelect.disabled = isScalogram;
   elements.spectrogramOverlapSelect.disabled = isScalogram;
@@ -1215,6 +1336,11 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMelBandsSelect.disabled = !supportsMelBands;
   elements.spectrogramMfccCoefficientsSelect.disabled = !supportsMfccOptions;
   elements.spectrogramMfccMelBandsSelect.disabled = !supportsMfccOptions;
+  elements.spectrogramScalogramOmegaSelect.disabled = !supportsScalogramOptions;
+  elements.spectrogramScalogramDensitySelect.disabled = !supportsScalogramOptions;
+  elements.spectrogramScalogramMinFrequencyInput.disabled = !supportsScalogramOptions;
+  elements.spectrogramScalogramMaxFrequencyInput.disabled = !supportsScalogramOptions;
+  elements.spectrogramScalogramHopSelect.disabled = !supportsScalogramOptions;
   elements.spectrogramMinDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMaxDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMinDbSlider.value = String(dbWindow.minDecibels);
@@ -1247,6 +1373,10 @@ function getEffectiveSpectrogramRenderConfig() {
     state.spectrogramConfig.maxDecibels,
     analysisType,
   );
+  const scalogramFrequencyRange = normalizeSpectrogramScalogramFrequencyRange(
+    state.spectrogramConfig.scalogramMinFrequency,
+    state.spectrogramConfig.scalogramMaxFrequency,
+  );
   return {
     analysisType,
     colormapDistribution: normalizeSpectrogramColormapDistribution(state.spectrogramConfig.colormapDistribution),
@@ -1260,6 +1390,11 @@ function getEffectiveSpectrogramRenderConfig() {
       : normalizeSpectrogramMelBandCount(state.spectrogramConfig.melBandCount),
     mfccCoefficientCount: normalizeSpectrogramMfccCoefficientCount(state.spectrogramConfig.mfccCoefficientCount),
     mfccMelBandCount: normalizeSpectrogramMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount),
+    scalogramHopSamples: getEffectiveScalogramHopSamples(state.spectrogramConfig.scalogramHopSamples),
+    scalogramMaxFrequency: scalogramFrequencyRange.maxFrequency,
+    scalogramMinFrequency: scalogramFrequencyRange.minFrequency,
+    scalogramOmega0: normalizeSpectrogramScalogramOmega0(state.spectrogramConfig.scalogramOmega0),
+    scalogramRowDensity: normalizeSpectrogramScalogramRowDensity(state.spectrogramConfig.scalogramRowDensity),
     minDecibels: dbWindow.minDecibels,
     overlapRatio: normalizeSpectrogramOverlapRatio(state.spectrogramConfig.overlapRatio),
   };
@@ -1386,6 +1521,13 @@ function isCompatibleVisibleRequest(
     && activeRequest.maxDecibels === renderConfig.maxDecibels
     && activeRequest.melBandCount === renderConfig.melBandCount
     && (renderConfig.analysisType !== 'mfcc' || activeRequest.mfccCoefficientCount === renderConfig.mfccCoefficientCount)
+    && (renderConfig.analysisType !== 'scalogram' || (
+      activeRequest.scalogramHopSamples === renderConfig.scalogramHopSamples
+      && activeRequest.scalogramMinFrequency === renderConfig.scalogramMinFrequency
+      && activeRequest.scalogramMaxFrequency === renderConfig.scalogramMaxFrequency
+      && Math.abs(activeRequest.scalogramOmega0 - renderConfig.scalogramOmega0) <= 1e-6
+      && Math.abs(activeRequest.scalogramRowDensity - renderConfig.scalogramRowDensity) <= 1e-6
+    ))
     && activeRequest.minDecibels === renderConfig.minDecibels
     && Math.abs(activeRequest.overlapRatio - renderConfig.overlapRatio) <= 1e-6
     && Math.abs(activeRequest.pixelWidth - size.pixelWidth) <= 1
@@ -1492,6 +1634,11 @@ function syncSpectrogramView({ force = false } = {}): void {
       maxDecibels: renderConfig.maxDecibels,
       melBandCount: renderConfig.melBandCount,
       mfccCoefficientCount: renderConfig.mfccCoefficientCount,
+      scalogramHopSamples: renderConfig.scalogramHopSamples,
+      scalogramMaxFrequency: renderConfig.scalogramMaxFrequency,
+      scalogramMinFrequency: renderConfig.scalogramMinFrequency,
+      scalogramOmega0: renderConfig.scalogramOmega0,
+      scalogramRowDensity: renderConfig.scalogramRowDensity,
       minDecibels: renderConfig.minDecibels,
       overlapRatio: renderConfig.overlapRatio,
       pixelHeight,
@@ -1523,6 +1670,11 @@ function syncSpectrogramView({ force = false } = {}): void {
       melBandCount: renderConfig.melBandCount,
       mfccCoefficientCount: renderConfig.mfccCoefficientCount,
       mfccMelBandCount: renderConfig.mfccMelBandCount,
+      scalogramHopSamples: renderConfig.scalogramHopSamples,
+      scalogramMaxFrequency: renderConfig.scalogramMaxFrequency,
+      scalogramMinFrequency: renderConfig.scalogramMinFrequency,
+      scalogramOmega0: renderConfig.scalogramOmega0,
+      scalogramRowDensity: renderConfig.scalogramRowDensity,
       minDecibels: renderConfig.minDecibels,
       overlapRatio: renderConfig.overlapRatio,
       pixelHeight,
@@ -1999,6 +2151,10 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
     if (Number(body.generation) !== state.analysis.generation) {
       return;
     }
+    const scalogramFrequencyRange = normalizeSpectrogramScalogramFrequencyRange(
+      body.scalogramMinFrequency,
+      body.scalogramMaxFrequency,
+    );
 
     state.analysis.activeVisibleRequest = {
       analysisType: normalizeSpectrogramAnalysisType(body.analysisType),
@@ -2012,6 +2168,11 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
       maxDecibels: Math.round(Number(body.maxDecibels) || 0),
       melBandCount: normalizeSpectrogramMelBandCount(body.melBandCount),
       mfccCoefficientCount: normalizeSpectrogramMfccCoefficientCount(body.mfccCoefficientCount),
+      scalogramHopSamples: Math.max(1, Math.round(Number(body.scalogramHopSamples) || 0)),
+      scalogramMaxFrequency: scalogramFrequencyRange.maxFrequency,
+      scalogramMinFrequency: scalogramFrequencyRange.minFrequency,
+      scalogramOmega0: normalizeSpectrogramScalogramOmega0(body.scalogramOmega0),
+      scalogramRowDensity: normalizeSpectrogramScalogramRowDensity(body.scalogramRowDensity),
       minDecibels: Math.round(Number(body.minDecibels) || 0),
       overlapRatio: Number(body.overlapRatio) || 0,
       pixelHeight: Number(body.pixelHeight) || 0,
@@ -2435,6 +2596,47 @@ function attachUiEvents(): void {
   elements.spectrogramMfccMelBandsSelect.addEventListener('change', () => {
     state.spectrogramConfig.mfccMelBandCount = normalizeSpectrogramMfccMelBandCount(
       elements.spectrogramMfccMelBandsSelect.value,
+    );
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramScalogramOmegaSelect.addEventListener('change', () => {
+    state.spectrogramConfig.scalogramOmega0 = normalizeSpectrogramScalogramOmega0(
+      elements.spectrogramScalogramOmegaSelect.value,
+    );
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramScalogramDensitySelect.addEventListener('change', () => {
+    state.spectrogramConfig.scalogramRowDensity = normalizeSpectrogramScalogramRowDensity(
+      elements.spectrogramScalogramDensitySelect.value,
+    );
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramScalogramMinFrequencyInput.addEventListener('change', () => {
+    const range = normalizeSpectrogramScalogramFrequencyRange(
+      elements.spectrogramScalogramMinFrequencyInput.value,
+      state.spectrogramConfig.scalogramMaxFrequency,
+    );
+    state.spectrogramConfig.scalogramMinFrequency = range.minFrequency;
+    state.spectrogramConfig.scalogramMaxFrequency = range.maxFrequency;
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramScalogramMaxFrequencyInput.addEventListener('change', () => {
+    const range = normalizeSpectrogramScalogramFrequencyRange(
+      state.spectrogramConfig.scalogramMinFrequency,
+      elements.spectrogramScalogramMaxFrequencyInput.value,
+    );
+    state.spectrogramConfig.scalogramMinFrequency = range.minFrequency;
+    state.spectrogramConfig.scalogramMaxFrequency = range.maxFrequency;
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramScalogramHopSelect.addEventListener('change', () => {
+    state.spectrogramConfig.scalogramHopSamples = normalizeSpectrogramScalogramHopSetting(
+      elements.spectrogramScalogramHopSelect.value,
     );
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();

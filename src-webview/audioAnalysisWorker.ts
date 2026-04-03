@@ -13,6 +13,12 @@ const LIBROSA_DEFAULT_MEL_BAND_COUNT = 256;
 const DEFAULT_MFCC_MEL_BAND_COUNT = 128;
 const MFCC_COEFFICIENT_OPTIONS = [13, 20, 32, 40];
 const MEL_BAND_COUNT_OPTIONS = [128, 256, 512];
+const DEFAULT_SCALOGRAM_OMEGA0 = 6;
+const DEFAULT_SCALOGRAM_ROW_DENSITY = 1;
+const DEFAULT_SCALOGRAM_HOP_SAMPLES = 1024;
+const SCALOGRAM_OMEGA_OPTIONS = [4, 5, 6, 7, 8, 10, 12];
+const SCALOGRAM_ROW_DENSITY_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 3, 4];
+const SCALOGRAM_HOP_SAMPLES_OPTIONS = [256, 512, 1024, 2048, 4096];
 
 const QUALITY_PRESETS = {
   balanced: {
@@ -52,7 +58,6 @@ const ENABLE_EXPERIMENTAL_WEBGPU_SPECTROGRAM_COMPUTE = true;
 const ENABLE_EXPERIMENTAL_WEBGPU_SCALOGRAM_FFT = true;
 const WEBGPU_TILE_TEXTURE_FORMAT = 'rgba8unorm';
 const SCALOGRAM_FFT_MAX_INPUT_SAMPLES = 131072;
-const MORLET_OMEGA0 = 6;
 const LOW_FREQUENCY_ENHANCEMENT_MAX_FREQUENCY = 1200;
 const MIXED_FREQUENCY_PIVOT_HZ = 1000;
 const MIXED_FREQUENCY_PIVOT_RATIO = 0.5;
@@ -73,11 +78,6 @@ const FREQUENCY_SCALE_CODES = {
   log: 0,
   linear: 1,
   mixed: 2,
-};
-const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
-  balanced: 2048,
-  high: 1024,
-  max: 512,
 };
 const COLORMAP_DISTRIBUTION_GAMMAS = {
   balanced: 1,
@@ -1029,6 +1029,11 @@ interface SpectrogramRequest {
   mfccMelBandCount?: number;
   minDecibels?: number;
   overlapRatio?: number;
+  scalogramHopSamples?: number;
+  scalogramMaxFrequency?: number;
+  scalogramMinFrequency?: number;
+  scalogramOmega0?: number;
+  scalogramRowDensity?: number;
   pixelHeight?: number;
   pixelWidth?: number;
   requestEnd?: number;
@@ -1083,14 +1088,18 @@ interface RenderRequestPlan {
   hopSamples: number;
   hopSeconds: number;
   maxDecibels: number;
+  maxFrequency: number;
   melBandCount: number;
   mfccCoefficientCount: number;
   minDecibels: number;
+  minFrequency: number;
   overlapRatio: number;
   pixelHeight: number;
   pixelWidth: number;
   requestKind: LayerKind;
   rowCount: number;
+  scalogramOmega0: number;
+  scalogramRowDensity: number;
   startTileIndex: number;
   targetColumns: number;
   tileDuration: number;
@@ -1582,10 +1591,6 @@ function normalizeFrequencyScale(value: unknown): FrequencyScale {
 
 function getEffectiveFrequencyScale(analysisType: AnalysisType, value: unknown): FrequencyScale {
   return analysisType === 'spectrogram' ? normalizeFrequencyScale(value) : 'log';
-}
-
-function getScalogramHopSamples(quality: QualityPreset): number {
-  return SCALOGRAM_HOP_SAMPLES_BY_QUALITY[quality] ?? SCALOGRAM_HOP_SAMPLES_BY_QUALITY.high;
 }
 
 function getWebGpuGlobals() {
@@ -2754,13 +2759,14 @@ function renderTileChunk(
     plan.melBandCount,
     plan.fftSize,
     plan.decimationFactor,
-    analysisState.minFrequency,
-    analysisState.maxFrequency,
+    plan.minFrequency,
+    plan.maxFrequency,
     ANALYSIS_TYPE_CODES[plan.analysisType] ?? ANALYSIS_TYPE_CODES.spectrogram,
     FREQUENCY_SCALE_CODES[plan.frequencyScale] ?? FREQUENCY_SCALE_CODES.log,
     COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution],
     plan.minDecibels,
     plan.maxDecibels,
+    plan.scalogramOmega0,
     analysisState.spectrogramOutputPointer,
   );
 
@@ -3356,8 +3362,9 @@ function buildScalogramKernelCacheKey(plan: RenderRequestPlan): string {
   return [
     `rows${plan.rowCount}`,
     `sr${analysisState.sampleRate}`,
-    `min${analysisState.minFrequency}`,
-    `max${analysisState.maxFrequency}`,
+    `min${plan.minFrequency}`,
+    `max${plan.maxFrequency}`,
+    `omega${plan.scalogramOmega0}`,
   ].join(':');
 }
 
@@ -3379,8 +3386,9 @@ function getScalogramKernelResource(
 
   const rowCount = Math.max(1, plan.rowCount);
   const sampleRate = analysisState.sampleRate;
-  const minFrequency = Math.max(1, analysisState.minFrequency);
-  const maxFrequency = Math.max(minFrequency * 1.01, analysisState.maxFrequency);
+  const minFrequency = Math.max(1, plan.minFrequency);
+  const maxFrequency = Math.max(minFrequency * 1.01, plan.maxFrequency);
+  const omega0 = Math.max(1, plan.scalogramOmega0);
   const rowBufferData = new ArrayBuffer(rowCount * 32);
   const rowView = new DataView(rowBufferData);
   const taps: Array<{ imagWeight: number; normWeight: number; realWeight: number; sampleOffset: number }> = [];
@@ -3389,7 +3397,7 @@ function getScalogramKernelResource(
   for (let row = 0; row < rowCount; row += 1) {
     const frequency = getScalogramFrequencyForRow(row, rowCount, minFrequency, maxFrequency);
     const safeFrequency = Math.max(1, frequency);
-    const scaleSeconds = 6 / (twoPi * safeFrequency);
+    const scaleSeconds = omega0 / (twoPi * safeFrequency);
     const supportSamples = Math.min(
       4096,
       Math.max(24, Math.ceil(scaleSeconds * 3 * sampleRate)),
@@ -3468,8 +3476,9 @@ function buildScalogramFftCacheKey(plan: RenderRequestPlan, fftSize: number): st
     `fft${fftSize}`,
     `rows${plan.rowCount}`,
     `sr${analysisState.sampleRate}`,
-    `min${analysisState.minFrequency}`,
-    `max${analysisState.maxFrequency}`,
+    `min${plan.minFrequency}`,
+    `max${plan.maxFrequency}`,
+    `omega${plan.scalogramOmega0}`,
   ].join(':');
 }
 
@@ -3493,8 +3502,9 @@ function getScalogramFftResource(
   const rowCount = Math.max(1, plan.rowCount);
   const halfFftSize = Math.max(1, Math.trunc(fftSize / 2));
   const sampleRate = analysisState.sampleRate;
-  const minFrequency = Math.max(1, analysisState.minFrequency);
-  const maxFrequency = Math.max(minFrequency * 1.01, analysisState.maxFrequency);
+  const minFrequency = Math.max(1, plan.minFrequency);
+  const maxFrequency = Math.max(minFrequency * 1.01, plan.maxFrequency);
+  const omega0 = Math.max(1, plan.scalogramOmega0);
   const rowData = new Float32Array(rowCount * 4);
   const waveletSpectrumData = new Float32Array(rowCount * halfFftSize);
   const twoPi = Math.PI * 2;
@@ -3503,7 +3513,7 @@ function getScalogramFftResource(
   for (let row = 0; row < rowCount; row += 1) {
     const frequency = getScalogramFrequencyForRow(row, rowCount, minFrequency, maxFrequency);
     const safeFrequency = Math.max(1, frequency);
-    const scaleSeconds = 6 / (twoPi * safeFrequency);
+    const scaleSeconds = omega0 / (twoPi * safeFrequency);
     const supportSamples = Math.min(
       4096,
       Math.max(24, Math.ceil(scaleSeconds * 3 * sampleRate)),
@@ -3545,7 +3555,7 @@ function getScalogramFftResource(
     for (let bin = 1; bin < halfFftSize; bin += 1) {
       const frequencyHz = (bin * sampleRate) / fftSize;
       waveletSpectrumData[waveletOffset + bin] = Math.exp(
-        -0.5 * (((scaleSeconds * twoPi * frequencyHz) - MORLET_OMEGA0) ** 2),
+        -0.5 * (((scaleSeconds * twoPi * frequencyHz) - omega0) ** 2),
       );
     }
   }
@@ -3929,9 +3939,9 @@ function createScalogramFftInputData(
   return data;
 }
 
-function getScalogramMaxSupportSamples(): number {
-  const safeFrequency = Math.max(1, analysisState.minFrequency);
-  const scaleSeconds = 6 / ((Math.PI * 2) * safeFrequency);
+function getScalogramMaxSupportSamples(plan: RenderRequestPlan): number {
+  const safeFrequency = Math.max(1, plan.minFrequency);
+  const scaleSeconds = Math.max(1, plan.scalogramOmega0) / ((Math.PI * 2) * safeFrequency);
   return Math.min(
     4096,
     Math.max(24, Math.ceil(scaleSeconds * 3 * analysisState.sampleRate)),
@@ -5045,7 +5055,7 @@ async function renderScalogramTileWithFftWebGpu(
     return false;
   }
 
-  const fftWindow = shouldUseFftBasedScalogramTile(tileStart, tileEnd, getScalogramMaxSupportSamples());
+  const fftWindow = shouldUseFftBasedScalogramTile(tileStart, tileEnd, getScalogramMaxSupportSamples(plan));
   if (!fftWindow) {
     return false;
   }
@@ -5557,13 +5567,21 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
   const fftSize = analysisType === 'scalogram' ? 0 : normalizeFftSize(request?.fftSize);
   const overlapRatio = analysisType === 'scalogram' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
   const mfccCoefficientCount = normalizeMfccCoefficientCount(request?.mfccCoefficientCount);
+  const scalogramOmega0 = normalizeScalogramOmega0(request?.scalogramOmega0);
+  const scalogramRowDensity = normalizeScalogramRowDensity(request?.scalogramRowDensity);
+  const scalogramFrequencyRange = normalizeScalogramFrequencyRange(
+    request?.scalogramMinFrequency,
+    request?.scalogramMaxFrequency,
+  );
   const melBandCount = analysisType === 'mfcc'
     ? normalizeMfccMelBandCount(request?.mfccMelBandCount ?? request?.melBandCount)
     : normalizeMelBandCount(request?.melBandCount);
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
   const rowOversample = requestKind === 'visible' && analysisType !== 'scalogram'
     ? VISIBLE_ROW_OVERSAMPLE
-    : 1;
+    : analysisType === 'scalogram'
+      ? scalogramRowDensity
+      : 1;
   const rowCount = analysisType === 'mel'
     ? melBandCount
     : analysisType === 'mfcc'
@@ -5574,7 +5592,7 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
   );
   const hopSamples = analysisType === 'scalogram'
-    ? getScalogramHopSamples(analysisState.quality)
+    ? normalizeScalogramHopSamples(request?.scalogramHopSamples)
     : Math.max(1, Math.round(fftSize * (1 - overlapRatio)));
   const secondsPerColumn = hopSamples / analysisState.sampleRate;
   const tileDuration = Math.max(secondsPerColumn * TILE_COLUMN_COUNT, 1 / analysisState.sampleRate);
@@ -5595,6 +5613,10 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     `fft${fftSize}`,
     `bands${analysisType === 'mel' || analysisType === 'mfcc' ? melBandCount : 0}`,
     `coeff${analysisType === 'mfcc' ? mfccCoefficientCount : 0}`,
+    `min${analysisType === 'scalogram' ? scalogramFrequencyRange.minFrequency : analysisState.minFrequency}`,
+    `max${analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : analysisState.maxFrequency}`,
+    `omega${analysisType === 'scalogram' ? scalogramOmega0 : 0}`,
+    `density${analysisType === 'scalogram' ? scalogramRowDensity : 0}`,
     `ov${Math.round(overlapRatio * 1000)}`,
     `hop${hopSamples}`,
     `rows${rowCount}`,
@@ -5616,14 +5638,18 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     hopSamples,
     hopSeconds: secondsPerColumn,
     maxDecibels: dbWindow.maxDecibels,
+    maxFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : analysisState.maxFrequency,
     melBandCount,
     mfccCoefficientCount,
     minDecibels: dbWindow.minDecibels,
+    minFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.minFrequency : analysisState.minFrequency,
     overlapRatio,
     pixelHeight,
     pixelWidth,
     requestKind,
     rowCount,
+    scalogramOmega0,
+    scalogramRowDensity,
     startTileIndex,
     targetColumns,
     tileDuration,
@@ -5656,13 +5682,18 @@ function createLayerReadyBody(plan: RenderRequestPlan) {
     hopSamples: plan.hopSamples,
     hopSeconds: plan.hopSeconds,
     maxDecibels: plan.maxDecibels,
+    maxFrequency: plan.maxFrequency,
     melBandCount: plan.melBandCount,
     mfccCoefficientCount: plan.mfccCoefficientCount,
     minDecibels: plan.minDecibels,
+    minFrequency: plan.minFrequency,
     overlapRatio: plan.overlapRatio,
     pixelHeight: plan.pixelHeight,
     pixelWidth: plan.pixelWidth,
     requestKind: plan.requestKind,
+    scalogramHopSamples: plan.hopSamples,
+    scalogramOmega0: plan.scalogramOmega0,
+    scalogramRowDensity: plan.scalogramRowDensity,
     runtimeVariant: analysisState.runtimeVariant,
     targetColumns: plan.targetColumns,
     targetRows: plan.rowCount,
@@ -5692,6 +5723,11 @@ function isEquivalentPlan(left: RenderRequestPlan | null, right: RenderRequestPl
     && left.maxDecibels === right.maxDecibels
     && left.melBandCount === right.melBandCount
     && left.mfccCoefficientCount === right.mfccCoefficientCount
+    && left.minFrequency === right.minFrequency
+    && left.maxFrequency === right.maxFrequency
+    && Math.abs(left.scalogramOmega0 - right.scalogramOmega0) <= 1e-6
+    && Math.abs(left.scalogramRowDensity - right.scalogramRowDensity) <= 1e-6
+    && left.hopSamples === right.hopSamples
     && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-6
     && Math.abs(left.viewStart - right.viewStart) <= 1e-6
     && Math.abs(left.viewEnd - right.viewEnd) <= 1e-6;
@@ -5712,6 +5748,61 @@ function normalizeMelBandCount(value: unknown): number {
   return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
     ? numericValue
     : LIBROSA_DEFAULT_MEL_BAND_COUNT;
+}
+
+function normalizeScalogramOmega0(value: unknown): number {
+  const numericValue = Number(value);
+  return SCALOGRAM_OMEGA_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_SCALOGRAM_OMEGA0;
+}
+
+function normalizeScalogramRowDensity(value: unknown): number {
+  const numericValue = Number(value);
+  return SCALOGRAM_ROW_DENSITY_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_SCALOGRAM_ROW_DENSITY;
+}
+
+function normalizeScalogramHopSamples(value: unknown): number {
+  const numericValue = Number(value);
+  return SCALOGRAM_HOP_SAMPLES_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_SCALOGRAM_HOP_SAMPLES;
+}
+
+function normalizeScalogramFrequencyRange(minValue: unknown, maxValue: unknown): {
+  maxFrequency: number;
+  minFrequency: number;
+} {
+  const ceiling = Math.max(
+    MIN_FREQUENCY + 1,
+    Math.min(MAX_FREQUENCY, Math.round(analysisState.maxFrequency || MAX_FREQUENCY)),
+  );
+  let minFrequency = Number.isFinite(Number(minValue))
+    ? Math.round(Number(minValue))
+    : MIN_FREQUENCY;
+  let maxFrequency = Number.isFinite(Number(maxValue))
+    ? Math.round(Number(maxValue))
+    : ceiling;
+
+  minFrequency = clamp(
+    minFrequency,
+    MIN_FREQUENCY,
+    Math.max(MIN_FREQUENCY, ceiling - 1),
+  );
+  maxFrequency = clamp(
+    maxFrequency,
+    Math.min(ceiling, minFrequency + 1),
+    ceiling,
+  );
+
+  if (maxFrequency <= minFrequency) {
+    maxFrequency = Math.min(ceiling, minFrequency + 1);
+    minFrequency = Math.min(minFrequency, maxFrequency - 1);
+  }
+
+  return { minFrequency, maxFrequency };
 }
 
 function normalizeMfccCoefficientCount(value: unknown): number {

@@ -332,12 +332,13 @@ fn getBandLayoutResource(
     return resource;
 }
 
-fn getScalogramResource(row_count: i32, min_frequency: f32, max_frequency: f32) ?*core.ScalogramResource {
+fn getScalogramResource(row_count: i32, min_frequency: f32, max_frequency: f32, omega0: f32) ?*core.ScalogramResource {
     var current = core.g_session.scalogram_resources;
     while (current) |resource| : (current = resource.next) {
         if (resource.row_count == row_count and
             core.approxEqF32(resource.min_frequency, min_frequency) and
-            core.approxEqF32(resource.max_frequency, max_frequency))
+            core.approxEqF32(resource.max_frequency, max_frequency) and
+            core.approxEqF32(resource.omega0, omega0))
         {
             return resource;
         }
@@ -348,7 +349,8 @@ fn getScalogramResource(row_count: i32, min_frequency: f32, max_frequency: f32) 
         .row_count = row_count,
         .min_frequency = min_frequency,
         .max_frequency = max_frequency,
-        .bank = core.ScalogramKernelBank.init(row_count, min_frequency, max_frequency) catch {
+        .omega0 = omega0,
+        .bank = core.ScalogramKernelBank.init(row_count, min_frequency, max_frequency, omega0) catch {
             core.allocator.destroy(resource);
             return null;
         },
@@ -784,6 +786,7 @@ fn renderScalogramTile(
     distribution_gamma: f32,
     min_db: f32,
     max_db: f32,
+    omega0: f32,
     output_ptr: usize,
 ) i32 {
     if (!core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
@@ -801,7 +804,8 @@ fn renderScalogramTile(
         return 0;
     }
 
-    const resource = getScalogramResource(row_count, safe_min_frequency, safe_max_frequency) orelse return 0;
+    const safe_omega0 = core.maxF32(1.0, omega0);
+    const resource = getScalogramResource(row_count, safe_min_frequency, safe_max_frequency, safe_omega0) orelse return 0;
     const kernel_bank = &resource.bank;
     const output = @as([*]u8, @ptrFromInt(output_ptr));
     const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(clamped_tile_end - clamped_tile_start)));
@@ -872,10 +876,10 @@ pub export fn wave_sample_mfcc_value_at_frame(
     const layout = getBandLayoutResource(
         .mfcc,
         .log,
-        coefficient_count,
-        mel_band_count,
         fft_size,
         1,
+        coefficient_count,
+        mel_band_count,
         safe_min_frequency,
         safe_max_frequency,
     ) orelse return std.math.nan(f32);
@@ -915,9 +919,10 @@ pub export fn wave_render_spectrogram_tile_rgba(
     distribution_gamma: f32,
     min_db: f32,
     max_db: f32,
+    scalogram_omega0: f32,
     output_ptr: usize,
 ) i32 {
-    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or decimation_factor <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or !core.isFiniteF32(core.g_session.duration) or core.g_session.sample_rate <= 0.0 or core.g_session.duration <= 0.0 or !core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or !core.isFiniteF32(distribution_gamma) or !core.isFiniteF32(min_db) or !core.isFiniteF32(max_db) or tile_end <= tile_start) {
+    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or decimation_factor <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or !core.isFiniteF32(core.g_session.duration) or core.g_session.sample_rate <= 0.0 or core.g_session.duration <= 0.0 or !core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or !core.isFiniteF32(distribution_gamma) or !core.isFiniteF32(min_db) or !core.isFiniteF32(max_db) or !core.isFiniteF32(scalogram_omega0) or tile_end <= tile_start) {
         return 0;
     }
 
@@ -935,6 +940,7 @@ pub export fn wave_render_spectrogram_tile_rgba(
             distribution_gamma,
             min_db,
             max_db,
+            scalogram_omega0,
             output_ptr,
         ),
         .mel, .mfcc, .spectrogram => if (fft_size > 0)
