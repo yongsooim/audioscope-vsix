@@ -917,6 +917,12 @@ body {
   min-width: 118px;
 }
 
+.spectrogram-control-slider-group-single {
+  position: relative;
+  min-width: 118px;
+  padding-top: 22px;
+}
+
 .spectrogram-control-slider-group-dual {
   position: relative;
   min-width: 118px;
@@ -941,6 +947,15 @@ body {
   pointer-events: none;
 }
 
+.spectrogram-control-range-single {
+  position: absolute;
+  inset: 9px 0 auto 0;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(71, 85, 105, 0.44);
+  pointer-events: none;
+}
+
 .spectrogram-control-range {
   position: absolute;
   inset: 0 0 auto 0;
@@ -958,6 +973,10 @@ body {
 
 .spectrogram-control-range-max {
   z-index: 3;
+}
+
+.spectrogram-control-range-single-input {
+  z-index: 2;
 }
 
 .spectrogram-control-range::-webkit-slider-runnable-track {

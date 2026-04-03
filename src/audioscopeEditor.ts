@@ -460,55 +460,22 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="512">512</option>
                   </select>
                 </label>
-                <label id="spectrogram-scalogram-omega-control" class="spectrogram-control" hidden>
+                <label id="spectrogram-scalogram-omega-control" class="spectrogram-control spectrogram-control-slider" hidden>
                   <span class="spectrogram-control-label">Omega0</span>
-                  <select id="spectrogram-scalogram-omega-select" class="spectrogram-control-select" aria-label="Scalogram wavelet cycles">
-                    <option value="4">4</option>
-                    <option value="5">5</option>
-                    <option value="6" selected>6</option>
-                    <option value="7">7</option>
-                    <option value="8">8</option>
-                    <option value="10">10</option>
-                    <option value="12">12</option>
-                  </select>
-                </label>
-                <label id="spectrogram-scalogram-density-control" class="spectrogram-control" hidden>
-                  <span class="spectrogram-control-label">Density</span>
-                  <select id="spectrogram-scalogram-density-select" class="spectrogram-control-select" aria-label="Scalogram row density">
-                    <option value="0.5">0.5x</option>
-                    <option value="0.75">0.75x</option>
-                    <option value="1" selected>1x</option>
-                    <option value="1.5">1.5x</option>
-                    <option value="2">2x</option>
-                    <option value="3">3x</option>
-                    <option value="4">4x</option>
-                  </select>
-                </label>
-                <label id="spectrogram-scalogram-min-frequency-control" class="spectrogram-control" hidden>
-                  <span class="spectrogram-control-label">Min Hz</span>
-                  <input
-                    id="spectrogram-scalogram-min-frequency-input"
-                    class="spectrogram-control-select"
-                    type="number"
-                    min="50"
-                    max="20000"
-                    step="1"
-                    value="50"
-                    aria-label="Scalogram minimum frequency"
-                  />
-                </label>
-                <label id="spectrogram-scalogram-max-frequency-control" class="spectrogram-control" hidden>
-                  <span class="spectrogram-control-label">Max Hz</span>
-                  <input
-                    id="spectrogram-scalogram-max-frequency-input"
-                    class="spectrogram-control-select"
-                    type="number"
-                    min="51"
-                    max="20000"
-                    step="1"
-                    value="20000"
-                    aria-label="Scalogram maximum frequency"
-                  />
+                  <span class="spectrogram-control-slider-group spectrogram-control-slider-group-single">
+                    <span class="spectrogram-control-range-single" aria-hidden="true"></span>
+                    <input
+                      id="spectrogram-scalogram-omega-slider"
+                      class="spectrogram-control-range spectrogram-control-range-single-input"
+                      type="range"
+                      min="0"
+                      max="6"
+                      step="1"
+                      value="2"
+                      aria-label="Scalogram wavelet cycles"
+                    />
+                    <span id="spectrogram-scalogram-omega-value" class="spectrogram-control-slider-value">6</span>
+                  </span>
                 </label>
                 <label id="spectrogram-scalogram-hop-control" class="spectrogram-control" hidden>
                   <span class="spectrogram-control-label">Hop</span>

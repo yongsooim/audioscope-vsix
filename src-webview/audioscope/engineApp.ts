@@ -493,6 +493,21 @@ function normalizeSpectrogramScalogramOmega0(value: unknown): number {
     : DEFAULT_SCALOGRAM_OMEGA0;
 }
 
+function getSpectrogramScalogramOmegaSliderIndex(value: unknown): number {
+  const normalizedValue = normalizeSpectrogramScalogramOmega0(value);
+  const optionIndex = SPECTROGRAM_SCALOGRAM_OMEGA_OPTIONS.indexOf(normalizedValue);
+  return optionIndex >= 0 ? optionIndex : SPECTROGRAM_SCALOGRAM_OMEGA_OPTIONS.indexOf(DEFAULT_SCALOGRAM_OMEGA0);
+}
+
+function getSpectrogramScalogramOmega0FromSlider(value: unknown): number {
+  const optionIndex = clamp(
+    Math.round(Number(value) || 0),
+    0,
+    SPECTROGRAM_SCALOGRAM_OMEGA_OPTIONS.length - 1,
+  );
+  return SPECTROGRAM_SCALOGRAM_OMEGA_OPTIONS[optionIndex] ?? DEFAULT_SCALOGRAM_OMEGA0;
+}
+
 function normalizeSpectrogramScalogramRowDensity(value: unknown): number {
   const numericValue = Number(value);
   return SPECTROGRAM_SCALOGRAM_ROW_DENSITY_OPTIONS.includes(numericValue)
@@ -1285,11 +1300,6 @@ function renderSpectrogramMeta(): void {
     state.spectrogramConfig.maxDecibels,
     analysisType,
   );
-  const scalogramFrequencyRange = normalizeSpectrogramScalogramFrequencyRange(
-    state.spectrogramConfig.scalogramMinFrequency,
-    state.spectrogramConfig.scalogramMaxFrequency,
-  );
-
   elements.spectrogramTypeSelect.value = analysisType;
   elements.spectrogramFftSelect.value = String(state.spectrogramConfig.fftSize);
   elements.spectrogramOverlapSelect.value = String(state.spectrogramConfig.overlapRatio);
@@ -1303,14 +1313,12 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMfccMelBandsSelect.value = String(
     normalizeSpectrogramMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount),
   );
-  elements.spectrogramScalogramOmegaSelect.value = String(
+  elements.spectrogramScalogramOmegaSlider.value = String(
+    getSpectrogramScalogramOmegaSliderIndex(state.spectrogramConfig.scalogramOmega0),
+  );
+  elements.spectrogramScalogramOmegaValue.textContent = String(
     normalizeSpectrogramScalogramOmega0(state.spectrogramConfig.scalogramOmega0),
   );
-  elements.spectrogramScalogramDensitySelect.value = String(
-    normalizeSpectrogramScalogramRowDensity(state.spectrogramConfig.scalogramRowDensity),
-  );
-  elements.spectrogramScalogramMinFrequencyInput.value = String(scalogramFrequencyRange.minFrequency);
-  elements.spectrogramScalogramMaxFrequencyInput.value = String(scalogramFrequencyRange.maxFrequency);
   elements.spectrogramScalogramHopSelect.value = String(
     normalizeSpectrogramScalogramHopSetting(state.spectrogramConfig.scalogramHopSamples),
   );
@@ -1325,9 +1333,6 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMfccCoefficientsControl.hidden = !supportsMfccOptions;
   elements.spectrogramMfccMelBandsControl.hidden = !supportsMfccOptions;
   elements.spectrogramScalogramOmegaControl.hidden = !supportsScalogramOptions;
-  elements.spectrogramScalogramDensityControl.hidden = !supportsScalogramOptions;
-  elements.spectrogramScalogramMinFrequencyControl.hidden = !supportsScalogramOptions;
-  elements.spectrogramScalogramMaxFrequencyControl.hidden = !supportsScalogramOptions;
   elements.spectrogramScalogramHopControl.hidden = !supportsScalogramOptions;
   elements.spectrogramDbRangeControl.hidden = !supportsDbWindow;
   elements.spectrogramFftSelect.disabled = isScalogram;
@@ -1336,10 +1341,7 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMelBandsSelect.disabled = !supportsMelBands;
   elements.spectrogramMfccCoefficientsSelect.disabled = !supportsMfccOptions;
   elements.spectrogramMfccMelBandsSelect.disabled = !supportsMfccOptions;
-  elements.spectrogramScalogramOmegaSelect.disabled = !supportsScalogramOptions;
-  elements.spectrogramScalogramDensitySelect.disabled = !supportsScalogramOptions;
-  elements.spectrogramScalogramMinFrequencyInput.disabled = !supportsScalogramOptions;
-  elements.spectrogramScalogramMaxFrequencyInput.disabled = !supportsScalogramOptions;
+  elements.spectrogramScalogramOmegaSlider.disabled = !supportsScalogramOptions;
   elements.spectrogramScalogramHopSelect.disabled = !supportsScalogramOptions;
   elements.spectrogramMinDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMaxDbSlider.disabled = !supportsDbWindow;
@@ -2600,37 +2602,16 @@ function attachUiEvents(): void {
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });
-  elements.spectrogramScalogramOmegaSelect.addEventListener('change', () => {
-    state.spectrogramConfig.scalogramOmega0 = normalizeSpectrogramScalogramOmega0(
-      elements.spectrogramScalogramOmegaSelect.value,
+  elements.spectrogramScalogramOmegaSlider.addEventListener('input', () => {
+    elements.spectrogramScalogramOmegaValue.textContent = String(
+      getSpectrogramScalogramOmega0FromSlider(elements.spectrogramScalogramOmegaSlider.value),
     );
-    refreshSpectrogramAnalysisConfig();
-    scheduleKeyboardSurfaceFocus();
   });
-  elements.spectrogramScalogramDensitySelect.addEventListener('change', () => {
-    state.spectrogramConfig.scalogramRowDensity = normalizeSpectrogramScalogramRowDensity(
-      elements.spectrogramScalogramDensitySelect.value,
+  elements.spectrogramScalogramOmegaSlider.addEventListener('change', () => {
+    state.spectrogramConfig.scalogramOmega0 = getSpectrogramScalogramOmega0FromSlider(
+      elements.spectrogramScalogramOmegaSlider.value,
     );
-    refreshSpectrogramAnalysisConfig();
-    scheduleKeyboardSurfaceFocus();
-  });
-  elements.spectrogramScalogramMinFrequencyInput.addEventListener('change', () => {
-    const range = normalizeSpectrogramScalogramFrequencyRange(
-      elements.spectrogramScalogramMinFrequencyInput.value,
-      state.spectrogramConfig.scalogramMaxFrequency,
-    );
-    state.spectrogramConfig.scalogramMinFrequency = range.minFrequency;
-    state.spectrogramConfig.scalogramMaxFrequency = range.maxFrequency;
-    refreshSpectrogramAnalysisConfig();
-    scheduleKeyboardSurfaceFocus();
-  });
-  elements.spectrogramScalogramMaxFrequencyInput.addEventListener('change', () => {
-    const range = normalizeSpectrogramScalogramFrequencyRange(
-      state.spectrogramConfig.scalogramMinFrequency,
-      elements.spectrogramScalogramMaxFrequencyInput.value,
-    );
-    state.spectrogramConfig.scalogramMinFrequency = range.minFrequency;
-    state.spectrogramConfig.scalogramMaxFrequency = range.maxFrequency;
+    elements.spectrogramScalogramOmegaValue.textContent = String(state.spectrogramConfig.scalogramOmega0);
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });
