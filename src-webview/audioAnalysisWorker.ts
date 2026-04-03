@@ -51,6 +51,7 @@ const ANALYSIS_TYPE_CODES = {
 const FREQUENCY_SCALE_CODES = {
   log: 0,
   linear: 1,
+  mel: 0,
   mixed: 2,
 };
 const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
@@ -61,7 +62,7 @@ const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
 
 type QualityPreset = 'balanced' | 'high' | 'max';
 type AnalysisType = 'mel' | 'scalogram' | 'spectrogram';
-type FrequencyScale = 'linear' | 'log' | 'mixed';
+type FrequencyScale = 'linear' | 'log' | 'mel' | 'mixed';
 type LayerKind = 'overview' | 'visible';
 type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
 type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
@@ -1069,11 +1070,47 @@ function normalizeAnalysisType(value: unknown): AnalysisType {
 }
 
 function normalizeFrequencyScale(value: unknown): FrequencyScale {
-  return value === 'linear' || value === 'mixed' ? value : 'log';
+  return value === 'linear' || value === 'mel' || value === 'mixed' ? value : 'log';
+}
+
+function getEffectiveAnalysisType(analysisType: unknown, frequencyScale: unknown): AnalysisType {
+  const normalizedAnalysisType = normalizeAnalysisType(analysisType);
+  const normalizedFrequencyScale = normalizeFrequencyScale(frequencyScale);
+
+  if (normalizedAnalysisType === 'mel') {
+    return normalizedFrequencyScale === 'log' ? 'mel' : 'spectrogram';
+  }
+
+  if (normalizedAnalysisType === 'spectrogram' && normalizedFrequencyScale === 'mel') {
+    return 'mel';
+  }
+
+  return normalizedAnalysisType;
 }
 
 function getEffectiveFrequencyScale(analysisType: AnalysisType, value: unknown): FrequencyScale {
+  if (analysisType === 'mel') {
+    return 'mel';
+  }
+
   return analysisType === 'spectrogram' ? normalizeFrequencyScale(value) : 'log';
+}
+
+function getExternalAnalysisConfig(analysisType: AnalysisType, frequencyScale: FrequencyScale): {
+  analysisType: AnalysisType;
+  frequencyScale: FrequencyScale;
+} {
+  if (analysisType === 'mel') {
+    return {
+      analysisType: 'spectrogram',
+      frequencyScale: 'mel',
+    };
+  }
+
+  return {
+    analysisType,
+    frequencyScale: analysisType === 'spectrogram' ? frequencyScale : 'log',
+  };
 }
 
 function getScalogramHopSamples(quality: QualityPreset): number {
@@ -3802,7 +3839,7 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
   const pixelWidth = Math.max(1, Math.round(Number(request?.pixelWidth) || surfaceState.pixelWidth || 1));
   const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1));
   const dprBucket = Math.max(2, Math.round(Number(request?.dpr) || 2));
-  const analysisType = normalizeAnalysisType(request?.analysisType);
+  const analysisType = getEffectiveAnalysisType(request?.analysisType, request?.frequencyScale);
   const frequencyScale = getEffectiveFrequencyScale(analysisType, request?.frequencyScale);
   const fftSize = analysisType === 'scalogram' ? 0 : normalizeFftSize(request?.fftSize);
   const overlapRatio = analysisType === 'scalogram' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
@@ -3876,14 +3913,16 @@ function buildTileCacheKey(plan: RenderRequestPlan, tileIndex: number): string {
 }
 
 function createLayerReadyBody(plan: RenderRequestPlan) {
+  const externalConfig = getExternalAnalysisConfig(plan.analysisType, plan.frequencyScale);
+
   return {
-    analysisType: plan.analysisType,
+    analysisType: externalConfig.analysisType,
     configVersion: plan.configVersion,
     decimationFactor: plan.decimationFactor,
     displayEnd: plan.displayEnd,
     displayStart: plan.displayStart,
     fftSize: plan.fftSize,
-    frequencyScale: plan.frequencyScale,
+    frequencyScale: externalConfig.frequencyScale,
     generation: plan.generation,
     hopSamples: plan.hopSamples,
     hopSeconds: plan.hopSeconds,

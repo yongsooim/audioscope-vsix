@@ -76,6 +76,7 @@ const ANALYSIS_TYPE_CODES: Record<SpectrogramAnalysisType, number> = {
 const FREQUENCY_SCALE_CODES: Record<SpectrogramFrequencyScale, number> = {
   log: 0,
   linear: 1,
+  mel: 0,
   mixed: 2,
 };
 
@@ -499,24 +500,44 @@ function handleViewportIntent(message: SetViewportIntentMessage): void {
   applyViewportIntent(message.body);
 }
 
+function getEffectiveSpectrogramConfig(
+  analysisType: SpectrogramAnalysisType,
+  frequencyScale: SpectrogramFrequencyScale,
+): {
+  analysisType: SpectrogramAnalysisType;
+  frequencyScale: SpectrogramFrequencyScale;
+} {
+  const normalizedAnalysisType = analysisType === 'scalogram' ? 'scalogram' : 'spectrogram';
+  const normalizedFrequencyScale = frequencyScale === 'linear' || frequencyScale === 'mel' || frequencyScale === 'mixed'
+    ? frequencyScale
+    : 'log';
+
+  return {
+    analysisType: normalizedAnalysisType,
+    frequencyScale: normalizedAnalysisType === 'spectrogram'
+      ? (analysisType === 'mel'
+          ? (normalizedFrequencyScale === 'log' ? 'mel' : normalizedFrequencyScale)
+          : normalizedFrequencyScale)
+      : 'log',
+  };
+}
+
 function handleSpectrogramConfig(config: {
   analysisType: SpectrogramAnalysisType;
   fftSize: number;
   frequencyScale: SpectrogramFrequencyScale;
   overlapRatio: number;
 }): void {
-  const nextAnalysisType = config.analysisType === 'mel' || config.analysisType === 'scalogram'
-    ? config.analysisType
-    : 'spectrogram';
+  const { analysisType: nextAnalysisType, frequencyScale: nextFrequencyScale } = getEffectiveSpectrogramConfig(
+    config.analysisType,
+    config.frequencyScale,
+  );
   const nextFftSize = FFT_SIZE_OPTIONS.includes(Number(config.fftSize))
     ? Number(config.fftSize)
     : 4096;
   const nextOverlapRatio = OVERLAP_RATIO_OPTIONS.includes(Number(config.overlapRatio))
     ? Number(config.overlapRatio)
     : 0.75;
-  const nextFrequencyScale = nextAnalysisType === 'spectrogram'
-    ? (config.frequencyScale === 'linear' || config.frequencyScale === 'mixed' ? config.frequencyScale : 'log')
-    : 'log';
 
   const changed =
     nextAnalysisType !== state.spectrogramConfig.analysisType
@@ -1291,12 +1312,16 @@ async function renderSpectrogram(range: RangeFrames, token: number): Promise<voi
 
 function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
   const preset = QUALITY_PRESETS[state.session.quality];
-  const analysisType = state.spectrogramConfig.analysisType;
-  const frequencyScale = analysisType === 'spectrogram'
-    ? state.spectrogramConfig.frequencyScale
-    : 'log';
-  const fftSize = analysisType === 'scalogram' ? 0 : state.spectrogramConfig.fftSize;
-  const overlapRatio = analysisType === 'scalogram' ? 0 : state.spectrogramConfig.overlapRatio;
+  const effectiveConfig = getEffectiveSpectrogramConfig(
+    state.spectrogramConfig.analysisType,
+    state.spectrogramConfig.frequencyScale,
+  );
+  const analysisType = effectiveConfig.analysisType === 'spectrogram' && effectiveConfig.frequencyScale === 'mel'
+    ? 'mel'
+    : effectiveConfig.analysisType;
+  const frequencyScale = effectiveConfig.frequencyScale;
+  const fftSize = effectiveConfig.analysisType === 'scalogram' ? 0 : state.spectrogramConfig.fftSize;
+  const overlapRatio = effectiveConfig.analysisType === 'scalogram' ? 0 : state.spectrogramConfig.overlapRatio;
   const pixelWidth = Math.max(1, state.spectrogramSurface.pixelWidth);
   const pixelHeight = Math.max(1, state.spectrogramSurface.pixelHeight);
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
@@ -1773,15 +1798,14 @@ function getSpectrogramFrequencyAtPosition(positionRatio: number): number {
 }
 
 function getActiveSpectrogramAxisMode(): SpectrogramAnalysisType | SpectrogramFrequencyScale {
-  if (state.spectrogramConfig.analysisType === 'mel') {
-    return 'mel';
-  }
+  const effectiveConfig = getEffectiveSpectrogramConfig(
+    state.spectrogramConfig.analysisType,
+    state.spectrogramConfig.frequencyScale,
+  );
 
-  if (state.spectrogramConfig.analysisType === 'spectrogram') {
-    return state.spectrogramConfig.frequencyScale;
-  }
-
-  return 'log';
+  return effectiveConfig.analysisType === 'spectrogram'
+    ? effectiveConfig.frequencyScale
+    : 'log';
 }
 
 function buildFrequencyTicks(): FrequencyTickUi[] {
