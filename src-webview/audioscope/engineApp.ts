@@ -146,6 +146,9 @@ const state = {
   observedSpectrogramPixelWidth: 0,
   observedWaveformViewportHeight: 0,
   observedWaveformViewportWidth: 0,
+  renderedFrequencyTicks: null as ViewportUiState['frequencyTicks'] | null,
+  renderedWaveformAxisTicks: null as ViewportUiState['waveformAxisTicks'] | null,
+  renderedWaveformAxisWidthPx: 0,
   playbackFrame: 0,
   playbackRate: 1,
   playbackRateMenuOpen: false,
@@ -756,18 +759,94 @@ function applyViewportUiState(uiState: ViewportUiState): void {
   applyTransportCommand(uiState.transportCommand);
 }
 
+function areFrequencyTicksEqual(
+  previousTicks: ViewportUiState['frequencyTicks'] | null,
+  nextTicks: ViewportUiState['frequencyTicks'],
+): boolean {
+  if (previousTicks === nextTicks) {
+    return true;
+  }
+
+  if (!previousTicks || previousTicks.length !== nextTicks.length) {
+    return false;
+  }
+
+  for (let index = 0; index < nextTicks.length; index += 1) {
+    const previousTick = previousTicks[index];
+    const nextTick = nextTicks[index];
+
+    if (
+      !previousTick
+      || previousTick.edge !== nextTick.edge
+      || previousTick.frequency !== nextTick.frequency
+      || previousTick.label !== nextTick.label
+      || Math.abs(previousTick.positionRatio - nextTick.positionRatio) > 1e-9
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areWaveformAxisTicksEqual(
+  previousTicks: ViewportUiState['waveformAxisTicks'] | null,
+  nextTicks: ViewportUiState['waveformAxisTicks'],
+): boolean {
+  if (previousTicks === nextTicks) {
+    return true;
+  }
+
+  if (!previousTicks || previousTicks.length !== nextTicks.length) {
+    return false;
+  }
+
+  for (let index = 0; index < nextTicks.length; index += 1) {
+    const previousTick = previousTicks[index];
+    const nextTick = nextTicks[index];
+
+    if (
+      !previousTick
+      || previousTick.align !== nextTick.align
+      || previousTick.frame !== nextTick.frame
+      || previousTick.label !== nextTick.label
+      || Math.abs(previousTick.positionRatio - nextTick.positionRatio) > 1e-9
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function renderWaveformAxis(): void {
   const uiState = state.engineUiState;
-  if (!uiState || uiState.waveformAxisTicks.length === 0) {
+  const waveformAxisTicks = uiState?.waveformAxisTicks ?? [];
+
+  if (!uiState || waveformAxisTicks.length === 0) {
+    if (!state.renderedWaveformAxisTicks && state.renderedWaveformAxisWidthPx === 0) {
+      return;
+    }
+
     elements.waveformAxis.replaceChildren();
+    state.renderedWaveformAxisTicks = null;
+    state.renderedWaveformAxisWidthPx = 0;
+    return;
+  }
+
+  const renderWidthPx = Math.max(1, uiState.viewport.renderWidthPx);
+  if (
+    state.renderedWaveformAxisWidthPx === renderWidthPx
+    && areWaveformAxisTicksEqual(state.renderedWaveformAxisTicks, waveformAxisTicks)
+  ) {
     return;
   }
 
   const axisContent = document.createElement('div');
   axisContent.className = 'waveform-axis-content';
-  axisContent.style.width = `${Math.max(1, uiState.viewport.renderWidthPx)}px`;
+  axisContent.style.width = `${renderWidthPx}px`;
 
-  for (const tick of uiState.waveformAxisTicks) {
+  for (const tick of waveformAxisTicks) {
     const tickElement = document.createElement('div');
     tickElement.className = 'waveform-axis-tick';
     tickElement.style.left = `${tick.positionRatio * 100}%`;
@@ -789,6 +868,8 @@ function renderWaveformAxis(): void {
   }
 
   elements.waveformAxis.replaceChildren(axisContent);
+  state.renderedWaveformAxisTicks = waveformAxisTicks;
+  state.renderedWaveformAxisWidthPx = renderWidthPx;
 }
 
 function renderSelectionAndLoop(uiState: ViewportUiState | null): void {
@@ -881,8 +962,24 @@ function renderWaveformUi(): void {
 
 function renderSpectrogramScale(): void {
   const frequencyTicks = state.engineUiState?.frequencyTicks ?? [];
-  elements.spectrogramAxis.replaceChildren();
-  elements.spectrogramGuides.replaceChildren();
+
+  if (frequencyTicks.length === 0) {
+    if (!state.renderedFrequencyTicks) {
+      return;
+    }
+
+    elements.spectrogramAxis.replaceChildren();
+    elements.spectrogramGuides.replaceChildren();
+    state.renderedFrequencyTicks = null;
+    return;
+  }
+
+  if (areFrequencyTicksEqual(state.renderedFrequencyTicks, frequencyTicks)) {
+    return;
+  }
+
+  const axisFragment = document.createDocumentFragment();
+  const guideFragment = document.createDocumentFragment();
 
   for (const tick of frequencyTicks) {
     const axisTick = document.createElement('div');
@@ -903,9 +1000,13 @@ function renderSpectrogramScale(): void {
     guide.className = 'spectrogram-guide';
     guide.style.top = `${tick.positionRatio * 100}%`;
 
-    elements.spectrogramAxis.append(axisTick);
-    elements.spectrogramGuides.append(guide);
+    axisFragment.append(axisTick);
+    guideFragment.append(guide);
   }
+
+  elements.spectrogramAxis.replaceChildren(axisFragment);
+  elements.spectrogramGuides.replaceChildren(guideFragment);
+  state.renderedFrequencyTicks = frequencyTicks;
 }
 
 function renderSpectrogramMeta(): void {
