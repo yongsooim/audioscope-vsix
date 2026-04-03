@@ -242,10 +242,12 @@ pub const BandLayoutResource = struct {
     fft_size: i32 = 0,
     decimation_factor: i32 = 1,
     row_count: i32 = 0,
+    band_count: i32 = 0,
     min_frequency: f32 = 0.0,
     max_frequency: f32 = 0.0,
     band_ranges: []BandRange = &.{},
     mel_bands: []MelBand = &.{},
+    mfcc_basis: []f32 = &.{},
     enhanced_band_ranges: []BandRange = &.{},
     use_low_frequency_enhancement: bool = false,
     low_frequency_maximum: f32 = 0.0,
@@ -254,6 +256,7 @@ pub const BandLayoutResource = struct {
     pub fn deinit(self: *BandLayoutResource) void {
         if (self.band_ranges.len > 0) allocator.free(self.band_ranges);
         if (self.mel_bands.len > 0) allocator.free(self.mel_bands);
+        if (self.mfcc_basis.len > 0) allocator.free(self.mfcc_basis);
         if (self.enhanced_band_ranges.len > 0) allocator.free(self.enhanced_band_ranges);
         self.* = .{};
     }

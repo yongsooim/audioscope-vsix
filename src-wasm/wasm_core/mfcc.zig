@@ -1,34 +1,10 @@
 const std = @import("std");
 const core = @import("./core.zig");
+const mel_analysis = @import("./mel_analysis.zig");
 
 const max_coefficients: usize = 64;
+const max_mel_bands: usize = 512;
 const low_order_coefficient_scale: f32 = 0.25;
-
-fn computeMelBandPower(power_spectrum: []const f32, band: core.MelBand, fft_size: i32, sample_rate: f32) f32 {
-    const nyquist = sample_rate / 2.0;
-    const maximum_bin = core.maxI32(2, @divTrunc(fft_size, 2));
-    const area_normalization = 2.0 / core.maxF32(1e-6, band.end_frequency - band.start_frequency);
-    var sum: f32 = 0.0;
-
-    var bin = band.start_bin;
-    while (bin < band.end_bin) : (bin += 1) {
-        const frequency = (@as(f32, @floatFromInt(bin)) / @as(f32, @floatFromInt(maximum_bin))) * nyquist;
-        var weight: f32 = 0.0;
-
-        if (frequency <= band.center_frequency) {
-            const denominator = core.maxF32(1e-6, band.center_frequency - band.start_frequency);
-            weight = (frequency - band.start_frequency) / denominator;
-        } else {
-            const denominator = core.maxF32(1e-6, band.end_frequency - band.center_frequency);
-            weight = (band.end_frequency - frequency) / denominator;
-        }
-
-        weight = core.clampf32(weight, 0.0, 1.0) * area_normalization;
-        sum += power_spectrum[@as(usize, @intCast(bin))] * weight;
-    }
-
-    return core.maxF32(sum, 1e-20);
-}
 
 fn powerToDb(power: f32) f32 {
     return 10.0 * (@log(core.maxF32(power, 1e-20)) * core.log10_of_e);
@@ -80,9 +56,63 @@ fn writeCoefficientColor(value: f32, output: []u8) void {
     }
 }
 
+pub fn writeDctBasis(destination: []f32, coefficient_count: i32, band_count: i32) void {
+    const safe_coefficient_count = @as(usize, @intCast(core.maxI32(0, coefficient_count)));
+    const safe_band_count = @as(usize, @intCast(core.maxI32(1, band_count)));
+    const band_count_f32 = @as(f32, @floatFromInt(safe_band_count));
+
+    for (0..safe_coefficient_count) |coefficient_index| {
+        const coefficient = @as(f32, @floatFromInt(coefficient_index));
+        const normalization = if (coefficient_index == 0)
+            @sqrt(1.0 / band_count_f32)
+        else
+            @sqrt(2.0 / band_count_f32);
+
+        for (0..safe_band_count) |band_index| {
+            const band_position = @as(f32, @floatFromInt(band_index)) + 0.5;
+            const angle = (std.math.pi / band_count_f32) * band_position * coefficient;
+            destination[(coefficient_index * safe_band_count) + band_index] = @cos(angle) * normalization;
+        }
+    }
+}
+
+pub fn sampleCoefficient(
+    power_spectrum: []const f32,
+    bands: []const core.MelBand,
+    dct_basis: []const f32,
+    coefficient_index: usize,
+    fft_size: i32,
+    sample_rate: f32,
+) f32 {
+    const band_count = bands.len;
+    if (band_count == 0 or band_count > max_mel_bands) {
+        return 0.0;
+    }
+
+    const required_basis_length = (coefficient_index + 1) * band_count;
+    if (required_basis_length > dct_basis.len) {
+        return 0.0;
+    }
+
+    var band_values: [max_mel_bands]f32 = undefined;
+    for (bands, 0..) |band, band_index| {
+        band_values[band_index] = powerToDb(mel_analysis.computeMelBandPower(power_spectrum, band, fft_size, sample_rate));
+    }
+
+    var sum: f32 = 0.0;
+    const basis_offset = coefficient_index * band_count;
+    for (0..band_count) |band_index| {
+        sum += band_values[band_index] * dct_basis[basis_offset + band_index];
+    }
+
+    return sum;
+}
+
 pub fn writeColumn(
     power_spectrum: []const f32,
     bands: []const core.MelBand,
+    dct_basis: []const f32,
+    coefficient_count: usize,
     fft_size: i32,
     sample_rate: f32,
     distribution_gamma: f32,
@@ -90,43 +120,35 @@ pub fn writeColumn(
     output_width: usize,
     column_index: usize,
 ) void {
-    const row_count = bands.len;
-    if (row_count == 0 or row_count > max_coefficients) {
+    const band_count = bands.len;
+    if (band_count == 0 or band_count > max_mel_bands or coefficient_count == 0 or coefficient_count > max_coefficients) {
         return;
     }
 
-    var band_values: [max_coefficients]f32 = undefined;
+    var band_values: [max_mel_bands]f32 = undefined;
     var coefficients: [max_coefficients]f32 = undefined;
-    const row_count_f32 = @as(f32, @floatFromInt(row_count));
 
     for (bands, 0..) |band, band_index| {
-        band_values[band_index] = powerToDb(computeMelBandPower(power_spectrum, band, fft_size, sample_rate));
+        band_values[band_index] = powerToDb(mel_analysis.computeMelBandPower(power_spectrum, band, fft_size, sample_rate));
     }
 
-    for (0..row_count) |coefficient_index| {
+    for (0..coefficient_count) |coefficient_index| {
         var sum: f32 = 0.0;
-        const coefficient = @as(f32, @floatFromInt(coefficient_index));
+        const basis_offset = coefficient_index * band_count;
 
-        for (0..row_count) |band_index| {
-            const band_position = @as(f32, @floatFromInt(band_index)) + 0.5;
-            const angle = (std.math.pi / row_count_f32) * band_position * coefficient;
-            sum += band_values[band_index] * @cos(angle);
+        for (0..band_count) |band_index| {
+            sum += band_values[band_index] * dct_basis[basis_offset + band_index];
         }
-
-        const normalization = if (coefficient_index == 0)
-            @sqrt(1.0 / row_count_f32)
-        else
-            @sqrt(2.0 / row_count_f32);
-        coefficients[coefficient_index] = sum * normalization;
+        coefficients[coefficient_index] = sum;
     }
 
-    for (0..row_count) |row_index| {
+    for (0..coefficient_count) |row_index| {
         const display_value = if (row_index == 0)
             coefficients[row_index] * low_order_coefficient_scale
         else
             coefficients[row_index];
         const compressed = compressCoefficient(display_value, distribution_gamma);
-        const target_row = row_count - row_index - 1;
+        const target_row = coefficient_count - row_index - 1;
         const pixel_offset = ((target_row * output_width) + column_index) * 4;
         writeCoefficientColor(compressed, output[pixel_offset..][0..4]);
     }

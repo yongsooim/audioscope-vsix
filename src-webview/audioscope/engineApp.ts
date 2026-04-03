@@ -53,6 +53,7 @@ const LOOP_HANDLE_WIDTH_PX = 8;
 const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. Rebuild or reinstall audioscope to restore metadata and decoding.';
 const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const SPECTROGRAM_MEL_BAND_OPTIONS = [128, 256, 512];
+const SPECTROGRAM_MFCC_COEFFICIENT_OPTIONS = [13, 20, 32, 40];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
@@ -96,6 +97,7 @@ type SpectrogramVisibleRequest = {
   generation: number;
   maxDecibels: number;
   melBandCount: number;
+  mfccCoefficientCount: number;
   minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
@@ -220,6 +222,8 @@ const state = {
     frequencyScale: 'log' as SpectrogramFrequencyScale,
     maxDecibels: 0,
     melBandCount: 256,
+    mfccCoefficientCount: 20,
+    mfccMelBandCount: 128,
     minDecibels: -80,
     overlapRatio: 0.75,
   },
@@ -434,6 +438,16 @@ function normalizeSpectrogramFftSize(value: unknown): number {
 function normalizeSpectrogramMelBandCount(value: unknown): number {
   const numericValue = Number(value);
   return SPECTROGRAM_MEL_BAND_OPTIONS.includes(numericValue) ? numericValue : 256;
+}
+
+function normalizeSpectrogramMfccCoefficientCount(value: unknown): number {
+  const numericValue = Number(value);
+  return SPECTROGRAM_MFCC_COEFFICIENT_OPTIONS.includes(numericValue) ? numericValue : 20;
+}
+
+function normalizeSpectrogramMfccMelBandCount(value: unknown): number {
+  const numericValue = Number(value);
+  return SPECTROGRAM_MEL_BAND_OPTIONS.includes(numericValue) ? numericValue : 128;
 }
 
 function normalizeSpectrogramFrequencyScale(value: unknown): SpectrogramFrequencyScale {
@@ -1162,6 +1176,7 @@ function renderSpectrogramMeta(): void {
   const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
   const supportsScale = analysisType === 'spectrogram';
   const supportsMelBands = analysisType === 'mel';
+  const supportsMfccOptions = analysisType === 'mfcc';
   const supportsDbWindow = analysisType !== 'mfcc';
   const isScalogram = analysisType === 'scalogram';
   const dbWindow = normalizeSpectrogramDbWindow(
@@ -1177,6 +1192,12 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMelBandsSelect.value = String(
     normalizeSpectrogramMelBandCount(state.spectrogramConfig.melBandCount),
   );
+  elements.spectrogramMfccCoefficientsSelect.value = String(
+    normalizeSpectrogramMfccCoefficientCount(state.spectrogramConfig.mfccCoefficientCount),
+  );
+  elements.spectrogramMfccMelBandsSelect.value = String(
+    normalizeSpectrogramMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount),
+  );
   elements.spectrogramDistributionSelect.value = normalizeSpectrogramColormapDistribution(
     state.spectrogramConfig.colormapDistribution,
   );
@@ -1185,11 +1206,15 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramOverlapControl.hidden = isScalogram;
   elements.spectrogramScaleControl.hidden = !supportsScale;
   elements.spectrogramMelBandsControl.hidden = !supportsMelBands;
+  elements.spectrogramMfccCoefficientsControl.hidden = !supportsMfccOptions;
+  elements.spectrogramMfccMelBandsControl.hidden = !supportsMfccOptions;
   elements.spectrogramDbRangeControl.hidden = !supportsDbWindow;
   elements.spectrogramFftSelect.disabled = isScalogram;
   elements.spectrogramOverlapSelect.disabled = isScalogram;
   elements.spectrogramScaleSelect.disabled = !supportsScale;
   elements.spectrogramMelBandsSelect.disabled = !supportsMelBands;
+  elements.spectrogramMfccCoefficientsSelect.disabled = !supportsMfccOptions;
+  elements.spectrogramMfccMelBandsSelect.disabled = !supportsMfccOptions;
   elements.spectrogramMinDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMaxDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMinDbSlider.value = String(dbWindow.minDecibels);
@@ -1230,7 +1255,11 @@ function getEffectiveSpectrogramRenderConfig() {
       ? normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale)
       : 'log' as SpectrogramFrequencyScale,
     maxDecibels: dbWindow.maxDecibels,
-    melBandCount: normalizeSpectrogramMelBandCount(state.spectrogramConfig.melBandCount),
+    melBandCount: analysisType === 'mfcc'
+      ? normalizeSpectrogramMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount)
+      : normalizeSpectrogramMelBandCount(state.spectrogramConfig.melBandCount),
+    mfccCoefficientCount: normalizeSpectrogramMfccCoefficientCount(state.spectrogramConfig.mfccCoefficientCount),
+    mfccMelBandCount: normalizeSpectrogramMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount),
     minDecibels: dbWindow.minDecibels,
     overlapRatio: normalizeSpectrogramOverlapRatio(state.spectrogramConfig.overlapRatio),
   };
@@ -1356,6 +1385,7 @@ function isCompatibleVisibleRequest(
     && activeRequest.frequencyScale === renderConfig.frequencyScale
     && activeRequest.maxDecibels === renderConfig.maxDecibels
     && activeRequest.melBandCount === renderConfig.melBandCount
+    && (renderConfig.analysisType !== 'mfcc' || activeRequest.mfccCoefficientCount === renderConfig.mfccCoefficientCount)
     && activeRequest.minDecibels === renderConfig.minDecibels
     && Math.abs(activeRequest.overlapRatio - renderConfig.overlapRatio) <= 1e-6
     && Math.abs(activeRequest.pixelWidth - size.pixelWidth) <= 1
@@ -1461,6 +1491,7 @@ function syncSpectrogramView({ force = false } = {}): void {
       generation,
       maxDecibels: renderConfig.maxDecibels,
       melBandCount: renderConfig.melBandCount,
+      mfccCoefficientCount: renderConfig.mfccCoefficientCount,
       minDecibels: renderConfig.minDecibels,
       overlapRatio: renderConfig.overlapRatio,
       pixelHeight,
@@ -1490,6 +1521,8 @@ function syncSpectrogramView({ force = false } = {}): void {
       generation,
       maxDecibels: renderConfig.maxDecibels,
       melBandCount: renderConfig.melBandCount,
+      mfccCoefficientCount: renderConfig.mfccCoefficientCount,
+      mfccMelBandCount: renderConfig.mfccMelBandCount,
       minDecibels: renderConfig.minDecibels,
       overlapRatio: renderConfig.overlapRatio,
       pixelHeight,
@@ -1978,6 +2011,7 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
       generation: Number(body.generation) || 0,
       maxDecibels: Math.round(Number(body.maxDecibels) || 0),
       melBandCount: normalizeSpectrogramMelBandCount(body.melBandCount),
+      mfccCoefficientCount: normalizeSpectrogramMfccCoefficientCount(body.mfccCoefficientCount),
       minDecibels: Math.round(Number(body.minDecibels) || 0),
       overlapRatio: Number(body.overlapRatio) || 0,
       pixelHeight: Number(body.pixelHeight) || 0,
@@ -2388,6 +2422,20 @@ function attachUiEvents(): void {
   });
   elements.spectrogramMelBandsSelect.addEventListener('change', () => {
     state.spectrogramConfig.melBandCount = normalizeSpectrogramMelBandCount(elements.spectrogramMelBandsSelect.value);
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramMfccCoefficientsSelect.addEventListener('change', () => {
+    state.spectrogramConfig.mfccCoefficientCount = normalizeSpectrogramMfccCoefficientCount(
+      elements.spectrogramMfccCoefficientsSelect.value,
+    );
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramMfccMelBandsSelect.addEventListener('change', () => {
+    state.spectrogramConfig.mfccMelBandCount = normalizeSpectrogramMfccMelBandCount(
+      elements.spectrogramMfccMelBandsSelect.value,
+    );
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });

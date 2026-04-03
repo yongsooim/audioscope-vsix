@@ -226,6 +226,8 @@ export interface SetSpectrogramConfigMessage {
     frequencyScale: SpectrogramFrequencyScale;
     maxDecibels: number;
     melBandCount: number;
+    mfccCoefficientCount: number;
+    mfccMelBandCount: number;
     minDecibels: number;
     overlapRatio: number;
   };

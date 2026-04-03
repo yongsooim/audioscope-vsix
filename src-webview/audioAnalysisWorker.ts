@@ -7,9 +7,11 @@ import {
 const MIN_FREQUENCY = 50;
 const MAX_FREQUENCY = 20000;
 const ROW_BUCKET_SIZE = 16;
-const MFCC_COEFFICIENT_COUNT = 20;
+const DEFAULT_MFCC_COEFFICIENT_COUNT = 20;
 const VISIBLE_ROW_OVERSAMPLE = 1.35;
 const LIBROSA_DEFAULT_MEL_BAND_COUNT = 256;
+const DEFAULT_MFCC_MEL_BAND_COUNT = 128;
+const MFCC_COEFFICIENT_OPTIONS = [13, 20, 32, 40];
 const MEL_BAND_COUNT_OPTIONS = [128, 256, 512];
 
 const QUALITY_PRESETS = {
@@ -489,42 +491,17 @@ fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) 
 }
 `;
 
-const WEBGPU_MEL_RENDER_SHADER = /* wgsl */`
-${WEBGPU_PALETTE_SHADER_HELPERS}
-
-struct ComputeParams {
-  header0: vec4<u32>,
-  header1: vec4<u32>,
-  timing: vec4<f32>,
-  padding: vec4<f32>,
-};
-
+const WEBGPU_MEL_ANALYSIS_SHADER_HELPERS = /* wgsl */`
 struct MelRow {
   weightOffset: u32,
   weightCount: u32,
   pad0: u32,
   pad1: u32,
 };
+`;
 
-@group(0) @binding(0) var<uniform> params: ComputeParams;
-@group(0) @binding(1) var<storage, read> baseSpectrum: array<vec2<f32>>;
-@group(0) @binding(2) var<storage, read> melRows: array<MelRow>;
-@group(0) @binding(3) var<storage, read> melBins: array<u32>;
-@group(0) @binding(4) var<storage, read> melWeights: array<f32>;
-@group(0) @binding(5) var outputTexture: texture_storage_2d<rgba8unorm, write>;
-
-@compute @workgroup_size(8, 8)
-fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
-  let columnIndex = globalId.x;
-  let rowIndex = globalId.y;
-  let fftSize = params.header0.x;
-  let columnCount = params.header0.y;
-  let rowCount = params.header0.z;
-
-  if (columnIndex >= columnCount || rowIndex >= rowCount) {
-    return;
-  }
-
+const WEBGPU_MEL_ANALYSIS_FUNCTIONS = /* wgsl */`
+fn computeMelPower(columnIndex: u32, rowIndex: u32, fftSize: u32) -> f32 {
   let row = melRows[rowIndex];
   let spectrumBaseIndex = columnIndex * fftSize;
   var melPower = 0.0;
@@ -544,12 +521,176 @@ fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
     weightIndex += 1u;
   }
 
+  return melPower;
+}
+`;
+
+const WEBGPU_MEL_RENDER_SHADER = /* wgsl */`
+${WEBGPU_PALETTE_SHADER_HELPERS}
+
+struct ComputeParams {
+  header0: vec4<u32>,
+  header1: vec4<u32>,
+  timing: vec4<f32>,
+  padding: vec4<f32>,
+};
+
+${WEBGPU_MEL_ANALYSIS_SHADER_HELPERS}
+
+@group(0) @binding(0) var<uniform> params: ComputeParams;
+@group(0) @binding(1) var<storage, read> baseSpectrum: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> melRows: array<MelRow>;
+@group(0) @binding(3) var<storage, read> melBins: array<u32>;
+@group(0) @binding(4) var<storage, read> melWeights: array<f32>;
+@group(0) @binding(5) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+
+${WEBGPU_MEL_ANALYSIS_FUNCTIONS}
+
+@compute @workgroup_size(8, 8)
+fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
+  let columnIndex = globalId.x;
+  let rowIndex = globalId.y;
+  let fftSize = params.header0.x;
+  let columnCount = params.header0.y;
+  let rowCount = params.header0.z;
+
+  if (columnIndex >= columnCount || rowIndex >= rowCount) {
+    return;
+  }
+
+  let melPower = computeMelPower(columnIndex, rowIndex, fftSize);
   let targetRow = i32((rowCount - 1u) - rowIndex);
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
     paletteColor(normalizePowerForAnalysis(melPower, ANALYSIS_TYPE_MEL, params.padding.x, params.padding.y, params.padding.z)),
   );
+}
+`;
+
+const WEBGPU_MFCC_MEL_VALUES_SHADER = /* wgsl */`
+${WEBGPU_PALETTE_SHADER_HELPERS}
+
+struct ComputeParams {
+  header0: vec4<u32>,
+  header1: vec4<u32>,
+  timing: vec4<f32>,
+  padding: vec4<f32>,
+};
+
+${WEBGPU_MEL_ANALYSIS_SHADER_HELPERS}
+
+@group(0) @binding(0) var<uniform> params: ComputeParams;
+@group(0) @binding(1) var<storage, read> baseSpectrum: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> melRows: array<MelRow>;
+@group(0) @binding(3) var<storage, read> melBins: array<u32>;
+@group(0) @binding(4) var<storage, read> melWeights: array<f32>;
+@group(0) @binding(5) var<storage, read_write> melDbValues: array<f32>;
+
+${WEBGPU_MEL_ANALYSIS_FUNCTIONS}
+
+@compute @workgroup_size(8, 8)
+fn computeMfccMelValues(@builtin(global_invocation_id) globalId: vec3<u32>) {
+  let columnIndex = globalId.x;
+  let rowIndex = globalId.y;
+  let fftSize = params.header0.x;
+  let columnCount = params.header0.y;
+  let melBandCount = params.header1.x;
+
+  if (columnIndex >= columnCount || rowIndex >= melBandCount) {
+    return;
+  }
+
+  let melPower = max(computeMelPower(columnIndex, rowIndex, fftSize), 1e-20);
+  melDbValues[(columnIndex * melBandCount) + rowIndex] = 10.0 * (log(melPower) * LOG10_E);
+}
+`;
+
+const WEBGPU_MFCC_RENDER_SHADER = /* wgsl */`
+struct ComputeParams {
+  header0: vec4<u32>,
+  header1: vec4<u32>,
+  timing: vec4<f32>,
+  padding: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> params: ComputeParams;
+@group(0) @binding(1) var<storage, read> melDbValues: array<f32>;
+@group(0) @binding(2) var<storage, read> dctBasis: array<f32>;
+@group(0) @binding(3) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+
+fn compressCoefficient(value: f32, distributionGamma: f32) -> f32 {
+  let contrast = clamp(distributionGamma, 0.2, 2.5);
+  let magnitude = abs(value);
+  if (magnitude <= 1e-6) {
+    return 0.0;
+  }
+
+  let compression = 28.0 / contrast;
+  return clamp(value / (magnitude + compression), -1.0, 1.0);
+}
+
+fn mixChannel(startValue: f32, endValue: f32, t: f32) -> f32 {
+  return startValue + ((endValue - startValue) * clamp(t, 0.0, 1.0));
+}
+
+fn writeGradient(startColor: vec3<f32>, endColor: vec3<f32>, t: f32) -> vec4<f32> {
+  return vec4<f32>(
+    mixChannel(startColor.x, endColor.x, t) / 255.0,
+    mixChannel(startColor.y, endColor.y, t) / 255.0,
+    mixChannel(startColor.z, endColor.z, t) / 255.0,
+    1.0,
+  );
+}
+
+fn mfccPalette(value: f32) -> vec4<f32> {
+  let center = vec3<f32>(8.0, 10.0, 18.0);
+  let negativeMid = vec3<f32>(33.0, 92.0, 180.0);
+  let negativeBright = vec3<f32>(148.0, 225.0, 255.0);
+  let positiveMid = vec3<f32>(190.0, 84.0, 54.0);
+  let positiveBright = vec3<f32>(255.0, 226.0, 138.0);
+  let magnitude = sqrt(clamp(abs(value), 0.0, 1.0));
+
+  if (value < 0.0) {
+    if (magnitude < 0.55) {
+      return writeGradient(center, negativeMid, magnitude / 0.55);
+    }
+    return writeGradient(negativeMid, negativeBright, (magnitude - 0.55) / 0.45);
+  }
+
+  if (magnitude < 0.55) {
+    return writeGradient(center, positiveMid, magnitude / 0.55);
+  }
+  return writeGradient(positiveMid, positiveBright, (magnitude - 0.55) / 0.45);
+}
+
+@compute @workgroup_size(8, 8)
+fn renderMfccTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
+  let columnIndex = globalId.x;
+  let coefficientIndex = globalId.y;
+  let columnCount = params.header0.y;
+  let coefficientCount = params.header0.z;
+  let melBandCount = params.header1.x;
+
+  if (columnIndex >= columnCount || coefficientIndex >= coefficientCount) {
+    return;
+  }
+
+  let melBaseIndex = columnIndex * melBandCount;
+  let basisBaseIndex = coefficientIndex * melBandCount;
+  var coefficient = 0.0;
+
+  for (var bandIndex = 0u; bandIndex < melBandCount; bandIndex += 1u) {
+    coefficient += melDbValues[melBaseIndex + bandIndex] * dctBasis[basisBaseIndex + bandIndex];
+  }
+
+  if (coefficientIndex == 0u) {
+    coefficient *= 0.25;
+  }
+
+  let normalized = compressCoefficient(coefficient, params.padding.x);
+  let targetRow = i32((coefficientCount - 1u) - coefficientIndex);
+  textureStore(outputTexture, vec2<i32>(i32(columnIndex), targetRow), mfccPalette(normalized));
 }
 `;
 
@@ -884,6 +1025,8 @@ interface SpectrogramRequest {
   generation?: number;
   maxDecibels?: number;
   melBandCount?: number;
+  mfccCoefficientCount?: number;
+  mfccMelBandCount?: number;
   minDecibels?: number;
   overlapRatio?: number;
   pixelHeight?: number;
@@ -941,6 +1084,7 @@ interface RenderRequestPlan {
   hopSeconds: number;
   maxDecibels: number;
   melBandCount: number;
+  mfccCoefficientCount: number;
   minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
@@ -1003,6 +1147,7 @@ interface SpectrogramBandLayoutResource {
 }
 
 interface MelBandLayoutResource {
+  bandCount: number;
   binBuffer: any;
   key: string;
   rowBuffer: any;
@@ -1010,6 +1155,13 @@ interface MelBandLayoutResource {
 }
 
 type WebGpuStftLayoutResource = MelBandLayoutResource | SpectrogramBandLayoutResource;
+
+interface MfccDctBasisResource {
+  bandCount: number;
+  buffer: any;
+  coefficientCount: number;
+  key: string;
+}
 
 interface ScalogramKernelResource {
   key: string;
@@ -1041,6 +1193,8 @@ interface WebGpuStftScratchSlot {
   basePongBuffer: any;
   fftBindGroupForward: any;
   fftBindGroupReverse: any;
+  mfccMelBuffer: any;
+  mfccMelBufferCapacity: number;
   lowInputBindGroup: any;
   lowPingBuffer: any;
   lowPongBuffer: any;
@@ -1054,11 +1208,16 @@ interface WebGpuStftComputeState {
   fftPipeline: any;
   inputBindGroupLayout: any;
   inputPipeline: any;
+  mfccBasisResources: Map<string, MfccDctBasisResource>;
   paramBuffer: any;
   paramSetStride: number;
   paramStride: number;
   pcmBuffer: any;
   pcmSampleCount: number;
+  renderMfccBindGroupLayout: any;
+  renderMfccPipeline: any;
+  renderMelEnergyBindGroupLayout: any;
+  renderMelEnergyPipeline: any;
   renderMelBindGroupLayout: any;
   renderMelPipeline: any;
   renderSpectrogramBindGroupLayout: any;
@@ -1481,6 +1640,20 @@ function destroySpectrogramBandLayoutResources(computeState: WebGpuStftComputeSt
   computeState.bandLayoutResources.clear();
 }
 
+function destroyMfccBasisResources(computeState: WebGpuStftComputeState | null): void {
+  if (!computeState) {
+    return;
+  }
+
+  for (const resource of computeState.mfccBasisResources.values()) {
+    if (resource.buffer && typeof resource.buffer.destroy === 'function') {
+      resource.buffer.destroy();
+    }
+  }
+
+  computeState.mfccBasisResources.clear();
+}
+
 function destroyScalogramKernelResources(computeState: WebGpuScalogramComputeState | null): void {
   if (!computeState) {
     return;
@@ -1566,6 +1739,7 @@ function destroyWebGpuStftScratchSlots(computeState: WebGpuStftComputeState | nu
     for (const buffer of [
       slot.basePingBuffer,
       slot.basePongBuffer,
+      slot.mfccMelBuffer,
       slot.lowPingBuffer,
       slot.lowPongBuffer,
     ]) {
@@ -1585,6 +1759,7 @@ function destroyWebGpuStftComputeState(computeState: WebGpuStftComputeState | nu
   }
 
   destroySpectrogramBandLayoutResources(computeState);
+  destroyMfccBasisResources(computeState);
 
   destroyWebGpuStftScratchSlots(computeState);
 
@@ -2576,6 +2751,7 @@ function renderTileChunk(
     chunkEnd,
     columnCount,
     plan.rowCount,
+    plan.melBandCount,
     plan.fftSize,
     plan.decimationFactor,
     analysisState.minFrequency,
@@ -2954,16 +3130,80 @@ function getScalogramFrequencyForRow(row: number, rows: number, minFrequency: nu
 }
 
 function buildStftLayoutCacheKey(plan: RenderRequestPlan): string {
+  const bandCount = plan.analysisType === 'mfcc' ? plan.melBandCount : plan.rowCount;
   return [
     `type${plan.analysisType}`,
     `fft${plan.fftSize}`,
     `scale${plan.frequencyScale}`,
     `rows${plan.rowCount}`,
+    `bands${bandCount}`,
     `dec${plan.decimationFactor}`,
     `sr${analysisState.sampleRate}`,
     `min${analysisState.minFrequency}`,
     `max${analysisState.maxFrequency}`,
   ].join(':');
+}
+
+function createMfccDctBasisData(coefficientCount: number, bandCount: number): Float32Array {
+  const safeCoefficientCount = Math.max(1, Math.floor(coefficientCount));
+  const safeBandCount = Math.max(1, Math.floor(bandCount));
+  const data = new Float32Array(safeCoefficientCount * safeBandCount);
+  const bandCountFloat = safeBandCount;
+
+  for (let coefficientIndex = 0; coefficientIndex < safeCoefficientCount; coefficientIndex += 1) {
+    const normalization = coefficientIndex === 0
+      ? Math.sqrt(1 / bandCountFloat)
+      : Math.sqrt(2 / bandCountFloat);
+    const rowOffset = coefficientIndex * safeBandCount;
+
+    for (let bandIndex = 0; bandIndex < safeBandCount; bandIndex += 1) {
+      const bandPosition = bandIndex + 0.5;
+      data[rowOffset + bandIndex] = Math.cos((Math.PI / bandCountFloat) * bandPosition * coefficientIndex) * normalization;
+    }
+  }
+
+  return data;
+}
+
+function buildMfccBasisCacheKey(plan: RenderRequestPlan): string {
+  return [
+    `coeff${plan.rowCount}`,
+    `bands${plan.melBandCount}`,
+  ].join(':');
+}
+
+function getMfccBasisResource(
+  plan: RenderRequestPlan,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuStftComputeState,
+): MfccDctBasisResource | null {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return null;
+  }
+
+  const cacheKey = buildMfccBasisCacheKey(plan);
+  const cached = computeState.mfccBasisResources.get(cacheKey) ?? null;
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const resource: MfccDctBasisResource = {
+      bandCount: plan.melBandCount,
+      buffer: createGpuBufferWithData(
+        webGpu.device,
+        globals.bufferUsage.STORAGE,
+        createMfccDctBasisData(plan.rowCount, plan.melBandCount),
+      ),
+      coefficientCount: plan.rowCount,
+      key: cacheKey,
+    };
+    computeState.mfccBasisResources.set(cacheKey, resource);
+    return resource;
+  } catch {
+    return null;
+  }
 }
 
 function getStftLayoutResource(
@@ -2983,8 +3223,8 @@ function getStftLayoutResource(
     return cached;
   }
 
-  if (plan.analysisType === 'mel') {
-    const rows = Math.max(1, plan.rowCount);
+  if (plan.analysisType === 'mel' || plan.analysisType === 'mfcc') {
+    const rows = Math.max(1, plan.melBandCount);
     const nyquist = analysisState.sampleRate / 2;
     const maximumBin = Math.max(2, Math.trunc(plan.fftSize / 2));
     const safeMinFrequency = Math.max(0, analysisState.minFrequency);
@@ -3047,6 +3287,7 @@ function getStftLayoutResource(
     }
 
     const resource: MelBandLayoutResource = {
+      bandCount: rows,
       binBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, new Uint32Array(bins)),
       key: cacheKey,
       rowBuffer: createGpuBufferWithData(webGpu.device, globals.bufferUsage.STORAGE, rowData),
@@ -3397,7 +3638,6 @@ function recordScalogramFftPathFailure(computeState: WebGpuScalogramComputeState
 function canUseWebGpuNativeCompute(plan: RenderRequestPlan): boolean {
   return ENABLE_EXPERIMENTAL_WEBGPU_SPECTROGRAM_COMPUTE
     && surfaceState.backend === 'webgpu'
-    && plan.analysisType !== 'mfcc'
     && !surfaceState.webGpu?.analysisFallbackReasons[plan.analysisType]
     && analysisState.sampleRate > 0
     && analysisState.sampleCount > 0
@@ -3454,6 +3694,47 @@ function createStftComputeParamsData(
   view.setUint32(16, slotStageIndex, true);
   view.setUint32(20, ANALYSIS_TYPE_CODES[plan.analysisType] ?? 0, true);
   view.setUint32(24, decimationFactor, true);
+  view.setUint32(28, useLowFrequencyEnhancement ? 1 : 0, true);
+  view.setFloat32(32, tileStart, true);
+  view.setFloat32(36, tileSpan, true);
+  view.setFloat32(40, sampleRate, true);
+  view.setFloat32(44, powerScale, true);
+  view.setFloat32(48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
+  view.setFloat32(52, plan.minDecibels, true);
+  view.setFloat32(56, plan.maxDecibels, true);
+  return buffer;
+}
+
+function createStftRenderParamsData(
+  plan: RenderRequestPlan,
+  {
+    columnCount,
+    sampleCount,
+    sampleRate,
+    tileSpan,
+    tileStart,
+    useLowFrequencyEnhancement,
+  }: {
+    columnCount: number;
+    sampleCount: number;
+    sampleRate: number;
+    tileSpan: number;
+    tileStart: number;
+    useLowFrequencyEnhancement: boolean;
+  },
+): ArrayBuffer {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  const halfFftSize = Math.max(1, plan.fftSize / 2);
+  const powerScale = 1 / (halfFftSize * halfFftSize);
+
+  view.setUint32(0, plan.fftSize, true);
+  view.setUint32(4, columnCount, true);
+  view.setUint32(8, plan.rowCount, true);
+  view.setUint32(12, sampleCount, true);
+  view.setUint32(16, plan.melBandCount, true);
+  view.setUint32(20, ANALYSIS_TYPE_CODES[plan.analysisType] ?? 0, true);
+  view.setUint32(24, plan.decimationFactor, true);
   view.setUint32(28, useLowFrequencyEnhancement ? 1 : 0, true);
   view.setFloat32(32, tileStart, true);
   view.setFloat32(36, tileSpan, true);
@@ -3826,6 +4107,8 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
     const fftModule = webGpu.device.createShaderModule({ code: WEBGPU_SPECTROGRAM_FFT_SHADER });
     const spectrogramRenderModule = webGpu.device.createShaderModule({ code: WEBGPU_SPECTROGRAM_RENDER_SHADER });
     const melRenderModule = webGpu.device.createShaderModule({ code: WEBGPU_MEL_RENDER_SHADER });
+    const mfccMelValuesModule = webGpu.device.createShaderModule({ code: WEBGPU_MFCC_MEL_VALUES_SHADER });
+    const mfccRenderModule = webGpu.device.createShaderModule({ code: WEBGPU_MFCC_RENDER_SHADER });
     const paramStride = 256;
     const paramSetStride = paramStride * WEBGPU_STFT_PARAM_ENTRIES_PER_SLOT;
     const paramBuffer = webGpu.device.createBuffer({
@@ -3941,6 +4224,68 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
         },
       ],
     });
+    const renderMelEnergyBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 4,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 5,
+          buffer: { type: 'storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
+    const renderMfccBindGroupLayout = webGpu.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          buffer: { hasDynamicOffset: true, type: 'uniform' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 1,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 2,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          storageTexture: {
+            access: 'write-only',
+            format: WEBGPU_TILE_TEXTURE_FORMAT as any,
+            viewDimension: '2d',
+          },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+      ],
+    });
 
     webGpu.stftCompute = {
       bandLayoutResources: new Map(),
@@ -3964,11 +4309,32 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
           bindGroupLayouts: [inputBindGroupLayout],
         }),
       }),
+      mfccBasisResources: new Map(),
       paramBuffer,
       paramSetStride,
       paramStride,
       pcmBuffer: null,
       pcmSampleCount: 0,
+      renderMfccBindGroupLayout,
+      renderMfccPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'renderMfccTexture',
+          module: mfccRenderModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [renderMfccBindGroupLayout],
+        }),
+      }),
+      renderMelEnergyBindGroupLayout,
+      renderMelEnergyPipeline: webGpu.device.createComputePipeline({
+        compute: {
+          entryPoint: 'computeMfccMelValues',
+          module: mfccMelValuesModule,
+        },
+        layout: webGpu.device.createPipelineLayout({
+          bindGroupLayouts: [renderMelEnergyBindGroupLayout],
+        }),
+      }),
       renderMelBindGroupLayout,
       renderMelPipeline: webGpu.device.createComputePipeline({
         compute: {
@@ -4291,6 +4657,8 @@ function ensureWebGpuStftScratchBuffers(
             { binding: 2, resource: { buffer: basePingBuffer } },
           ],
         }),
+        mfccMelBuffer: null,
+        mfccMelBufferCapacity: 0,
         lowInputBindGroup: webGpu.device.createBindGroup({
           layout: computeState.inputBindGroupLayout,
           entries: [
@@ -4326,6 +4694,40 @@ function ensureWebGpuStftScratchBuffers(
   return true;
 }
 
+function ensureWebGpuMfccScratchBuffer(
+  slot: WebGpuStftScratchSlot,
+  plan: RenderRequestPlan,
+  tileRecord: TileRecord,
+  webGpu: WebGpuCompositorState,
+): boolean {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return false;
+  }
+
+  const requiredValueCount = Math.max(1, tileRecord.columnCount * plan.melBandCount);
+  if (slot.mfccMelBuffer && slot.mfccMelBufferCapacity >= requiredValueCount) {
+    return true;
+  }
+
+  if (slot.mfccMelBuffer && typeof slot.mfccMelBuffer.destroy === 'function') {
+    slot.mfccMelBuffer.destroy();
+  }
+
+  try {
+    slot.mfccMelBuffer = webGpu.device.createBuffer({
+      size: alignTo(requiredValueCount * Float32Array.BYTES_PER_ELEMENT, 4),
+      usage: globals.bufferUsage.STORAGE,
+    });
+    slot.mfccMelBufferCapacity = requiredValueCount;
+    return true;
+  } catch {
+    slot.mfccMelBuffer = null;
+    slot.mfccMelBufferCapacity = 0;
+    return false;
+  }
+}
+
 async function renderStftTileWithWebGpu(
   plan: RenderRequestPlan,
   tileRecord: TileRecord,
@@ -4352,6 +4754,12 @@ async function renderStftTileWithWebGpu(
   if (!layoutResource) {
     return false;
   }
+  const mfccBasisResource = plan.analysisType === 'mfcc'
+    ? getMfccBasisResource(plan, webGpu, computeState)
+    : null;
+  if (plan.analysisType === 'mfcc' && !mfccBasisResource) {
+    return false;
+  }
 
   if (!ensureTileGpuResources(tileRecord, webGpu, { requiresStorage: true, uploadIfDirty: false })) {
     return false;
@@ -4376,6 +4784,9 @@ async function renderStftTileWithWebGpu(
   const slotIndex = Math.max(0, Math.min(computeState.scratchSlots.length - 1, scratchSlotIndex));
   const scratchSlot = computeState.scratchSlots[slotIndex] ?? null;
   if (!scratchSlot) {
+    return false;
+  }
+  if (plan.analysisType === 'mfcc' && !ensureWebGpuMfccScratchBuffer(scratchSlot, plan, tileRecord, webGpu)) {
     return false;
   }
   const slotParamOffsetBase = computeState.paramSetStride * slotIndex;
@@ -4423,12 +4834,10 @@ async function renderStftTileWithWebGpu(
     }
 
     const renderParamOffset = slotParamOffsetBase + (computeState.paramStride * (2 + stageCount));
-    writeBufferAtOffset(computeState.paramBuffer, renderParamOffset, createStftComputeParamsData(plan, {
+    writeBufferAtOffset(computeState.paramBuffer, renderParamOffset, createStftRenderParamsData(plan, {
       columnCount,
-      decimationFactor: 1,
       sampleCount,
       sampleRate: analysisState.sampleRate,
-      slotStageIndex: 0,
       tileSpan,
       tileStart,
       useLowFrequencyEnhancement,
@@ -4489,6 +4898,37 @@ async function renderStftTileWithWebGpu(
       });
       computePass.setPipeline(computeState.renderMelPipeline);
       computePass.setBindGroup(0, bindGroup, [renderParamOffset]);
+    } else if (plan.analysisType === 'mfcc') {
+      const melResource = layoutResource as MelBandLayoutResource;
+      const melEnergyBindGroup = webGpu.device.createBindGroup({
+        layout: computeState.renderMelEnergyBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+          { binding: 1, resource: { buffer: finalBaseBuffer } },
+          { binding: 2, resource: { buffer: melResource.rowBuffer } },
+          { binding: 3, resource: { buffer: melResource.binBuffer } },
+          { binding: 4, resource: { buffer: melResource.weightBuffer } },
+          { binding: 5, resource: { buffer: scratchSlot.mfccMelBuffer } },
+        ],
+      });
+      computePass.setPipeline(computeState.renderMelEnergyPipeline);
+      computePass.setBindGroup(0, melEnergyBindGroup, [renderParamOffset]);
+      computePass.dispatchWorkgroups(
+        Math.ceil(columnCount / 8),
+        Math.ceil(plan.melBandCount / 8),
+      );
+
+      const mfccBindGroup = webGpu.device.createBindGroup({
+        layout: computeState.renderMfccBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+          { binding: 1, resource: { buffer: scratchSlot.mfccMelBuffer } },
+          { binding: 2, resource: { buffer: mfccBasisResource!.buffer } },
+          { binding: 3, resource: tileRecord.gpuTextureView },
+        ],
+      });
+      computePass.setPipeline(computeState.renderMfccPipeline);
+      computePass.setBindGroup(0, mfccBindGroup, [renderParamOffset]);
     } else {
       const spectrogramResource = layoutResource as SpectrogramBandLayoutResource;
       const bindGroup = webGpu.device.createBindGroup({
@@ -5116,7 +5556,10 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
   const frequencyScale = getEffectiveFrequencyScale(analysisType, request?.frequencyScale);
   const fftSize = analysisType === 'scalogram' ? 0 : normalizeFftSize(request?.fftSize);
   const overlapRatio = analysisType === 'scalogram' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
-  const melBandCount = normalizeMelBandCount(request?.melBandCount);
+  const mfccCoefficientCount = normalizeMfccCoefficientCount(request?.mfccCoefficientCount);
+  const melBandCount = analysisType === 'mfcc'
+    ? normalizeMfccMelBandCount(request?.mfccMelBandCount ?? request?.melBandCount)
+    : normalizeMelBandCount(request?.melBandCount);
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
   const rowOversample = requestKind === 'visible' && analysisType !== 'scalogram'
     ? VISIBLE_ROW_OVERSAMPLE
@@ -5124,7 +5567,7 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
   const rowCount = analysisType === 'mel'
     ? melBandCount
     : analysisType === 'mfcc'
-      ? MFCC_COEFFICIENT_COUNT
+      ? mfccCoefficientCount
     : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
@@ -5150,6 +5593,8 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     `db${dbWindow.minDecibels}:${dbWindow.maxDecibels}`,
     `scale${frequencyScale}`,
     `fft${fftSize}`,
+    `bands${analysisType === 'mel' || analysisType === 'mfcc' ? melBandCount : 0}`,
+    `coeff${analysisType === 'mfcc' ? mfccCoefficientCount : 0}`,
     `ov${Math.round(overlapRatio * 1000)}`,
     `hop${hopSamples}`,
     `rows${rowCount}`,
@@ -5172,6 +5617,7 @@ function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPla
     hopSeconds: secondsPerColumn,
     maxDecibels: dbWindow.maxDecibels,
     melBandCount,
+    mfccCoefficientCount,
     minDecibels: dbWindow.minDecibels,
     overlapRatio,
     pixelHeight,
@@ -5211,6 +5657,7 @@ function createLayerReadyBody(plan: RenderRequestPlan) {
     hopSeconds: plan.hopSeconds,
     maxDecibels: plan.maxDecibels,
     melBandCount: plan.melBandCount,
+    mfccCoefficientCount: plan.mfccCoefficientCount,
     minDecibels: plan.minDecibels,
     overlapRatio: plan.overlapRatio,
     pixelHeight: plan.pixelHeight,
@@ -5244,6 +5691,7 @@ function isEquivalentPlan(left: RenderRequestPlan | null, right: RenderRequestPl
     && left.minDecibels === right.minDecibels
     && left.maxDecibels === right.maxDecibels
     && left.melBandCount === right.melBandCount
+    && left.mfccCoefficientCount === right.mfccCoefficientCount
     && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-6
     && Math.abs(left.viewStart - right.viewStart) <= 1e-6
     && Math.abs(left.viewEnd - right.viewEnd) <= 1e-6;
@@ -5264,6 +5712,20 @@ function normalizeMelBandCount(value: unknown): number {
   return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
     ? numericValue
     : LIBROSA_DEFAULT_MEL_BAND_COUNT;
+}
+
+function normalizeMfccCoefficientCount(value: unknown): number {
+  const numericValue = Number(value);
+  return MFCC_COEFFICIENT_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_MFCC_COEFFICIENT_COUNT;
+}
+
+function normalizeMfccMelBandCount(value: unknown): number {
+  const numericValue = Number(value);
+  return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_MFCC_MEL_BAND_COUNT;
 }
 
 function ensureSpectrogramOutputCapacity(module: WaveCoreModule, byteLength: number): void {

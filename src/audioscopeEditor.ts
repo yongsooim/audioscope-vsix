@@ -443,6 +443,23 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
                     <option value="512">512</option>
                   </select>
                 </label>
+                <label id="spectrogram-mfcc-coefficients-control" class="spectrogram-control" hidden>
+                  <span class="spectrogram-control-label">n_mfcc</span>
+                  <select id="spectrogram-mfcc-coefficients-select" class="spectrogram-control-select" aria-label="MFCC coefficient count">
+                    <option value="13">13</option>
+                    <option value="20" selected>20</option>
+                    <option value="32">32</option>
+                    <option value="40">40</option>
+                  </select>
+                </label>
+                <label id="spectrogram-mfcc-mel-bands-control" class="spectrogram-control" hidden>
+                  <span class="spectrogram-control-label">n_mels</span>
+                  <select id="spectrogram-mfcc-mel-bands-select" class="spectrogram-control-select" aria-label="MFCC mel filter count">
+                    <option value="128" selected>128</option>
+                    <option value="256">256</option>
+                    <option value="512">512</option>
+                  </select>
+                </label>
                 <label id="spectrogram-distribution-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Curve</span>
                   <select id="spectrogram-distribution-select" class="spectrogram-control-select" aria-label="Spectrogram colormap distribution">

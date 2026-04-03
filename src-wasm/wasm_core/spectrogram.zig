@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("./core.zig");
+const mel_analysis = @import("./mel_analysis.zig");
 const mfcc = @import("./mfcc.zig");
 
 const palette_lut_size: usize = 1024;
@@ -238,63 +239,17 @@ fn createBandRangesForSampleRate(
     }
 }
 
-fn createMelBands(
-    bands: []core.MelBand,
-    fft_size: i32,
-    sample_rate: f32,
-    min_frequency: f32,
-    max_frequency: f32,
-) void {
-    const rows = @as(i32, @intCast(bands.len));
-    const nyquist = sample_rate / 2.0;
-    const maximum_bin = core.maxI32(2, @divTrunc(fft_size, 2));
-    const safe_min_frequency = core.maxF32(0.0, min_frequency);
-    const safe_max_frequency = core.maxF32(safe_min_frequency + 1.0, max_frequency);
-    const mel_min = core.hzToMel(safe_min_frequency);
-    const mel_max = core.hzToMel(safe_max_frequency);
-    const mel_step = (mel_max - mel_min) / @as(f32, @floatFromInt(rows + 1));
-
-    for (bands, 0..) |*band, row_usize| {
-        const row = @as(i32, @intCast(row_usize));
-        const left_frequency = core.melToHz(mel_min + (mel_step * @as(f32, @floatFromInt(row))));
-        const center_frequency = core.melToHz(mel_min + (mel_step * @as(f32, @floatFromInt(row + 1))));
-        const right_frequency = core.melToHz(mel_min + (mel_step * @as(f32, @floatFromInt(row + 2))));
-        const start_bin = core.clampi32(
-            @as(i32, @intFromFloat(@floor((left_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
-            0,
-            maximum_bin - 1,
-        );
-        const peak_bin = core.clampi32(
-            @as(i32, @intFromFloat(@round((center_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
-            start_bin + 1,
-            maximum_bin - 1,
-        );
-        const end_bin = core.clampi32(
-            @as(i32, @intFromFloat(@ceil((right_frequency / nyquist) * @as(f32, @floatFromInt(maximum_bin))))),
-            peak_bin + 1,
-            maximum_bin,
-        );
-
-        band.* = .{
-            .start_bin = start_bin,
-            .peak_bin = peak_bin,
-            .end_bin = end_bin,
-            .start_frequency = left_frequency,
-            .center_frequency = center_frequency,
-            .end_frequency = right_frequency,
-        };
-    }
-}
-
 fn getBandLayoutResource(
     analysis_type: core.AnalysisType,
     frequency_scale: core.FrequencyScale,
     fft_size: i32,
     decimation_factor: i32,
     row_count: i32,
+    mel_band_count: i32,
     min_frequency: f32,
     max_frequency: f32,
 ) ?*core.BandLayoutResource {
+    const band_count = if (analysis_type == .mfcc) mel_band_count else row_count;
     var current = core.g_session.band_layout_resources;
     while (current) |resource| : (current = resource.next) {
         if (resource.analysis_type == analysis_type and
@@ -302,6 +257,7 @@ fn getBandLayoutResource(
             resource.fft_size == fft_size and
             resource.decimation_factor == decimation_factor and
             resource.row_count == row_count and
+            resource.band_count == band_count and
             core.approxEqF32(resource.min_frequency, min_frequency) and
             core.approxEqF32(resource.max_frequency, max_frequency))
         {
@@ -316,6 +272,7 @@ fn getBandLayoutResource(
         .fft_size = fft_size,
         .decimation_factor = decimation_factor,
         .row_count = row_count,
+        .band_count = band_count,
         .min_frequency = min_frequency,
         .max_frequency = max_frequency,
     };
@@ -326,12 +283,17 @@ fn getBandLayoutResource(
 
     switch (analysis_type) {
         .mel => {
-            resource.mel_bands = core.allocator.alloc(core.MelBand, @as(usize, @intCast(row_count))) catch return null;
-            createMelBands(resource.mel_bands, fft_size, core.g_session.sample_rate, min_frequency, max_frequency);
+            resource.mel_bands = core.allocator.alloc(core.MelBand, @as(usize, @intCast(band_count))) catch return null;
+            mel_analysis.createMelBands(resource.mel_bands, fft_size, core.g_session.sample_rate, min_frequency, max_frequency);
         },
         .mfcc => {
-            resource.mel_bands = core.allocator.alloc(core.MelBand, @as(usize, @intCast(row_count))) catch return null;
-            createMelBands(resource.mel_bands, fft_size, core.g_session.sample_rate, min_frequency, max_frequency);
+            resource.mel_bands = core.allocator.alloc(core.MelBand, @as(usize, @intCast(band_count))) catch return null;
+            mel_analysis.createMelBands(resource.mel_bands, fft_size, core.g_session.sample_rate, min_frequency, max_frequency);
+            resource.mfcc_basis = core.allocator.alloc(
+                f32,
+                @as(usize, @intCast(row_count)) * @as(usize, @intCast(band_count)),
+            ) catch return null;
+            mfcc.writeDctBasis(resource.mfcc_basis, row_count, band_count);
         },
         .spectrogram => {
             resource.band_ranges = core.allocator.alloc(core.BandRange, @as(usize, @intCast(row_count))) catch return null;
@@ -491,32 +453,6 @@ fn computeBandMeanPower(power_spectrum: []const f32, range: core.BandRange) f32 
     }
 
     return weighted_energy / core.maxF32(total_weight, 1e-8);
-}
-
-fn computeMelBandPower(power_spectrum: []const f32, band: core.MelBand, fft_size: i32, sample_rate: f32) f32 {
-    const maximum_bin = core.maxI32(2, @divTrunc(fft_size, 2));
-    const nyquist = sample_rate / 2.0;
-    const area_normalization = 2.0 / core.maxF32(1e-6, band.end_frequency - band.start_frequency);
-    var weighted_energy: f32 = 0.0;
-    var bin = band.start_bin;
-
-    while (bin < band.end_bin) : (bin += 1) {
-        const frequency = (@as(f32, @floatFromInt(bin)) / @as(f32, @floatFromInt(maximum_bin))) * nyquist;
-        var weight: f32 = 0.0;
-
-        if (frequency <= band.center_frequency) {
-            const denominator = core.maxF32(1e-6, band.center_frequency - band.start_frequency);
-            weight = (frequency - band.start_frequency) / denominator;
-        } else {
-            const denominator = core.maxF32(1e-6, band.end_frequency - band.center_frequency);
-            weight = (band.end_frequency - frequency) / denominator;
-        }
-
-        weight = core.clampf32(weight, 0.0, 1.0);
-        weighted_energy += power_spectrum[@as(usize, @intCast(bin))] * (weight * area_normalization);
-    }
-
-    return weighted_energy;
 }
 
 fn displayMinDbForAnalysisType(analysis_type: core.AnalysisType) f32 {
@@ -726,6 +662,7 @@ fn renderStftDerivedTile(
     tile_end: f64,
     column_count: i32,
     row_count: i32,
+    mel_band_count: i32,
     fft_size: i32,
     decimation_factor: i32,
     min_frequency: f32,
@@ -756,6 +693,7 @@ fn renderStftDerivedTile(
         fft_size,
         decimation_factor,
         row_count,
+        mel_band_count,
         safe_min_frequency,
         safe_max_frequency,
     ) orelse return 0;
@@ -792,6 +730,8 @@ fn renderStftDerivedTile(
             mfcc.writeColumn(
                 power_spectrum,
                 layout.mel_bands,
+                layout.mfcc_basis,
+                @as(usize, @intCast(row_count)),
                 fft_size,
                 core.g_session.sample_rate,
                 distribution_gamma,
@@ -805,12 +745,13 @@ fn renderStftDerivedTile(
         var row: i32 = 0;
         while (row < row_count) : (row += 1) {
             const normalized = switch (analysis_type) {
-                .mel => normalizePowerForDisplay(computeMelBandPower(
+                .mel => normalizePowerForDisplay(mel_analysis.computeMelBandPower(
                     power_spectrum,
                     layout.mel_bands[@as(usize, @intCast(row))],
                     fft_size,
                     core.g_session.sample_rate,
                 ), .mel, distribution_gamma, min_db, max_db),
+                .mfcc => 0.0,
                 .spectrogram => blk: {
                     const base_range = layout.band_ranges[@as(usize, @intCast(row))];
                     const use_low_band = layout.use_low_frequency_enhancement and base_range.end_frequency <= layout.low_frequency_maximum;
@@ -821,7 +762,6 @@ fn renderStftDerivedTile(
                     const active_power = if (use_low_band) low_power_spectrum else power_spectrum;
                     break :blk normalizePowerForDisplay(computeBandMeanPower(active_power, active_range), .spectrogram, distribution_gamma, min_db, max_db);
                 },
-                .mfcc => 0.0,
                 .scalogram => 0.0,
             };
 
@@ -909,11 +849,63 @@ fn renderScalogramTile(
     return 1;
 }
 
+pub export fn wave_sample_mfcc_value_at_frame(
+    center_sample: i32,
+    coefficient_index: i32,
+    coefficient_count: i32,
+    mel_band_count: i32,
+    fft_size: i32,
+    min_frequency: f32,
+    max_frequency: f32,
+) f32 {
+    if (core.g_session.samples.len == 0 or coefficient_count <= 0 or coefficient_index < 0 or coefficient_index >= coefficient_count or mel_band_count <= 0 or fft_size <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or core.g_session.sample_rate <= 0.0 or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
+        return std.math.nan(f32);
+    }
+
+    const safe_min_frequency = core.clampf32(min_frequency, core.g_session.min_frequency, core.g_session.max_frequency);
+    const safe_max_frequency = core.clampf32(max_frequency, safe_min_frequency, core.g_session.max_frequency);
+    if (safe_max_frequency <= safe_min_frequency) {
+        return std.math.nan(f32);
+    }
+
+    const resource = getFftResource(fft_size) orelse return std.math.nan(f32);
+    const layout = getBandLayoutResource(
+        .mfcc,
+        .log,
+        coefficient_count,
+        mel_band_count,
+        fft_size,
+        1,
+        safe_min_frequency,
+        safe_max_frequency,
+    ) orelse return std.math.nan(f32);
+
+    const safe_center_sample = core.clampi32(center_sample, 0, core.g_session.sample_count - 1);
+    const input = resource.input.?;
+    const output_buffer = resource.output.?;
+    const work_buffer = resource.work.?;
+    const setup = resource.setup.?;
+
+    writeWindowedInput(resource, safe_center_sample);
+    core.pffft_transform_ordered(setup, input.ptr, output_buffer.ptr, work_buffer.ptr, .forward);
+    writePowerSpectrum(resource, resource.power_spectrum);
+
+    return mfcc.sampleCoefficient(
+        resource.power_spectrum,
+        layout.mel_bands,
+        layout.mfcc_basis,
+        @as(usize, @intCast(coefficient_index)),
+        fft_size,
+        core.g_session.sample_rate,
+    );
+}
+
 pub export fn wave_render_spectrogram_tile_rgba(
     tile_start: f64,
     tile_end: f64,
     column_count: i32,
     row_count: i32,
+    mel_band_count: i32,
     fft_size: i32,
     decimation_factor: i32,
     min_frequency: f32,
@@ -953,6 +945,7 @@ pub export fn wave_render_spectrogram_tile_rgba(
                 tile_end,
                 column_count,
                 row_count,
+                mel_band_count,
                 fft_size,
                 decimation_factor,
                 min_frequency,

@@ -50,7 +50,9 @@ const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
 const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
 const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
 const ROW_BUCKET_SIZE = 16;
-const MFCC_COEFFICIENT_COUNT = 20;
+const DEFAULT_MFCC_COEFFICIENT_COUNT = 20;
+const DEFAULT_MFCC_MEL_BAND_COUNT = 128;
+const MFCC_COEFFICIENT_OPTIONS = [13, 20, 32, 40];
 const LIBROSA_DEFAULT_MEL_BAND_COUNT = 256;
 const MEL_BAND_COUNT_OPTIONS = [128, 256, 512];
 const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
@@ -166,6 +168,7 @@ interface SpectrogramPlan {
   hopSamples: number;
   hopSeconds: number;
   maxDecibels: number;
+  melBandCount: number;
   minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
@@ -244,6 +247,8 @@ interface EngineState {
     frequencyScale: SpectrogramFrequencyScale;
     maxDecibels: number;
     melBandCount: number;
+    mfccCoefficientCount: number;
+    mfccMelBandCount: number;
     minDecibels: number;
     overlapRatio: number;
   };
@@ -303,6 +308,8 @@ const state: EngineState = {
     frequencyScale: 'log',
     maxDecibels: 0,
     melBandCount: LIBROSA_DEFAULT_MEL_BAND_COUNT,
+    mfccCoefficientCount: DEFAULT_MFCC_COEFFICIENT_COUNT,
+    mfccMelBandCount: DEFAULT_MFCC_MEL_BAND_COUNT,
     minDecibels: -80,
     overlapRatio: 0.75,
   },
@@ -630,6 +637,20 @@ function normalizeMelBandCount(value: unknown): number {
     : LIBROSA_DEFAULT_MEL_BAND_COUNT;
 }
 
+function normalizeMfccCoefficientCount(value: unknown): number {
+  const numericValue = Number(value);
+  return MFCC_COEFFICIENT_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_MFCC_COEFFICIENT_COUNT;
+}
+
+function normalizeMfccMelBandCount(value: unknown): number {
+  const numericValue = Number(value);
+  return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
+    ? numericValue
+    : DEFAULT_MFCC_MEL_BAND_COUNT;
+}
+
 function handleSpectrogramConfig(config: {
   analysisType: SpectrogramAnalysisType;
   colormapDistribution: SpectrogramColormapDistribution;
@@ -637,6 +658,8 @@ function handleSpectrogramConfig(config: {
   frequencyScale: SpectrogramFrequencyScale;
   maxDecibels: number;
   melBandCount: number;
+  mfccCoefficientCount: number;
+  mfccMelBandCount: number;
   minDecibels: number;
   overlapRatio: number;
 }): void {
@@ -656,6 +679,8 @@ function handleSpectrogramConfig(config: {
     ? (config.frequencyScale === 'linear' || config.frequencyScale === 'mixed' ? config.frequencyScale : 'log')
     : 'log';
   const nextMelBandCount = normalizeMelBandCount(config.melBandCount);
+  const nextMfccCoefficientCount = normalizeMfccCoefficientCount(config.mfccCoefficientCount);
+  const nextMfccMelBandCount = normalizeMfccMelBandCount(config.mfccMelBandCount ?? config.melBandCount);
   const nextDbWindow = normalizeSpectrogramDbWindow(
     config.minDecibels,
     config.maxDecibels,
@@ -669,6 +694,8 @@ function handleSpectrogramConfig(config: {
     || nextDbWindow.minDecibels !== state.spectrogramConfig.minDecibels
     || nextDbWindow.maxDecibels !== state.spectrogramConfig.maxDecibels
     || nextMelBandCount !== state.spectrogramConfig.melBandCount
+    || nextMfccCoefficientCount !== state.spectrogramConfig.mfccCoefficientCount
+    || nextMfccMelBandCount !== state.spectrogramConfig.mfccMelBandCount
     || Math.abs(nextOverlapRatio - state.spectrogramConfig.overlapRatio) > 1e-9
     || nextFrequencyScale !== state.spectrogramConfig.frequencyScale;
 
@@ -684,6 +711,8 @@ function handleSpectrogramConfig(config: {
     frequencyScale: nextFrequencyScale,
     maxDecibels: nextDbWindow.maxDecibels,
     melBandCount: nextMelBandCount,
+    mfccCoefficientCount: nextMfccCoefficientCount,
+    mfccMelBandCount: nextMfccMelBandCount,
     minDecibels: nextDbWindow.minDecibels,
     overlapRatio: nextOverlapRatio,
   };
@@ -1469,14 +1498,18 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     : 'log';
   const fftSize = analysisType === 'scalogram' ? 0 : state.spectrogramConfig.fftSize;
   const overlapRatio = analysisType === 'scalogram' ? 0 : state.spectrogramConfig.overlapRatio;
+  const effectiveMelBandCount = analysisType === 'mfcc'
+    ? normalizeMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount)
+    : normalizeMelBandCount(state.spectrogramConfig.melBandCount);
+  const mfccCoefficientCount = normalizeMfccCoefficientCount(state.spectrogramConfig.mfccCoefficientCount);
   const pixelWidth = Math.max(1, state.spectrogramSurface.pixelWidth);
   const pixelHeight = Math.max(1, state.spectrogramSurface.pixelHeight);
   const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
   const rowOversample = analysisType === 'scalogram' ? 1 : VISIBLE_ROW_OVERSAMPLE;
   const rowCount = analysisType === 'mel'
-    ? normalizeMelBandCount(state.spectrogramConfig.melBandCount)
+    ? effectiveMelBandCount
     : analysisType === 'mfcc'
-      ? MFCC_COEFFICIENT_COUNT
+      ? mfccCoefficientCount
       : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
@@ -1502,6 +1535,8 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     `dist${colormapDistribution}`,
     `scale${frequencyScale}`,
     `fft${fftSize}`,
+    `bands${analysisType === 'mel' || analysisType === 'mfcc' ? effectiveMelBandCount : 0}`,
+    `coeff${analysisType === 'mfcc' ? mfccCoefficientCount : 0}`,
     `db${dbWindow.minDecibels}:${dbWindow.maxDecibels}`,
     `ov${Math.round(overlapRatio * 1000)}`,
     `hop${hopSamples}`,
@@ -1520,6 +1555,7 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     hopSamples,
     hopSeconds,
     maxDecibels: dbWindow.maxDecibels,
+    melBandCount: effectiveMelBandCount,
     minDecibels: dbWindow.minDecibels,
     overlapRatio,
     pixelHeight,
@@ -1590,6 +1626,7 @@ function renderSpectrogramTileChunk(
     chunkEnd,
     columnCount,
     plan.rowCount,
+    plan.melBandCount,
     plan.fftSize,
     plan.decimationFactor,
     state.session.minFrequency,
@@ -1934,8 +1971,11 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
   );
   if (state.spectrogramConfig.analysisType === 'mfcc') {
     const coefficient = getMfccCoefficientAtPosition(clamp01(pointerRatioY));
+    const coefficientValue = sampleMfccValueAtFrame(frame, coefficient);
     return {
-      label: `${formatAxisLabel(frame / sampleRate)} • MFCC C${coefficient}`,
+      label: coefficientValue === null
+        ? `${formatAxisLabel(frame / sampleRate)} • MFCC C${coefficient}`
+        : `${formatAxisLabel(frame / sampleRate)} • MFCC C${coefficient} = ${formatMfccValue(coefficientValue)}`,
       markerVisible: false,
       markerXRatio: ratioX,
       markerYRatio: clamp01(pointerRatioY),
@@ -1955,17 +1995,51 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
   };
 }
 
+function getActiveMfccCoefficientCount(): number {
+  return normalizeMfccCoefficientCount(state.spectrogramConfig.mfccCoefficientCount);
+}
+
+function getActiveMfccMelBandCount(): number {
+  return normalizeMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount);
+}
+
 function getMfccCoefficientAtPosition(positionRatio: number): number {
-  if (MFCC_COEFFICIENT_COUNT <= 1) {
+  const coefficientCount = getActiveMfccCoefficientCount();
+  if (coefficientCount <= 1) {
     return 0;
   }
 
   const normalized = 1 - clamp01(positionRatio);
   return clamp(
-    Math.round(normalized * (MFCC_COEFFICIENT_COUNT - 1)),
+    Math.round(normalized * (coefficientCount - 1)),
     0,
-    MFCC_COEFFICIENT_COUNT - 1,
+    coefficientCount - 1,
   );
+}
+
+function sampleMfccValueAtFrame(frame: number, coefficient: number): number | null {
+  const module = state.session.module;
+  if (!module || !state.session.initialized || state.spectrogramConfig.analysisType !== 'mfcc') {
+    return null;
+  }
+
+  const coefficientCount = getActiveMfccCoefficientCount();
+  const melBandCount = getActiveMfccMelBandCount();
+  const fftSize = Math.max(1, Number(state.spectrogramConfig.fftSize) || 0);
+  if (coefficient < 0 || coefficient >= coefficientCount) {
+    return null;
+  }
+
+  const value = module._wave_sample_mfcc_value_at_frame(
+    clampFrame(frame),
+    coefficient,
+    coefficientCount,
+    melBandCount,
+    fftSize,
+    state.session.minFrequency,
+    state.session.maxFrequency,
+  );
+  return Number.isFinite(value) ? value : null;
 }
 
 function getSpectrogramFrequencyAtPosition(positionRatio: number): number {
@@ -1998,14 +2072,16 @@ function getActiveSpectrogramAxisMode(): SpectrogramAnalysisType | SpectrogramFr
 
 function buildFrequencyTicks(): FrequencyTickUi[] {
   if (state.spectrogramConfig.analysisType === 'mfcc') {
-    const tickRows = [MFCC_COEFFICIENT_COUNT - 1, 15, 10, 5, 0]
-      .filter((row, index, rows) => row >= 0 && row < MFCC_COEFFICIENT_COUNT && rows.indexOf(row) === index);
+    const coefficientCount = getActiveMfccCoefficientCount();
+    const lastRow = Math.max(0, coefficientCount - 1);
+    const tickRows = [lastRow, Math.round(lastRow * 0.75), Math.round(lastRow * 0.5), Math.round(lastRow * 0.25), 0]
+      .filter((row, index, rows) => row >= 0 && row < coefficientCount && rows.indexOf(row) === index);
 
     return tickRows.map((row, index) => ({
       edge: index === 0 ? 'top' : index === tickRows.length - 1 ? 'bottom' : 'middle',
       frequency: row,
       label: `C${row}`,
-      positionRatio: MFCC_COEFFICIENT_COUNT <= 1 ? 1 : 1 - (row / (MFCC_COEFFICIENT_COUNT - 1)),
+      positionRatio: coefficientCount <= 1 ? 1 : 1 - (row / (coefficientCount - 1)),
     }));
   }
 
@@ -2657,6 +2733,11 @@ function formatSampleOrdinal(sampleNumber: number): string {
 function formatSampleValue(sampleValue: number): string {
   const normalized = Math.abs(sampleValue) < 0.00005 ? 0 : sampleValue;
   return normalized.toFixed(6).replace(/(?:\.0+|(\.\d*?[1-9]))0+$/, '$1');
+}
+
+function formatMfccValue(value: number): string {
+  const normalized = Math.abs(value) < 0.00005 ? 0 : value;
+  return normalized.toFixed(4).replace(/(?:\.0+|(\.\d*?[1-9]))0+$/, '$1');
 }
 
 function framesToSeconds(frame: number): number {
