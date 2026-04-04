@@ -405,6 +405,7 @@ export function createAudioscopeMediaController({
     appendMetadataDetailRow(overviewSection, 'Format', detail?.formatLongName || detail?.formatName || detailSummary?.containerText || null);
     appendMetadataDetailRow(overviewSection, 'Codec', detailSummary?.codecText || null);
     appendMetadataDetailRow(overviewSection, 'Sample Rate', detailSummary?.sampleRateText || null);
+    appendMetadataDetailRow(overviewSection, 'Bit Depth', detailSummary?.bitDepthText || null);
     appendMetadataDetailRow(overviewSection, 'Channels', detailSummary?.channelText || null);
     appendMetadataDetailRow(overviewSection, 'Bitrate', detailSummary?.bitrateText || null);
     appendMetadataDetailRow(overviewSection, 'Duration', detailSummary?.durationText || null);
