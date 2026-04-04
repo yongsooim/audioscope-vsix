@@ -33,5 +33,5 @@ export function formatAxisLabel(seconds: number): string {
   const secondsPart = Math.floor((totalTenths % 600) / 10);
   const tenths = totalTenths % 10;
 
-  return `${minutes}:${String(secondsPart).padStart(2, '0')}:${tenths}`;
+  return `${minutes}:${String(secondsPart).padStart(2, '0')}.${tenths}`;
 }
