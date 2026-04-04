@@ -18,6 +18,7 @@ interface LifecycleState {
     waveform: unknown | null;
   };
   lastAppliedTransportCommandSerial: number;
+  lastSyncedSpectrogramDisplay: unknown | null;
   loopHandleDrag: unknown | null;
   playbackFrame: number;
   playbackSession: PlaybackSession | null;
@@ -115,6 +116,7 @@ export function createAudioscopeLifecycleController({
     state.selectionDrag = null;
     state.loopHandleDrag = null;
     state.engineUiState = null;
+    state.lastSyncedSpectrogramDisplay = null;
     state.hoverState.waveform = null;
     state.hoverState.spectrogram = null;
     state.lastAppliedTransportCommandSerial = 0;

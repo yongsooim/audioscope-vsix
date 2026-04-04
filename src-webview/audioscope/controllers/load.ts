@@ -15,7 +15,6 @@ export type AudioscopeWorkerBootstrapStateKey =
 interface AudioscopeLoadControllerDeps {
   audioTransportProcessorScriptUri?: string;
   createModuleWorker: (moduleUrl: string, bootstrapStateKey: AudioscopeWorkerBootstrapStateKey) => Worker;
-  createPlaybackAnalysisData: (audioBuffer: AudioBuffer) => { monoSamples: Float32Array; playbackSession: any };
   createPlaybackAnalysisDataFromPlaybackSession: typeof createPlaybackAnalysisDataFromPlaybackSession;
   createPlaybackSessionFromPcmFallback: typeof createPlaybackSessionFromPcmFallback;
   createMediaMetadataState: typeof createMediaMetadataState;
@@ -48,7 +47,6 @@ interface AudioscopeLoadControllerDeps {
 export function createAudioscopeLoadController({
   audioTransportProcessorScriptUri,
   createModuleWorker,
-  createPlaybackAnalysisData,
   createPlaybackAnalysisDataFromPlaybackSession,
   createPlaybackSessionFromPcmFallback,
   createMediaMetadataState,

@@ -17,17 +17,14 @@ import {
   buildTileCacheKey,
   createLayerReadyBody,
   createRequestPlan,
-  isChromaAnalysisType,
   isEquivalentPlan,
   normalizeQualityPreset,
   type AnalysisType,
-  type ColormapDistribution,
   type FrequencyScale,
   type LayerKind,
   type QualityPreset,
   type RenderRequestPlan,
   type SpectrogramRequest,
-  type WindowFunction,
 } from './requestPlan';
 import {
   ANALYSIS_TYPE_CODES,
@@ -64,7 +61,6 @@ import {
 } from './constants';
 import {
   WEBGPU_BACKGROUND_SHADER,
-  WEBGPU_PALETTE_SHADER_HELPERS,
   WEBGPU_TILE_SHADER,
 } from './shaderCommon';
 import {
@@ -72,8 +68,6 @@ import {
   WEBGPU_CQT_VALUES_SHADER,
 } from './shaderChroma';
 import {
-  WEBGPU_MEL_ANALYSIS_FUNCTIONS,
-  WEBGPU_MEL_ANALYSIS_SHADER_HELPERS,
   WEBGPU_MEL_RENDER_SHADER,
 } from './shaderMel';
 import {
@@ -328,6 +322,8 @@ interface WebGpuCompositorState {
   backgroundPipeline: any;
   presentInstanceBuffer: any;
   presentInstanceCapacity: number;
+  presentInstanceData: Float32Array | null;
+  presentInstances: Array<{ bindGroup: any; destLeft: number; destRight: number; uvEnd: number; uvStart: number }>;
   sampler: any;
   cqtCompute: WebGpuCqtComputeState | null;
   scalogramCompute: WebGpuScalogramComputeState | null;
@@ -342,6 +338,23 @@ let overviewRenderLoopActive = false;
 let visibleRenderLoopActive = false;
 let pendingOverviewRequest: SpectrogramRequest | null = null;
 let pendingVisibleRequest: SpectrogramRequest | null = null;
+
+function createScratchBuffer(byteLength: number): { buffer: ArrayBuffer; view: DataView } {
+  const buffer = new ArrayBuffer(byteLength);
+  return {
+    buffer,
+    view: new DataView(buffer),
+  };
+}
+
+const stftComputeParamsScratch = createScratchBuffer(64);
+const stftRenderParamsScratch = createScratchBuffer(64);
+const scalogramComputeParamsScratch = createScratchBuffer(64);
+const cqtComputeParamsScratch = createScratchBuffer(64);
+const cqtRenderParamsScratch = createScratchBuffer(64);
+const scalogramFftStageParamsScratch = createScratchBuffer(16);
+const scalogramFftMultiplyParamsScratch = createScratchBuffer(16);
+const scalogramFftRenderParamsScratch = createScratchBuffer(64);
 
 const surfaceState = {
   backend: 'uninitialized' as SurfaceBackend,
@@ -399,10 +412,9 @@ self.onmessage = (event) => {
       void pumpVisibleLoop();
       return;
     case 'updateVisibleDisplayRange':
-      if (message.body) {
-        updateCurrentDisplayRange(message.body);
+      if (message.body && updateCurrentDisplayRange(message.body)) {
+        paintSpectrogramDisplay();
       }
-      paintSpectrogramDisplay();
       return;
     case 'cancelGeneration':
       cancelGeneration(message.body?.generation);
@@ -1138,6 +1150,8 @@ async function initializeWebGpuCompositor(): Promise<void> {
         device,
         presentInstanceBuffer: null,
         presentInstanceCapacity: 0,
+        presentInstanceData: null,
+        presentInstances: [],
         sampler,
         cqtCompute: null,
         scalogramCompute: null,
@@ -1345,7 +1359,7 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
   postAnalysisInitialized();
 }
 
-function updateCurrentDisplayRange(request: SpectrogramRequest | null): void {
+function updateCurrentDisplayRange(request: SpectrogramRequest | null): boolean {
   const start = clamp(Number(request?.displayStart) || 0, 0, analysisState.duration);
   const end = clamp(
     Number(request?.displayEnd) || analysisState.duration,
@@ -1353,12 +1367,23 @@ function updateCurrentDisplayRange(request: SpectrogramRequest | null): void {
     analysisState.duration || start + 1e-6,
   );
 
-  analysisState.currentDisplayRange = {
-    start,
-    end,
-    pixelWidth: Math.max(1, Math.round(Number(request?.pixelWidth) || surfaceState.pixelWidth || 1)),
-    pixelHeight: Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1)),
-  };
+  const pixelWidth = Math.max(1, Math.round(Number(request?.pixelWidth) || surfaceState.pixelWidth || 1));
+  const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1));
+  const currentDisplayRange = analysisState.currentDisplayRange;
+  const changed = currentDisplayRange.start !== start
+    || currentDisplayRange.end !== end
+    || currentDisplayRange.pixelWidth !== pixelWidth
+    || currentDisplayRange.pixelHeight !== pixelHeight;
+
+  if (!changed) {
+    return false;
+  }
+
+  currentDisplayRange.start = start;
+  currentDisplayRange.end = end;
+  currentDisplayRange.pixelWidth = pixelWidth;
+  currentDisplayRange.pixelHeight = pixelHeight;
+  return true;
 }
 
 function cancelGeneration(generation: unknown): void {
@@ -2857,8 +2882,7 @@ function createStftComputeParamsData(
     useLowFrequencyEnhancement: boolean;
   },
 ): ArrayBuffer {
-  const buffer = new ArrayBuffer(64);
-  const view = new DataView(buffer);
+  const { buffer, view } = stftComputeParamsScratch;
   const halfFftSize = Math.max(1, plan.fftSize / 2);
   const powerScale = 1 / (halfFftSize * halfFftSize);
 
@@ -2898,8 +2922,7 @@ function createStftRenderParamsData(
     useLowFrequencyEnhancement: boolean;
   },
 ): ArrayBuffer {
-  const buffer = new ArrayBuffer(64);
-  const view = new DataView(buffer);
+  const { buffer, view } = stftRenderParamsScratch;
   const halfFftSize = Math.max(1, plan.fftSize / 2);
   const powerScale = 1 / (halfFftSize * halfFftSize);
 
@@ -2937,8 +2960,7 @@ function createScalogramComputeParamsData(
     tileStart: number;
   },
 ): ArrayBuffer {
-  const buffer = new ArrayBuffer(64);
-  const view = new DataView(buffer);
+  const { buffer, view } = scalogramComputeParamsScratch;
   view.setUint32(0, columnCount, true);
   view.setUint32(4, plan.rowCount, true);
   view.setUint32(8, sampleCount, true);
@@ -2959,8 +2981,7 @@ function createCqtComputeParamsData(
   tileStart: number,
   tileSpan: number,
 ): ArrayBuffer {
-  const buffer = new ArrayBuffer(64);
-  const view = new DataView(buffer);
+  const { buffer, view } = cqtComputeParamsScratch;
   view.setUint32(0, columnCount, true);
   view.setUint32(4, binCount, true);
   view.setUint32(8, sampleCount, true);
@@ -2975,8 +2996,7 @@ function createCqtRenderParamsData(
   columnCount: number,
   binCount: number,
 ): ArrayBuffer {
-  const buffer = new ArrayBuffer(64);
-  const view = new DataView(buffer);
+  const { buffer, view } = cqtRenderParamsScratch;
   view.setUint32(0, columnCount, true);
   view.setUint32(4, plan.rowCount, true);
   view.setUint32(8, binCount, true);
@@ -2990,8 +3010,7 @@ function createScalogramFftStageParamsData(
   inverse: boolean,
   sequenceCount: number = 1,
 ): ArrayBuffer {
-  const buffer = new ArrayBuffer(16);
-  const view = new DataView(buffer);
+  const { buffer, view } = scalogramFftStageParamsScratch;
   view.setUint32(0, fftSize, true);
   view.setUint32(4, stageIndex, true);
   view.setUint32(8, inverse ? 1 : 0, true);
@@ -3005,8 +3024,7 @@ function createScalogramFftMultiplyParamsData(
   halfFftSize: number,
   rowStart: number,
 ): ArrayBuffer {
-  const buffer = new ArrayBuffer(16);
-  const view = new DataView(buffer);
+  const { buffer, view } = scalogramFftMultiplyParamsScratch;
   view.setUint32(0, fftSize, true);
   view.setUint32(4, rowStart, true);
   view.setUint32(8, batchCount, true);
@@ -3036,8 +3054,7 @@ function createScalogramFftRenderParamsData(
     tileStart: number;
   },
 ): ArrayBuffer {
-  const buffer = new ArrayBuffer(64);
-  const view = new DataView(buffer);
+  const { buffer, view } = scalogramFftRenderParamsScratch;
   view.setUint32(0, fftSize, true);
   view.setUint32(4, columnCount, true);
   view.setUint32(8, plan.rowCount, true);
@@ -4791,7 +4808,12 @@ function ensurePresentInstanceBuffer(webGpu: WebGpuCompositorState, requiredInst
   }
 
   const instanceCount = Math.max(1, requiredInstances);
-  if (webGpu.presentInstanceBuffer && webGpu.presentInstanceCapacity >= instanceCount) {
+  if (
+    webGpu.presentInstanceBuffer
+    && webGpu.presentInstanceCapacity >= instanceCount
+    && webGpu.presentInstanceData
+    && webGpu.presentInstanceData.length >= instanceCount * 4
+  ) {
     return;
   }
 
@@ -4804,6 +4826,7 @@ function ensurePresentInstanceBuffer(webGpu: WebGpuCompositorState, requiredInst
     size: instanceCount * Float32Array.BYTES_PER_ELEMENT * 4,
     usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.VERTEX,
   });
+  webGpu.presentInstanceData = new Float32Array(instanceCount * 4);
 }
 
 function collectLayerWebGpuInstances(
@@ -4812,12 +4835,13 @@ function collectLayerWebGpuInstances(
   displayRange: AnalysisWorkerState['currentDisplayRange'],
 ): Array<{ bindGroup: any; destLeft: number; destRight: number; uvStart: number; uvEnd: number }> {
   if (!plan) {
-    return [];
+    webGpu.presentInstances.length = 0;
+    return webGpu.presentInstances;
   }
 
   const span = Math.max(1e-6, displayRange.end - displayRange.start);
   const destinationWidth = Math.max(1, surfaceState.pixelWidth);
-  const instances: Array<{ bindGroup: any; destLeft: number; destRight: number; uvStart: number; uvEnd: number }> = [];
+  let instanceCount = 0;
 
   for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
     const cacheKey = buildTileCacheKey(analysisState.quality, plan, tileIndex);
@@ -4860,16 +4884,24 @@ function collectLayerWebGpuInstances(
       1,
       Math.ceil((destinationEndRatio - destinationStartRatio) * destinationWidth),
     );
-    instances.push({
-      bindGroup: tile.gpuBindGroup,
-      destLeft: ((destinationX / destinationWidth) * 2) - 1,
-      destRight: (((destinationX + destinationWidthPx) / destinationWidth) * 2) - 1,
-      uvEnd: (sourceX + sourceWidth) / tile.columnCount,
-      uvStart: sourceX / tile.columnCount,
-    });
+    const instance = webGpu.presentInstances[instanceCount] ?? {
+      bindGroup: null,
+      destLeft: 0,
+      destRight: 0,
+      uvEnd: 0,
+      uvStart: 0,
+    };
+    instance.bindGroup = tile.gpuBindGroup;
+    instance.destLeft = ((destinationX / destinationWidth) * 2) - 1;
+    instance.destRight = (((destinationX + destinationWidthPx) / destinationWidth) * 2) - 1;
+    instance.uvEnd = (sourceX + sourceWidth) / tile.columnCount;
+    instance.uvStart = sourceX / tile.columnCount;
+    webGpu.presentInstances[instanceCount] = instance;
+    instanceCount += 1;
   }
 
-  return instances;
+  webGpu.presentInstances.length = instanceCount;
+  return webGpu.presentInstances;
 }
 
 function paintLayerWithWebGpu(
@@ -4884,7 +4916,10 @@ function paintLayerWithWebGpu(
   }
 
   ensurePresentInstanceBuffer(webGpu, instances.length);
-  const instanceData = new Float32Array(instances.length * 4);
+  const instanceData = webGpu.presentInstanceData?.subarray(0, instances.length * 4);
+  if (!instanceData) {
+    return;
+  }
 
   for (let index = 0; index < instances.length; index += 1) {
     const instance = instances[index];

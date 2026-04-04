@@ -320,7 +320,7 @@ class AudioWorkletCopyTransport {
   }
 
   isPlaying(): boolean {
-    return this.playing || this.snapshotState?.playing === true;
+    return !this.ended && (this.playing || this.snapshotState?.playing === true);
   }
 
   setPlaybackRate(_rate: number): void {

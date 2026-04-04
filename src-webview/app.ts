@@ -68,8 +68,6 @@ const SPECTROGRAM_SCALOGRAM_ROW_DENSITY_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 3, 4];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
-const SPECTROGRAM_OVERVIEW_HEIGHT_SCALE = 0.7;
-const SPECTROGRAM_OVERVIEW_WIDTH_SCALE = 0.45;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
 const DEFAULT_SCALOGRAM_OMEGA0 = 6;
 const DEFAULT_SCALOGRAM_ROW_DENSITY = 1;
@@ -103,6 +101,10 @@ function createInitialWaveformViewportState() {
     presentedRange: { end: 0, start: 0 },
     targetRange: { end: 0, start: 0 },
   };
+}
+
+function areTimeRangesEqual(left: TimeRange | null | undefined, right: TimeRange | null | undefined): boolean {
+  return Boolean(left && right && left.start === right.start && left.end === right.end);
 }
 
 type HoverContext = {
@@ -240,6 +242,12 @@ const state = {
   observedSpectrogramPixelWidth: 0,
   observedWaveformViewportHeight: 0,
   observedWaveformViewportWidth: 0,
+  lastSyncedSpectrogramDisplay: null as {
+    end: number;
+    pixelHeight: number;
+    pixelWidth: number;
+    start: number;
+  } | null,
   renderedFrequencyTicks: null as ViewportUiState['frequencyTicks'] | null,
   renderedWaveformAxisTicks: null as ViewportUiState['waveformAxisTicks'] | null,
   renderedWaveformAxisWidthPx: 0,
@@ -331,7 +339,6 @@ const {
 const {
   destroySession,
   disposeAnalysisWorker,
-  disposeEngineWorker,
 } = createAudioscopeLifecycleController({
   createInitialWaveformViewportState,
   elements,
@@ -624,13 +631,6 @@ function frameToSeconds(frame: number): number {
   return sampleRate > 0 ? clamp(frame, 0, getDurationFrames()) / sampleRate : 0;
 }
 
-function secondsToFrame(timeSeconds: number): number {
-  const sampleRate = getSampleRate();
-  return sampleRate > 0
-    ? clamp(Math.round(timeSeconds * sampleRate), 0, getDurationFrames())
-    : 0;
-}
-
 function createModuleWorker(
   moduleUrl: string,
   bootstrapStateKey: AudioscopeWorkerBootstrapStateKey,
@@ -847,16 +847,19 @@ function applyTransportCommand(command: TransportCommand | null): void {
 }
 
 function applyViewportUiState(uiState: ViewportUiState): void {
+  const previousPresentedRange = state.waveformViewport.presentedRange;
   state.engineUiState = uiState;
   state.followPlayback = uiState.viewport.followEnabled;
   elements.waveFollow.checked = uiState.viewport.followEnabled;
   const sampleRate = uiState.playback.sampleRate || getSampleRate();
+  let nextPresentedRange: TimeRange | null = null;
 
   if (sampleRate > 0) {
-    state.waveformViewport.presentedRange = {
+    nextPresentedRange = {
       start: uiState.presentedStartFrame / sampleRate,
       end: uiState.presentedEndFrame / sampleRate,
     };
+    state.waveformViewport.presentedRange = nextPresentedRange;
     state.waveformViewport.targetRange = {
       start: uiState.viewport.targetStartFrame / sampleRate,
       end: uiState.viewport.targetEndFrame / sampleRate,
@@ -865,8 +868,10 @@ function applyViewportUiState(uiState: ViewportUiState): void {
 
   renderWaveformUi();
   renderSpectrogramScale();
-  syncPresentedSpectrogramRange(getPresentedRangeSeconds());
-  scheduleSpectrogramRender();
+  if (nextPresentedRange && !areTimeRangesEqual(previousPresentedRange, nextPresentedRange)) {
+    syncPresentedSpectrogramRange(nextPresentedRange);
+    scheduleSpectrogramRender();
+  }
   applyTransportCommand(uiState.transportCommand);
 }
 
@@ -1540,15 +1545,30 @@ function syncSpectrogramDisplayRange(displayRange: TimeRange, pixelWidth: number
     return;
   }
 
-  if (state.analysis.activeVisibleRequest) {
-    state.analysis.activeVisibleRequest = {
-      ...state.analysis.activeVisibleRequest,
-      displayEnd: displayRange.end,
-      displayStart: displayRange.start,
-      pixelHeight,
-      pixelWidth,
-    };
+  const previousDisplay = state.lastSyncedSpectrogramDisplay;
+  if (
+    previousDisplay
+    && previousDisplay.start === displayRange.start
+    && previousDisplay.end === displayRange.end
+    && previousDisplay.pixelWidth === pixelWidth
+    && previousDisplay.pixelHeight === pixelHeight
+  ) {
+    return;
   }
+
+  if (state.analysis.activeVisibleRequest) {
+    state.analysis.activeVisibleRequest.displayEnd = displayRange.end;
+    state.analysis.activeVisibleRequest.displayStart = displayRange.start;
+    state.analysis.activeVisibleRequest.pixelHeight = pixelHeight;
+    state.analysis.activeVisibleRequest.pixelWidth = pixelWidth;
+  }
+
+  state.lastSyncedSpectrogramDisplay = {
+    end: displayRange.end,
+    pixelHeight,
+    pixelWidth,
+    start: displayRange.start,
+  };
 
   state.analysisWorker.postMessage({
     type: 'updateVisibleDisplayRange',
@@ -1960,6 +1980,7 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
   }
 
   if (message?.type === 'analysisInitialized') {
+    state.lastSyncedSpectrogramDisplay = null;
     state.analysis.initialized = true;
     state.analysis.fallbackReason = typeof message.body?.fallbackReason === 'string'
       ? message.body.fallbackReason
@@ -2084,6 +2105,7 @@ async function initializePlaybackFromPreparedData(
   const { monoSamples, playbackSession } = preparedPlaybackData;
   const audioTransport = state.audioTransport;
   state.playbackSession = playbackSession;
+  state.lastSyncedSpectrogramDisplay = null;
   state.analysis = createSpectrogramAnalysisState(
     playbackSession.durationSeconds,
     normalizeSpectrogramQuality(payload?.spectrogramQuality),
@@ -2112,7 +2134,6 @@ async function initializePlaybackFromPreparedData(
 
   state.engineSessionRevision += 1;
   const engineMono = monoSamples.slice();
-  const spectrogramMono = monoSamples.slice();
   engineWorker.postMessage({
     type: 'LoadAnalysisSession',
     body: {
@@ -2136,12 +2157,12 @@ async function initializePlaybackFromPreparedData(
     body: {
       duration: playbackSession.durationSeconds,
       quality: normalizeSpectrogramQuality(payload?.spectrogramQuality),
-      sampleCount: spectrogramMono.length,
+      sampleCount: monoSamples.length,
       sampleRate: playbackSession.sourceSampleRate,
-      samplesBuffer: spectrogramMono.buffer,
+      samplesBuffer: monoSamples.buffer,
       sessionVersion: state.engineSessionRevision,
     },
-  }, [spectrogramMono.buffer]);
+  }, [monoSamples.buffer]);
 
   await audioTransport.load({
     playbackSession,
@@ -2164,14 +2185,11 @@ async function initializePlaybackFromPreparedData(
 
 const {
   acceptDecodeFallbackResult,
-  disposeDecodeWorker,
-  handleDecodeWorkerMessage,
   loadAudioFile,
   rejectDecodeFallbackRequest,
 } = createAudioscopeLoadController({
   audioTransportProcessorScriptUri,
   createModuleWorker,
-  createPlaybackAnalysisData,
   createPlaybackAnalysisDataFromPlaybackSession,
   createPlaybackSessionFromPcmFallback,
   createMediaMetadataState,

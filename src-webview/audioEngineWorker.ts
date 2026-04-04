@@ -69,7 +69,6 @@ import {
   DEFAULT_SCALOGRAM_OMEGA0,
   DEFAULT_SCALOGRAM_ROW_DENSITY,
   FFT_SIZE_OPTIONS,
-  getDefaultSpectrogramDbWindow,
   isChromaAnalysisType,
   LIBROSA_DEFAULT_MEL_BAND_COUNT,
   normalizeMelBandCount,
@@ -341,6 +340,10 @@ const waveformCache: WaveformRenderCacheState = {
 
 let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 let requestQueue = Promise.resolve();
+let cachedFrequencyTickKey = '';
+let cachedFrequencyTicks: FrequencyTickUi[] = [];
+let cachedWaveformAxisTickKey = '';
+let cachedWaveformAxisTicks: ViewportUiState['waveformAxisTicks'] = [];
 
 const state: EngineState = {
   displayPlanner: null,
@@ -2441,36 +2444,55 @@ function getActiveSpectrogramAxisMode(): SpectrogramAnalysisType | SpectrogramFr
 }
 
 function buildFrequencyTicks(): FrequencyTickUi[] {
+  const analysisType = state.spectrogramConfig.analysisType;
+  const { minFrequency, maxFrequency } = getActiveSpectrogramFrequencyRange();
+  const axisMode = getActiveSpectrogramAxisMode();
+  const cacheKey = [
+    analysisType,
+    axisMode,
+    minFrequency,
+    maxFrequency,
+    getActiveMfccCoefficientCount(),
+  ].join(':');
+  if (cachedFrequencyTickKey === cacheKey) {
+    return cachedFrequencyTicks;
+  }
+
+  let ticks: FrequencyTickUi[];
   if (state.spectrogramConfig.analysisType === 'mfcc') {
     const coefficientCount = getActiveMfccCoefficientCount();
     const lastRow = Math.max(0, coefficientCount - 1);
     const tickRows = [lastRow, Math.round(lastRow * 0.75), Math.round(lastRow * 0.5), Math.round(lastRow * 0.25), 0]
       .filter((row, index, rows) => row >= 0 && row < coefficientCount && rows.indexOf(row) === index);
 
-    return tickRows.map((row, index) => ({
+    ticks = tickRows.map((row, index) => ({
       edge: index === 0 ? 'top' : index === tickRows.length - 1 ? 'bottom' : 'middle',
       frequency: row,
       label: `C${row}`,
       positionRatio: coefficientCount <= 1 ? 1 : 1 - (row / (coefficientCount - 1)),
     }));
+    cachedFrequencyTickKey = cacheKey;
+    cachedFrequencyTicks = ticks;
+    return ticks;
   }
 
   if (isChromaAnalysisType(state.spectrogramConfig.analysisType)) {
-    return Array.from({ length: CHROMA_BIN_COUNT }, (_, row) => ({
+    ticks = Array.from({ length: CHROMA_BIN_COUNT }, (_, row) => ({
       edge: row === CHROMA_BIN_COUNT - 1 ? 'top' : row === 0 ? 'bottom' : 'middle',
       frequency: row,
       label: getChromaLabel(row),
       positionRatio: CHROMA_BIN_COUNT <= 1 ? 1 : 1 - (row / (CHROMA_BIN_COUNT - 1)),
     }));
+    cachedFrequencyTickKey = cacheKey;
+    cachedFrequencyTicks = ticks;
+    return ticks;
   }
 
-  const { minFrequency, maxFrequency } = getActiveSpectrogramFrequencyRange();
-  const axisMode = getActiveSpectrogramAxisMode();
   const frequencies = axisMode === 'linear'
     ? buildLinearFrequencyTicks(minFrequency, maxFrequency, SPECTROGRAM_LINEAR_TICK_COUNT)
     : buildLogFrequencyTicks(minFrequency, maxFrequency);
 
-  return frequencies.map((frequency, index) => {
+  ticks = frequencies.map((frequency, index) => {
     let positionRatio = 0;
     switch (axisMode) {
       case 'linear':
@@ -2494,14 +2516,23 @@ function buildFrequencyTicks(): FrequencyTickUi[] {
       positionRatio,
     };
   });
+  cachedFrequencyTickKey = cacheKey;
+  cachedFrequencyTicks = ticks;
+  return ticks;
 }
 
 function buildWaveformAxisTicks(range: RangeFrames): ViewportUiState['waveformAxisTicks'] {
   const sampleRate = state.session.sampleRate;
   const renderWidthPx = Math.max(1, state.waveformSurface.widthCssPx);
   const spanFrames = Math.max(0, range.endFrame - range.startFrame);
+  const cacheKey = [range.startFrame, range.endFrame, renderWidthPx, sampleRate].join(':');
+  if (cachedWaveformAxisTickKey === cacheKey) {
+    return cachedWaveformAxisTicks;
+  }
   if (!(sampleRate > 0) || !(spanFrames > 0)) {
-    return [];
+    cachedWaveformAxisTickKey = cacheKey;
+    cachedWaveformAxisTicks = [];
+    return cachedWaveformAxisTicks;
   }
 
   const startSeconds = range.startFrame / sampleRate;
@@ -2545,6 +2576,8 @@ function buildWaveformAxisTicks(range: RangeFrames): ViewportUiState['waveformAx
     ticks[ticks.length - 1].align = 'end';
   }
 
+  cachedWaveformAxisTickKey = cacheKey;
+  cachedWaveformAxisTicks = ticks;
   return ticks;
 }
 

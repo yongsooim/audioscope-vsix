@@ -25,11 +25,6 @@ function positiveModulo(value: number, modulus: number): number {
   return remainder < 0 ? remainder + modulus : remainder;
 }
 
-function getWrappedChromaDistance(source: number, target: number, chromaBinCount: number): number {
-  const delta = Math.abs(source - target);
-  return Math.min(delta, chromaBinCount - delta);
-}
-
 export function getChromaLabel(chromaIndex: number): string {
   return CHROMA_PITCH_CLASS_LABELS[positiveModulo(Math.round(chromaIndex), CHROMA_BIN_COUNT)] ?? 'C';
 }

@@ -293,18 +293,6 @@ function parseNumberValue(value: unknown): number | null {
   return null;
 }
 
-function getPrimaryAudioStream(rawPayload: FfprobeJsonPayload): FfprobeStreamSection | null {
-  const streams = Array.isArray(rawPayload.streams) ? rawPayload.streams : [];
-  return streams.find((stream) => stream.codec_type === 'audio') ?? null;
-}
-
-function getAudioDurationSeconds(rawPayload: FfprobeJsonPayload): number | null {
-  const primaryAudioStream = getPrimaryAudioStream(rawPayload);
-  const formatSection = rawPayload.format;
-
-  return parseNumberValue(primaryAudioStream?.duration) ?? parseNumberValue(formatSection?.duration);
-}
-
 function formatFrequencyText(value: number | null): string | null {
   if (!Number.isFinite(value) || !value || value <= 0) {
     return null;

@@ -162,7 +162,7 @@ export function snapWaveformRenderRange(
   candidateRange: TimeRange,
   duration: number,
   renderWidth: number,
-  renderScale: number,
+  _renderScale: number,
 ): TimeRange {
   const renderSpan = Math.max(0, candidateRange.end - candidateRange.start);
   const clampedDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;

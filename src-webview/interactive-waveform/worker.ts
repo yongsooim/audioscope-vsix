@@ -102,8 +102,6 @@ type WorkerMessage =
 
 const CENTER_LINE_ALPHA = 0.14;
 const SYMMETRIC_ENVELOPE_GAIN = 0.76;
-const SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 24;
-const RAW_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 1;
 const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
 const SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 28;
 const RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 0.9;
@@ -1127,10 +1125,6 @@ function isRenderReady(): boolean {
   return hasRenderableSurface()
     && analysisState.initialized
     && hasRenderableWaveformData(analysisState.waveformData);
-}
-
-function hasSampleWaveformData(waveformData: { samples?: unknown } | null | undefined): boolean {
-  return waveformData?.samples instanceof Float32Array && waveformData.samples.length > 0;
 }
 
 function getWaveformSampleData(module: WaveCoreModule): Float32Array | null {
