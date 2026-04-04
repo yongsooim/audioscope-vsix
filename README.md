@@ -69,8 +69,8 @@
 - Decibel range controls
 - Mel band count controls
 - MFCC coefficient controls
-- Scalogram frequency range controls
-- Scalogram omega0 and row density controls
+- Scalogram omega0 control
+- Advanced scalogram frequency range and row density defaults via `audioscope.spectrogramDefaults`
 
 ### Metadata and loudness
 
@@ -85,7 +85,7 @@
 ## Settings
 
 - `audioscope.spectrogramQuality`: `balanced | high | max`
-- `audioscope.spectrogramDefaults`: persisted defaults for analysis controls
+- `audioscope.spectrogramDefaults`: persisted defaults for analysis controls, including advanced scalogram defaults when edited in settings JSON
 - `audioscope.openSampleOnStartupInDevelopment`: open the bundled sample on startup in development mode
 
 ## Keywords
@@ -93,28 +93,6 @@
 audio inspector, waveform, spectrogram, mel, mfcc, scalogram, chroma, playback, loop, metadata, loudness, LUFS, integrated LUFS, EBU R 128, LRA, mp3, wav, flac, m4a, ogg, aac, opus, aiff, aif
 
 ## Development
-
-## Third-Party And Vendor Code
-
-This repository includes a small amount of vendored and third-party source used
-to build the shipped extension and WASM tools.
-
-- `src-wasm/third_party/ffmpeg`
-  The FFmpeg source tree vendored as a submodule and used to build the
-  embedded FFmpeg / ffprobe WebAssembly binaries.
-  Upstream repository: <https://github.com/FFmpeg/FFmpeg>
-- `src-wasm/third_party/pffft`
-  PFFFT and FFTPACK-based FFT code used by the analysis WASM runtime.
-  Original PFFFT repository: <https://bitbucket.org/jpommier/pffft/>
-- `src-webview/vendor/SignalsmithStretch.mjs`
-  Vendored Signalsmith Stretch Web module used for time-stretch playback in the
-  webview transport path.
-  Official upstream: <https://signalsmith-audio.co.uk/code/stretch.git>
-  GitHub mirror: <https://github.com/Signalsmith-Audio/signalsmith-stretch>
-
-Licensing and attribution details for bundled third-party code are documented
-in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md). FFmpeg rebuild notes and
-revision details are documented in [FFMPEG_SOURCE.md](./FFMPEG_SOURCE.md).
 
 Build prerequisites:
 
@@ -137,6 +115,28 @@ The full build compiles:
 - analysis WASM binaries
 - webview bundles
 - extension host output
+
+## Third-Party And Vendor Code
+
+This repository includes a small amount of vendored and third-party source used
+to build the shipped extension and WASM tools.
+
+- `src-wasm/third_party/ffmpeg`
+  The FFmpeg source tree vendored as a submodule and used to build the
+  embedded FFmpeg / ffprobe WebAssembly binaries.
+  Upstream repository: <https://github.com/FFmpeg/FFmpeg>
+- `src-wasm/third_party/pffft`
+  PFFFT and FFTPACK-based FFT code used by the analysis WASM runtime.
+  Original PFFFT repository: <https://bitbucket.org/jpommier/pffft/>
+- `src-webview/vendor/SignalsmithStretch.mjs`
+  Vendored Signalsmith Stretch Web module used for time-stretch playback in the
+  webview transport path.
+  Official upstream: <https://signalsmith-audio.co.uk/code/stretch.git>
+  GitHub mirror: <https://github.com/Signalsmith-Audio/signalsmith-stretch>
+
+Licensing and attribution details for bundled third-party code are documented
+in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md). FFmpeg rebuild notes and
+revision details are documented in [FFMPEG_SOURCE.md](./FFMPEG_SOURCE.md).
 
 ## License
 

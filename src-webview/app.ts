@@ -1290,11 +1290,12 @@ function getEffectiveSpectrogramRenderConfig() {
 }
 
 function getPersistedSpectrogramDefaults() {
-  return {
-    ...getEffectiveSpectrogramRenderConfig(),
-    // Hop is derived from overlap for every analysis type.
-    scalogramHopSamples: DEFAULT_SCALOGRAM_HOP_SAMPLES,
-  };
+  const {
+    scalogramHopSamples: _derivedScalogramHopSamples,
+    ...persistedDefaults
+  } = getEffectiveSpectrogramRenderConfig();
+
+  return persistedDefaults;
 }
 
 function applyPersistedSpectrogramDefaults(defaults: any): void {
