@@ -60,7 +60,7 @@ export function normalizeSpectrogramDefaults(value: unknown): SpectrogramDefault
     ? Math.round(clamp(Number(input.maxDecibels), minDecibels + 6, 12))
     : DEFAULT_SPECTROGRAM_DEFAULTS.maxDecibels;
   const scalogramMinFrequency = Number.isFinite(Number(input.scalogramMinFrequency))
-    ? Math.round(clamp(Number(input.scalogramMinFrequency), 50, 19_999))
+    ? Math.round(clamp(Number(input.scalogramMinFrequency), 20, 19_999))
     : DEFAULT_SPECTROGRAM_DEFAULTS.scalogramMinFrequency;
   const scalogramMaxFrequency = Number.isFinite(Number(input.scalogramMaxFrequency))
     ? Math.round(clamp(Number(input.scalogramMaxFrequency), scalogramMinFrequency + 1, 20_000))

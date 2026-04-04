@@ -60,7 +60,7 @@ const DISPLAY_RAW_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 1;
 const LOOP_HANDLE_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const MAX_FREQUENCY = 20000;
-const MIN_FREQUENCY = 30;
+const MIN_FREQUENCY = 20;
 const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
 const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
 const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
@@ -72,7 +72,7 @@ const LIBROSA_DEFAULT_MEL_BAND_COUNT = 256;
 const MEL_BAND_COUNT_OPTIONS = [128, 256, 512];
 const DEFAULT_SCALOGRAM_OMEGA0 = 6;
 const DEFAULT_SCALOGRAM_ROW_DENSITY = 1;
-const DEFAULT_SCALOGRAM_MIN_FREQUENCY = 50;
+const DEFAULT_SCALOGRAM_MIN_FREQUENCY = 20;
 const DEFAULT_SCALOGRAM_MAX_FREQUENCY = 20000;
 const DEFAULT_SCALOGRAM_HOP_SAMPLES = 1024;
 const SCALOGRAM_OMEGA_OPTIONS = [4, 5, 6, 7, 8, 10, 12];
@@ -98,7 +98,6 @@ const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const WAVEFORM_PYRAMID_BUILD_STEP_BLOCKS = 32_768;
 const MAX_TILE_CACHE_ENTRIES = 24;
 const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
-const WAVEFORM_PREVIEW_SAMPLE_TAPS = [-0.3, 0, 0.3] as const;
 
 const ANALYSIS_TYPE_CODES: Record<SpectrogramAnalysisType, number> = {
   spectrogram: 0,
@@ -1584,14 +1583,28 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
   const rawSamplePlotMode = plotMode === 'raw';
 
   if (!rawSamplePlotMode && !samplePlotMode) {
-    if (!state.session.waveformBuilt && sampleData instanceof Float32Array) {
+    if (!state.session.waveformBuilt) {
       invalidateWaveformCache();
-      drawWaveformPreview(
+      const slice = ensureWaveformSliceCapacity(module, columnCount * 2);
+      if (!module._wave_extract_waveform_slice(
+        viewStartSeconds,
+        viewEndSeconds,
+        columnCount,
+        state.session.waveformSlicePointer,
+        0,
+      )) {
+        throw new Error('Waveform slice extraction failed.');
+      }
+
+      if (token !== state.renderToken) {
+        return plotMode;
+      }
+
+      drawWaveformEnvelope(
         context,
         canvas,
-        sampleData,
-        range.startFrame,
-        visibleSampleCount,
+        slice,
+        columnCount,
         renderHeightCssPx,
         surface.renderScale,
         surface.color,
@@ -2852,50 +2865,6 @@ function drawWaveformEnvelope(
     const minValue = slice[sourceIndex] ?? 0;
     const maxValue = slice[sourceIndex + 1] ?? 0;
     const symmetricPeak = Math.max(Math.abs(minValue), Math.abs(maxValue)) * SYMMETRIC_ENVELOPE_GAIN;
-    const top = clamp(Math.round(midY - symmetricPeak * amplitudeHeight), chartTop, chartBottom);
-    const bottom = clamp(Math.round(midY + symmetricPeak * amplitudeHeight), chartTop, chartBottom);
-    context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));
-  }
-}
-
-function drawWaveformPreview(
-  context: OffscreenCanvasRenderingContext2D,
-  canvas: OffscreenCanvas,
-  samples: Float32Array,
-  sampleStartFrame: number,
-  visibleSampleCount: number,
-  heightCssPx: number,
-  renderScale: number,
-  color: string,
-): void {
-  const deviceWidth = Math.max(1, canvas.width);
-  const deviceHeight = Math.max(1, canvas.height);
-  const chartTop = Math.round(WAVEFORM_TOP_PADDING_PX * renderScale);
-  const chartBottom = Math.max(chartTop + 1, Math.round((heightCssPx - WAVEFORM_BOTTOM_PADDING_PX) * renderScale));
-  const chartHeight = Math.max(1, chartBottom - chartTop);
-  const midY = chartTop + chartHeight * 0.5;
-  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
-  const drawColumns = Math.max(1, Math.min(deviceWidth, Math.round(deviceWidth)));
-  const samplesPerColumn = Math.max(1, visibleSampleCount / drawColumns);
-
-  context.imageSmoothingEnabled = true;
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  context.clearRect(0, 0, deviceWidth, deviceHeight);
-  context.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;
-  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, renderScale));
-  context.fillStyle = color;
-
-  for (let x = 0; x < drawColumns; x += 1) {
-    const columnCenter = sampleStartFrame + ((x + 0.5) * samplesPerColumn);
-    let peak = 0;
-    for (const tap of WAVEFORM_PREVIEW_SAMPLE_TAPS) {
-      const sampleValue = getInterpolatedSample(
-        samples,
-        columnCenter + (samplesPerColumn * tap),
-      );
-      peak = Math.max(peak, Math.abs(sampleValue));
-    }
-    const symmetricPeak = peak * SYMMETRIC_ENVELOPE_GAIN;
     const top = clamp(Math.round(midY - symmetricPeak * amplitudeHeight), chartTop, chartBottom);
     const bottom = clamp(Math.round(midY + symmetricPeak * amplitudeHeight), chartTop, chartBottom);
     context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));

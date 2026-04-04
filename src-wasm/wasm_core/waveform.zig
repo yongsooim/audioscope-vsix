@@ -1,11 +1,32 @@
 const core = @import("./core.zig");
 const session = @import("./session.zig");
 
-fn pickWaveformLevel(samples_per_pixel: f64) ?*const core.WaveLevel {
+fn isWaveformLevelRangeBuilt(level_index: usize, end_sample: f64) bool {
+    if (level_index >= core.g_session.levels.len) return false;
+    if (!core.g_session.waveform_build.active) return true;
+
+    const build_level_index = core.g_session.waveform_build.current_level_index;
+    const target_level_index = @as(i32, @intCast(level_index));
+    if (build_level_index > target_level_index) return true;
+    if (build_level_index < target_level_index) return false;
+
+    const level = &core.g_session.levels[level_index];
+    const clamped_end_sample = clampSamplePosition(end_sample);
+    const required_end_block = core.ceilDivI32(
+        @as(i32, @intFromFloat(@ceil(clamped_end_sample))),
+        level.block_size,
+    );
+    return required_end_block <= core.g_session.waveform_build.current_block_index;
+}
+
+fn pickWaveformLevel(samples_per_pixel: f64, end_sample: f64) ?*const core.WaveLevel {
     var selected: ?*const core.WaveLevel = null;
 
-    for (core.g_session.levels) |*level| {
+    for (core.g_session.levels, 0..) |*level, level_index| {
         if (@as(f64, @floatFromInt(level.block_size)) <= samples_per_pixel * 1.5) {
+            if (!isWaveformLevelRangeBuilt(level_index, end_sample)) {
+                continue;
+            }
             selected = level;
             continue;
         }
@@ -271,7 +292,7 @@ pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column
     const requested_end_sample = clampSamplePosition(clamped_end * sample_rate_f64);
     const requested_sample_span = maxF64(1.0, requested_end_sample - requested_start_sample);
     const samples_per_pixel = requested_sample_span / @as(f64, @floatFromInt(column_count));
-    const selected_level = pickWaveformLevel(samples_per_pixel);
+    const selected_level = pickWaveformLevel(samples_per_pixel, requested_end_sample);
 
     writeWaveformSliceMeta(
         meta_output_ptr,

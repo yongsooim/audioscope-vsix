@@ -10,7 +10,7 @@ pub const min_level_block_size: i32 = 16;
 pub const level_scale_factor: i32 = 4;
 pub const min_level_buckets: i32 = 512;
 
-pub const hard_min_frequency: f32 = 50.0;
+pub const hard_min_frequency: f32 = 20.0;
 pub const hard_max_frequency: f32 = 20_000.0;
 pub const min_db: f32 = -80.0;
 pub const max_db: f32 = 0.0;

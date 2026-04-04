@@ -27,7 +27,7 @@ export const DEFAULT_SPECTROGRAM_DEFAULTS: SpectrogramDefaultsPayload = {
   overlapRatio: 0.75,
   scalogramHopSamples: 0,
   scalogramMaxFrequency: 20_000,
-  scalogramMinFrequency: 50,
+  scalogramMinFrequency: 20,
   scalogramOmega0: 6,
   scalogramRowDensity: 1,
   windowFunction: 'hann',
