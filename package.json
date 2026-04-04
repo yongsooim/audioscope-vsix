@@ -36,7 +36,7 @@
     "aiff"
   ],
   "files": [
-    "out/*.js",
+    "out/**",
     "dist/**",
     "src-webview/**/*.css",
     "src-webview/vendor/**/*.mjs",

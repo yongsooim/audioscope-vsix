@@ -18,7 +18,10 @@ import {
   createAudioscopePlaybackRateController,
   normalizePlaybackRateSelection,
 } from './audioscope/controllers/playbackRate';
-import { createAudioscopeLoadController } from './audioscope/controllers/load';
+import {
+  createAudioscopeLoadController,
+  type AudioscopeWorkerBootstrapStateKey,
+} from './audioscope/controllers/load';
 import type {
   AnalysisRenderBackend,
   AnalysisSurfaceResetReason,
@@ -198,6 +201,12 @@ const state = {
   decodeFallbackError: null,
   decodeFallbackLoadToken: 0,
   decodeFallbackPromise: null,
+  decodeFallbackRequest: null as {
+    hostRequested: boolean;
+    loadToken: number;
+    payload: any;
+    reason: string;
+  } | null,
   decodeFallbackResult: null,
   decodeWorker: null as Worker | null,
   decodeWorkerBootstrapUrl: null as string | null,
@@ -640,7 +649,7 @@ function secondsToFrame(timeSeconds: number): number {
 
 function createModuleWorker(
   moduleUrl: string,
-  bootstrapStateKey: 'analysisWorkerBootstrapUrl' | 'decodeWorkerBootstrapUrl' | 'engineWorkerBootstrapUrl',
+  bootstrapStateKey: AudioscopeWorkerBootstrapStateKey,
 ): Worker {
   const bootstrapSource = `import ${JSON.stringify(moduleUrl)};`;
   const bootstrapBlob = new Blob([bootstrapSource], { type: 'text/javascript' });
@@ -901,9 +910,7 @@ function destroySession(): void {
 }
 
 function createPlaybackTransport(loadToken: number): AudioTransport {
-  let transport: AudioTransport | null = null;
-
-  transport = createAudioTransport({
+  const transport = createAudioTransport({
     onStateChange: () => {
       if (state.loadToken !== loadToken || state.audioTransport !== transport) {
         return;
@@ -2431,6 +2438,7 @@ async function initializePlaybackFromPreparedData(
   preparedPlaybackData: { monoSamples: Float32Array; playbackSession: PlaybackSession },
 ): Promise<void> {
   const { monoSamples, playbackSession } = preparedPlaybackData;
+  const audioTransport = state.audioTransport;
   state.playbackSession = playbackSession;
   state.analysis = createSpectrogramAnalysisState(
     playbackSession.durationSeconds,
@@ -2448,7 +2456,13 @@ async function initializePlaybackFromPreparedData(
     ensureEngineWorker(loadToken),
     ensureAnalysisWorker(loadToken),
   ]);
-  if (!engineWorker || !analysisWorker || loadToken !== state.loadToken) {
+  if (
+    !audioTransport
+    || !engineWorker
+    || !analysisWorker
+    || loadToken !== state.loadToken
+    || state.audioTransport !== audioTransport
+  ) {
     return;
   }
 
@@ -2485,13 +2499,17 @@ async function initializePlaybackFromPreparedData(
     },
   }, [spectrogramMono.buffer]);
 
-  await state.audioTransport?.load({
+  await audioTransport.load({
     playbackSession,
     workletModuleUrl: audioTransportProcessorScriptUri,
   });
 
-  state.playbackTransportKind = state.audioTransport?.getTransportKind() ?? 'unavailable';
-  state.playbackTransportError = state.audioTransport?.getLastFallbackReason() ?? null;
+  if (loadToken !== state.loadToken || state.audioTransport !== audioTransport) {
+    return;
+  }
+
+  state.playbackTransportKind = audioTransport.getTransportKind() ?? 'unavailable';
+  state.playbackTransportError = audioTransport.getLastFallbackReason() ?? null;
   renderMediaMetadata();
   renderWaveformUi();
   syncTransport();

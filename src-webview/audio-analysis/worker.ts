@@ -1185,6 +1185,7 @@ async function initializeWebGpuCompositor(): Promise<void> {
     return;
   }
 
+  const surfaceCanvas = surfaceState.canvas;
   const globals = getWebGpuGlobals();
   if (!globals) {
     initialize2dSurface('WebGPU globals unavailable.');
@@ -1275,15 +1276,15 @@ async function initializeWebGpuCompositor(): Promise<void> {
         },
       });
 
-      const canvasContext = (surfaceState.canvas.getContext('webgpu') as any) ?? null;
+      const canvasContext = (surfaceCanvas.getContext('webgpu') as any) ?? null;
       if (!canvasContext) {
         initialize2dSurface('Spectrogram surface rejected WebGPU context initialization.');
         return;
       }
       acquiredSurfaceContext = true;
 
-      surfaceState.canvas.width = Math.max(1, surfaceState.pixelWidth);
-      surfaceState.canvas.height = Math.max(1, surfaceState.pixelHeight);
+      surfaceCanvas.width = Math.max(1, surfaceState.pixelWidth);
+      surfaceCanvas.height = Math.max(1, surfaceState.pixelHeight);
       canvasContext.configure({
         alphaMode: 'opaque',
         device,
@@ -1451,7 +1452,7 @@ function resizeCanvas(options: CanvasInitOptions | undefined): void {
 
 function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptions | undefined): void {
   const module = runtime.module;
-  const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
+  const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options?.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
   const duration = Number(options?.duration);
   const sampleCount = Number(options?.sampleCount);
@@ -1985,8 +1986,8 @@ async function renderTile(
   options: RenderTileOptions = {},
 ): Promise<TileRecord | null> {
   const cacheKey = typeof options.cacheKey === 'string' ? options.cacheKey : buildTileCacheKey(plan, tileIndex);
-  const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
-  const onChunkReady = typeof options.onChunkReady === 'function' ? options.onChunkReady : null;
+  const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : undefined;
+  const onChunkReady = typeof options.onChunkReady === 'function' ? options.onChunkReady : undefined;
   const deferWebGpuReady = options.deferWebGpuReady === true;
   const webGpuSlotIndex = Number.isFinite(options.webGpuSlotIndex)
     ? Math.max(0, Math.min(WEBGPU_STFT_SCRATCH_SLOT_COUNT - 1, Math.trunc(options.webGpuSlotIndex as number)))
@@ -5123,19 +5124,19 @@ function paintLayer(
 function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPlan {
   const preset = QUALITY_PRESETS[analysisState.quality];
   const requestKind = request?.requestKind === 'overview' ? 'overview' : 'visible';
-  const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
+  const generation = Number.isFinite(request?.generation) ? Number(request?.generation) : 0;
   const configVersion = getRequestConfigVersion(request);
-  const requestedStart = Number.isFinite(request?.viewStart) ? Number(request.viewStart) : 0;
-  const requestedEnd = Number.isFinite(request?.viewEnd) ? Number(request.viewEnd) : analysisState.duration;
+  const requestedStart = Number.isFinite(request?.viewStart) ? Number(request?.viewStart) : 0;
+  const requestedEnd = Number.isFinite(request?.viewEnd) ? Number(request?.viewEnd) : analysisState.duration;
   const viewStart = clamp(requestedStart, 0, analysisState.duration);
   const viewEnd = clamp(
     Math.max(viewStart + (1 / analysisState.sampleRate), requestedEnd),
     viewStart + (1 / analysisState.sampleRate),
     analysisState.duration,
   );
-  const requestedDisplayStart = Number.isFinite(request?.displayStart) ? Number(request.displayStart) : viewStart;
+  const requestedDisplayStart = Number.isFinite(request?.displayStart) ? Number(request?.displayStart) : viewStart;
   const displayStart = clamp(requestedDisplayStart, 0, analysisState.duration);
-  const requestedDisplayEnd = Number.isFinite(request?.displayEnd) ? Number(request.displayEnd) : viewEnd;
+  const requestedDisplayEnd = Number.isFinite(request?.displayEnd) ? Number(request?.displayEnd) : viewEnd;
   const displayEnd = clamp(
     Math.max(displayStart + (1 / analysisState.sampleRate), requestedDisplayEnd),
     displayStart + (1 / analysisState.sampleRate),
@@ -5475,6 +5476,6 @@ function postError(error: unknown): void {
   });
 }
 
-function clamp(value, min, max) {
+function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }

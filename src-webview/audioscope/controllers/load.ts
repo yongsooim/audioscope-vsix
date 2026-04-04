@@ -7,9 +7,14 @@ import {
   createPlaybackSessionFromPcmFallback,
 } from './playbackData';
 
+export type AudioscopeWorkerBootstrapStateKey =
+  | 'analysisWorkerBootstrapUrl'
+  | 'decodeWorkerBootstrapUrl'
+  | 'engineWorkerBootstrapUrl';
+
 interface AudioscopeLoadControllerDeps {
   audioTransportProcessorScriptUri?: string;
-  createModuleWorker: (moduleUrl: string, bootstrapStateKey: string) => Worker;
+  createModuleWorker: (moduleUrl: string, bootstrapStateKey: AudioscopeWorkerBootstrapStateKey) => Worker;
   createPlaybackAnalysisData: (audioBuffer: AudioBuffer) => { monoSamples: Float32Array; playbackSession: any };
   createPlaybackAnalysisDataFromPlaybackSession: typeof createPlaybackAnalysisDataFromPlaybackSession;
   createPlaybackSessionFromPcmFallback: typeof createPlaybackSessionFromPcmFallback;
@@ -120,13 +125,17 @@ export function createAudioscopeLoadController({
   }
 
   function clearDecodeFallbackCache() {
+    state.decodeFallbackError = null;
+    state.decodeFallbackLoadToken = 0;
     state.decodeFallbackPromise = null;
+    state.decodeFallbackRequest = null;
     state.decodeFallbackResult = null;
     state.resolveDecodeFallback = null;
     state.rejectDecodeFallback = null;
   }
 
   function rejectDecodeFallbackRequest(loadToken, message) {
+    state.decodeFallbackRequest = null;
     state.decodeFallbackResult = null;
     state.decodeFallbackError = {
       loadToken,
@@ -138,7 +147,51 @@ export function createAudioscopeLoadController({
     state.rejectDecodeFallback = null;
   }
 
-  function acceptDecodeFallbackResult(loadToken, body) {
+  function getActiveDecodeFallbackRequest(loadToken) {
+    if (
+      state.decodeFallbackLoadToken !== loadToken
+      || !state.decodeFallbackPromise
+      || !state.decodeFallbackRequest
+      || state.decodeFallbackRequest.loadToken !== loadToken
+    ) {
+      return null;
+    }
+
+    return state.decodeFallbackRequest;
+  }
+
+  function requestHostDecodeFallbackForActiveRequest(loadToken) {
+    const activeRequest = getActiveDecodeFallbackRequest(loadToken);
+
+    if (!activeRequest) {
+      return false;
+    }
+
+    if (activeRequest.hostRequested) {
+      return true;
+    }
+
+    activeRequest.hostRequested = true;
+    postHostDecodeFallbackRequest(loadToken, activeRequest.payload, activeRequest.reason);
+    return true;
+  }
+
+  function handleDecodeWorkerFailure(loadToken, message, { disposeWorker = false } = {}) {
+    if (disposeWorker) {
+      disposeDecodeWorker();
+    }
+
+    if (requestHostDecodeFallbackForActiveRequest(loadToken)) {
+      return;
+    }
+
+    if (getActiveDecodeFallbackRequest(loadToken)) {
+      rejectDecodeFallbackRequest(loadToken, message);
+      renderMediaMetadata();
+    }
+  }
+
+  function acceptDecodeFallbackResult(loadToken, body, source = 'host') {
     state.decodeFallbackError = null;
 
     if (body?.kind === 'pcm') {
@@ -150,6 +203,10 @@ export function createAudioscopeLoadController({
       const frameCount = Math.max(0, Math.trunc(Number(body?.frameCount) || 0));
 
       if (channelBuffers.length === 0 || sampleRate <= 0 || frameCount <= 0) {
+        if (source === 'worker' && requestHostDecodeFallbackForActiveRequest(loadToken)) {
+          return;
+        }
+
         rejectDecodeFallbackRequest(loadToken, 'ffmpeg decode did not return decoded PCM channel buffers.');
         return;
       }
@@ -167,6 +224,10 @@ export function createAudioscopeLoadController({
       const audioBuffer = body?.audioBuffer;
 
       if (!(audioBuffer instanceof ArrayBuffer)) {
+        if (source === 'worker' && requestHostDecodeFallbackForActiveRequest(loadToken)) {
+          return;
+        }
+
         rejectDecodeFallbackRequest(loadToken, 'ffmpeg decode did not return audio bytes.');
         return;
       }
@@ -218,11 +279,14 @@ export function createAudioscopeLoadController({
       handleDecodeWorkerMessage(event.data);
     });
     worker.addEventListener('error', (event) => {
-      disposeDecodeWorker();
-
       if (state.loadToken > 0) {
-        rejectDecodeFallbackRequest(state.loadToken, event.message || 'Embedded decode worker failed.');
-        renderMediaMetadata();
+        handleDecodeWorkerFailure(
+          state.loadToken,
+          event.message || 'Embedded decode worker failed.',
+          { disposeWorker: true },
+        );
+      } else {
+        disposeDecodeWorker();
       }
     });
     worker.postMessage({
@@ -271,19 +335,21 @@ export function createAudioscopeLoadController({
     }
 
     if (message?.type === 'decodeReady') {
-      acceptDecodeFallbackResult(loadToken, message.body);
+      acceptDecodeFallbackResult(loadToken, message.body, 'worker');
       return;
     }
 
     if (message?.type === 'decodeError') {
-      rejectDecodeFallbackRequest(loadToken, message.body?.message || 'Embedded decode worker failed.');
-      renderMediaMetadata();
+      handleDecodeWorkerFailure(loadToken, message.body?.message || 'Embedded decode worker failed.');
       return;
     }
 
     if (message?.type === 'error') {
-      rejectDecodeFallbackRequest(loadToken, message.body?.message || 'Embedded decode worker failed.');
-      renderMediaMetadata();
+      handleDecodeWorkerFailure(
+        loadToken,
+        message.body?.message || 'Embedded decode worker failed.',
+        { disposeWorker: true },
+      );
     }
   }
 
@@ -325,6 +391,12 @@ export function createAudioscopeLoadController({
 
     state.decodeFallbackLoadToken = loadToken;
     state.decodeFallbackError = null;
+    state.decodeFallbackRequest = {
+      hostRequested: false,
+      loadToken,
+      payload,
+      reason,
+    };
     state.decodeFallbackPromise = new Promise((resolve, reject) => {
       state.resolveDecodeFallback = resolve;
       state.rejectDecodeFallback = reject;
@@ -351,14 +423,14 @@ export function createAudioscopeLoadController({
           return;
         }
 
-        postHostDecodeFallbackRequest(loadToken, payload, reason);
+        requestHostDecodeFallbackForActiveRequest(loadToken);
       })
       .catch(() => {
         if (loadToken !== state.loadToken) {
           return;
         }
 
-        postHostDecodeFallbackRequest(loadToken, payload, reason);
+        requestHostDecodeFallbackForActiveRequest(loadToken);
       });
 
     return state.decodeFallbackPromise;
@@ -517,6 +589,9 @@ export function createAudioscopeLoadController({
             payload,
             createPlaybackAnalysisDataFromPlaybackSession(playbackSession),
           );
+          if (loadToken !== state.loadToken) {
+            return;
+          }
           clearDecodeFallbackCache();
           return;
         }
@@ -535,6 +610,9 @@ export function createAudioscopeLoadController({
       renderMediaMetadata();
 
       await initializeDecodedPlayback(loadToken, payload, decodedAudio);
+      if (loadToken !== state.loadToken || controller.signal.aborted) {
+        return;
+      }
       clearDecodeFallbackCache();
     } catch (error) {
       if (loadToken !== state.loadToken || controller.signal.aborted) {
@@ -565,6 +643,9 @@ export function createAudioscopeLoadController({
               payload,
               createPlaybackAnalysisDataFromPlaybackSession(playbackSession),
             );
+            if (loadToken !== state.loadToken) {
+              return;
+            }
             clearDecodeFallbackCache();
             return;
           }
@@ -580,6 +661,9 @@ export function createAudioscopeLoadController({
           setAnalysisSourceKind('ffmpeg-fallback');
           renderMediaMetadata();
           await initializeDecodedPlayback(loadToken, payload, decodedAudio);
+          if (loadToken !== state.loadToken) {
+            return;
+          }
           clearDecodeFallbackCache();
           return;
         } catch (fallbackError) {
@@ -606,6 +690,7 @@ export function createAudioscopeLoadController({
     state.loadToken = loadToken;
 
     destroySession();
+    clearDecodeFallbackCache();
     state.externalTools = normalizeExternalToolStatus(payload?.externalTools, embeddedMediaToolsGuidance);
     state.mediaMetadata = {
       ...createMediaMetadataState('pending'),
