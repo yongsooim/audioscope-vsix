@@ -1,7 +1,7 @@
 {
   "name": "audioscope",
   "displayName": "audioscope",
-  "description": "VS Code audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review",
+  "description": "Audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review",
   "version": "1.0.0",
   "publisher": "yongsooim",
   "repository": {
@@ -68,6 +68,32 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "languages": [
+      {
+        "id": "audioscope-audio",
+        "aliases": [
+          "Audio",
+          "audio"
+        ],
+        "extensions": [
+          ".wav",
+          ".wave",
+          ".mp3",
+          ".ogg",
+          ".oga",
+          ".flac",
+          ".m4a",
+          ".aac",
+          ".opus",
+          ".aif",
+          ".aiff"
+        ],
+        "icon": {
+          "light": "./images/file-icon-light.png",
+          "dark": "./images/file-icon-dark.png"
+        }
+      }
+    ],
     "configuration": {
       "title": "audioscope",
       "properties": {

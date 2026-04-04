@@ -1556,8 +1556,9 @@ async function pumpVisibleLoop() {
         requestPending: true,
       };
 
-      // Repaint immediately against the new viewport instead of stretching the previous raster.
-      paintSpectrogramDisplay();
+      if (!retainedPlan) {
+        paintSpectrogramDisplay();
+      }
 
       const completed = await ensurePlanTiles(runtimePromise ? await runtimePromise : await getRuntime(), plan, {
         onTileReady: () => {
@@ -1670,6 +1671,10 @@ function getWebGpuTileSubmitBatchSize(plan: RenderRequestPlan): number {
     || plan.analysisType === 'scalogram'
     || plan.analysisType === 'chroma'
   ) {
+    return 1;
+  }
+
+  if (plan.requestKind === 'visible' && plan.analysisType === 'spectrogram') {
     return 1;
   }
 

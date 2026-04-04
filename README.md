@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>VS Code audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review.</strong>
+  <strong>Audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review.</strong>
 </p>
 
 <p align="center">
@@ -56,6 +56,7 @@
 
 - Spectrogram visualization
 - Audio analysis uses WebGPU when available, with WASM fallback for unsupported environments
+- Spectrogram, mel-spectrogram, MFCC, scalogram, and chroma analysis are computed from a mono downmix of the source audio
 - Mel-spectrogram analysis
 - MFCC analysis
 - Scalogram analysis

@@ -379,6 +379,7 @@ const {
   displayPixelRatio: DISPLAY_PIXEL_RATIO,
   elements,
   getDurationFrames,
+  refreshHoveredSampleInfos,
   getSpectrogramCanvasTargetSize,
   getWaveformViewportSize,
   scheduleSpectrogramRender,
@@ -873,6 +874,7 @@ function applyViewportUiState(uiState: ViewportUiState): void {
   if (nextPresentedRange && !areTimeRangesEqual(previousPresentedRange, nextPresentedRange)) {
     syncPresentedSpectrogramRange(nextPresentedRange);
     scheduleSpectrogramRender();
+    refreshHoveredSampleInfos();
   }
   applyTransportCommand(uiState.transportCommand);
 }
@@ -1774,34 +1776,58 @@ function applySampleInfo(payload: SampleInfoPayload): void {
   );
 }
 
-function requestSampleInfo(surface: SurfaceKind, event: PointerEvent): void {
+function requestSampleInfoAtClientPoint(surface: SurfaceKind, clientX: number, clientY: number): void {
   if (!state.engineWorker) {
     return;
   }
 
-  const target = surface === 'waveform' ? elements.waveformHitTarget : elements.spectrogramHitTarget;
+  const target = getHoverTarget(surface);
   const rect = target.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) {
+    hideHoverForSurface(surface);
+    return;
+  }
+
+  if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+    hideHoverForSurface(surface);
     return;
   }
 
   const requestId = state.hoverRequestIds[surface] + 1;
   state.hoverRequestIds[surface] = requestId;
   state.hoverState[surface] = {
-    clientX: event.clientX,
-    clientY: event.clientY,
+    clientX,
+    clientY,
     requestId,
   };
 
   state.engineWorker.postMessage({
     type: 'RequestSampleInfo',
     body: {
-      pointerRatioX: clamp((event.clientX - rect.left) / rect.width, 0, 1),
-      pointerRatioY: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+      pointerRatioX: clamp((clientX - rect.left) / rect.width, 0, 1),
+      pointerRatioY: clamp((clientY - rect.top) / rect.height, 0, 1),
       requestId,
       surface,
     },
   });
+}
+
+function requestSampleInfo(surface: SurfaceKind, event: PointerEvent): void {
+  requestSampleInfoAtClientPoint(surface, event.clientX, event.clientY);
+}
+
+function refreshHoveredSampleInfo(surface: SurfaceKind): void {
+  const hover = state.hoverState[surface];
+  if (!hover) {
+    return;
+  }
+
+  requestSampleInfoAtClientPoint(surface, hover.clientX, hover.clientY);
+}
+
+function refreshHoveredSampleInfos(): void {
+  refreshHoveredSampleInfo('waveform');
+  refreshHoveredSampleInfo('spectrogram');
 }
 
 function hideWaveformHoverTooltip(): void {
@@ -2106,6 +2132,19 @@ function applyPlaybackProgress(body: {
   uiState.overview.currentVisible = body.overviewCurrentVisible;
   uiState.playback = body.playback;
   renderPlaybackIndicators(uiState);
+}
+
+function getHoverTarget(surface: SurfaceKind): HTMLElement {
+  return surface === 'waveform' ? elements.waveformHitTarget : elements.spectrogramHitTarget;
+}
+
+function hideHoverForSurface(surface: SurfaceKind): void {
+  if (surface === 'waveform') {
+    hideWaveformHoverTooltip();
+    return;
+  }
+
+  hideSpectrogramHoverTooltip();
 }
 
 async function decodeAudioData(arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {

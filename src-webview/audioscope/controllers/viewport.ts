@@ -17,6 +17,7 @@ interface AudioscopeViewportControllerDeps {
   displayPixelRatio: number;
   elements: AudioscopeElements;
   getDurationFrames: () => number;
+  refreshHoveredSampleInfos: () => void;
   getSpectrogramCanvasTargetSize: () => { pixelHeight: number; pixelWidth: number };
   getWaveformViewportSize: () => { height: number; width: number };
   scheduleSpectrogramRender: (options?: { force?: boolean }) => void;
@@ -32,6 +33,7 @@ export function createAudioscopeViewportController({
   displayPixelRatio,
   elements,
   getDurationFrames,
+  refreshHoveredSampleInfos,
   getSpectrogramCanvasTargetSize,
   getWaveformViewportSize,
   scheduleSpectrogramRender,
@@ -173,6 +175,8 @@ export function createAudioscopeViewportController({
         });
         scheduleSpectrogramRender({ force: true });
       }
+
+      refreshHoveredSampleInfos();
     });
 
     resizeObserver.observe(document.body);
