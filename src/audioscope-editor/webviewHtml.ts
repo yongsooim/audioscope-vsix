@@ -129,12 +129,15 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                 </label>
                 <label id="spectrogram-overlap-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Overlap</span>
-                  <select id="spectrogram-overlap-select" class="spectrogram-control-select" aria-label="Spectrogram overlap ratio">
-                    <option value="0.5">50%</option>
-                    <option value="0.75" selected>75%</option>
-                    <option value="0.875">87.5%</option>
-                    <option value="0.9375">93.75%</option>
-                  </select>
+                  <span class="spectrogram-control-inline">
+                    <select id="spectrogram-overlap-select" class="spectrogram-control-select" aria-label="Spectrogram overlap ratio">
+                      <option value="0.5">50%</option>
+                      <option value="0.75" selected>75%</option>
+                      <option value="0.875">87.5%</option>
+                      <option value="0.9375">93.75%</option>
+                    </select>
+                    <span id="spectrogram-scalogram-hop-value" class="spectrogram-control-meta" aria-label="Computed spectrogram hop size">--</span>
+                  </span>
                 </label>
                 <label id="spectrogram-window-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Window</span>
@@ -180,7 +183,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                 </label>
                 <label id="spectrogram-scalogram-omega-control" class="spectrogram-control spectrogram-control-slider" hidden>
                   <span class="spectrogram-control-label">Omega0</span>
-                  <span class="spectrogram-control-slider-group spectrogram-control-slider-group-single">
+                  <span class="spectrogram-control-slider-group spectrogram-control-slider-group-single spectrogram-control-slider-group-inline">
                     <span class="spectrogram-control-range-single" aria-hidden="true"></span>
                     <input
                       id="spectrogram-scalogram-omega-slider"
@@ -192,19 +195,8 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                       value="2"
                       aria-label="Scalogram wavelet cycles"
                     />
-                    <span id="spectrogram-scalogram-omega-value" class="spectrogram-control-slider-value">6</span>
+                    <span id="spectrogram-scalogram-omega-value" class="spectrogram-control-slider-value spectrogram-control-slider-value-inline">6</span>
                   </span>
-                </label>
-                <label id="spectrogram-scalogram-hop-control" class="spectrogram-control" hidden>
-                  <span class="spectrogram-control-label">Hop</span>
-                  <select id="spectrogram-scalogram-hop-select" class="spectrogram-control-select" aria-label="Scalogram hop stride">
-                    <option value="0" selected>Auto</option>
-                    <option value="256">256</option>
-                    <option value="512">512</option>
-                    <option value="1024">1024</option>
-                    <option value="2048">2048</option>
-                    <option value="4096">4096</option>
-                  </select>
                 </label>
                 <label id="spectrogram-distribution-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Curve</span>

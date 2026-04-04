@@ -956,6 +956,15 @@ body {
   cursor: not-allowed;
 }
 
+.spectrogram-control-meta {
+  color: rgba(193, 209, 236, 0.72);
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .spectrogram-control-button {
   flex: 0 0 auto;
   padding: 3px 7px;
@@ -992,6 +1001,28 @@ body {
   position: relative;
   min-width: 118px;
   padding-top: 22px;
+}
+
+.spectrogram-control-slider-group-inline {
+  display: grid;
+  grid-template-columns: minmax(86px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 118px;
+  padding-top: 0;
+}
+
+.spectrogram-control-slider-group-inline .spectrogram-control-range-single,
+.spectrogram-control-slider-group-inline .spectrogram-control-range {
+  inset: 0;
+}
+
+.spectrogram-control-slider-group-inline .spectrogram-control-range::-webkit-slider-thumb {
+  margin-top: 5px;
+}
+
+.spectrogram-control-slider-group-inline .spectrogram-control-range-single {
+  top: 9px;
 }
 
 .spectrogram-control-slider-group-dual {
@@ -1102,6 +1133,11 @@ body {
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
+}
+
+.spectrogram-control-slider-value-inline {
+  min-width: 10px;
+  text-align: right;
 }
 
 .spectrogram-hit-target {

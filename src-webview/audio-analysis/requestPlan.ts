@@ -451,8 +451,8 @@ function normalizeScalogramRowDensity(value: unknown): number {
 
 function normalizeScalogramHopSamples(value: unknown): number {
   const numericValue = Number(value);
-  return SCALOGRAM_HOP_SAMPLES_OPTIONS.includes(numericValue)
-    ? numericValue
+  return Number.isFinite(numericValue) && numericValue > 0
+    ? Math.max(1, Math.round(numericValue))
     : DEFAULT_SCALOGRAM_HOP_SAMPLES;
 }
 

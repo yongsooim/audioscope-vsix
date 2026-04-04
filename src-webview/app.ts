@@ -561,16 +561,39 @@ function normalizeSpectrogramScalogramHopSetting(value: unknown): number {
     : DEFAULT_SCALOGRAM_HOP_SAMPLES;
 }
 
-function getEffectiveScalogramHopSamples(value: unknown): number {
-  const normalizedValue = normalizeSpectrogramScalogramHopSetting(value);
-  if (normalizedValue > 0) {
-    return normalizedValue;
-  }
-
+function getQualityDefaultScalogramHopSamples(): number {
   const quality = state.analysis?.quality === 'balanced' || state.analysis?.quality === 'max'
     ? state.analysis.quality
     : 'high';
+
   return SCALOGRAM_HOP_SAMPLES_BY_QUALITY[quality] ?? SCALOGRAM_HOP_SAMPLES_BY_QUALITY.high;
+}
+
+function getEffectiveScalogramHopSamplesFromOverlap(overlapRatio: unknown): number {
+  const normalizedOverlapRatio = normalizeSpectrogramOverlapRatio(overlapRatio);
+  const qualityDefaultHopSamples = getQualityDefaultScalogramHopSamples();
+  const baselineStrideRatio = Math.max(0.000001, 1 - DEFAULT_SPECTROGRAM_OVERLAP_RATIO);
+  const nextStrideRatio = Math.max(0.000001, 1 - normalizedOverlapRatio);
+
+  return Math.max(1, Math.round(qualityDefaultHopSamples * (nextStrideRatio / baselineStrideRatio)));
+}
+
+function getEffectiveSpectrogramHopSamples(
+  analysisType: ReturnType<typeof normalizeSpectrogramAnalysisType>,
+  fftSize: number,
+  overlapRatio: unknown,
+): number {
+  const normalizedOverlapRatio = normalizeSpectrogramOverlapRatio(overlapRatio);
+
+  if (analysisType === 'scalogram' || analysisType === 'chroma') {
+    return getEffectiveScalogramHopSamplesFromOverlap(normalizedOverlapRatio);
+  }
+
+  return Math.max(1, Math.round(fftSize * (1 - normalizedOverlapRatio)));
+}
+
+function formatSpectrogramHopSizeText(hopSamples: number): string {
+  return `${Math.max(1, Math.round(hopSamples)).toLocaleString()} smp`;
 }
 
 function normalizeSpectrogramScalogramFrequencyRange(minValue: unknown, maxValue: unknown): {
@@ -1139,7 +1162,6 @@ function renderSpectrogramMeta(): void {
   const supportsMfccOptions = analysisType === 'mfcc';
   const supportsScalogramOptions = analysisType === 'scalogram';
   const supportsWindowControl = analysisType !== 'scalogram';
-  const supportsHopControl = supportsScalogramOptions || isChroma;
   const supportsDbWindow = analysisType !== 'mfcc' && !isChroma;
   const isScalogram = analysisType === 'scalogram';
   const dbWindow = normalizeSpectrogramDbWindow(
@@ -1147,9 +1169,15 @@ function renderSpectrogramMeta(): void {
     state.spectrogramConfig.maxDecibels,
     analysisType,
   );
+  const normalizedOverlapRatio = normalizeSpectrogramOverlapRatio(state.spectrogramConfig.overlapRatio);
+  const computedHopSamples = getEffectiveSpectrogramHopSamples(
+    analysisType,
+    normalizeSpectrogramFftSize(state.spectrogramConfig.fftSize),
+    normalizedOverlapRatio,
+  );
   elements.spectrogramTypeSelect.value = analysisType;
   elements.spectrogramFftSelect.value = String(state.spectrogramConfig.fftSize);
-  elements.spectrogramOverlapSelect.value = String(state.spectrogramConfig.overlapRatio);
+  elements.spectrogramOverlapSelect.value = String(normalizedOverlapRatio);
   elements.spectrogramWindowSelect.value = normalizeSpectrogramWindowFunction(state.spectrogramConfig.windowFunction);
   elements.spectrogramScaleSelect.value = normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale);
   elements.spectrogramMelBandsSelect.value = String(
@@ -1167,9 +1195,10 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramScalogramOmegaValue.textContent = String(
     normalizeSpectrogramScalogramOmega0(state.spectrogramConfig.scalogramOmega0),
   );
-  elements.spectrogramScalogramHopSelect.value = String(
-    normalizeSpectrogramScalogramHopSetting(state.spectrogramConfig.scalogramHopSamples),
-  );
+  elements.spectrogramScalogramHopValue.textContent = formatSpectrogramHopSizeText(computedHopSamples);
+  elements.spectrogramScalogramHopValue.title = analysisType === 'scalogram' || isChroma
+    ? `Computed from overlap ${Math.round(normalizedOverlapRatio * 1000) / 10}% and current quality`
+    : `Computed from FFT ${normalizeSpectrogramFftSize(state.spectrogramConfig.fftSize)} and overlap ${Math.round(normalizedOverlapRatio * 1000) / 10}%`;
   elements.spectrogramDistributionSelect.value = normalizeSpectrogramColormapDistribution(
     state.spectrogramConfig.colormapDistribution,
   );
@@ -1178,24 +1207,22 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramResetTypeButton.title = `Reset ${analysisTypeLabel} settings to defaults`;
 
   elements.spectrogramFftControl.hidden = isScalogram;
-  elements.spectrogramOverlapControl.hidden = isScalogram || isChroma;
+  elements.spectrogramOverlapControl.hidden = false;
   elements.spectrogramWindowControl.hidden = !supportsWindowControl;
   elements.spectrogramScaleControl.hidden = !supportsScale;
   elements.spectrogramMelBandsControl.hidden = !supportsMelBands;
   elements.spectrogramMfccCoefficientsControl.hidden = !supportsMfccOptions;
   elements.spectrogramMfccMelBandsControl.hidden = !supportsMfccOptions;
   elements.spectrogramScalogramOmegaControl.hidden = !supportsScalogramOptions;
-  elements.spectrogramScalogramHopControl.hidden = !supportsHopControl;
   elements.spectrogramDbRangeControl.hidden = !supportsDbWindow;
   elements.spectrogramFftSelect.disabled = isScalogram || isChroma;
-  elements.spectrogramOverlapSelect.disabled = isScalogram || isChroma;
+  elements.spectrogramOverlapSelect.disabled = false;
   elements.spectrogramWindowSelect.disabled = !supportsWindowControl;
   elements.spectrogramScaleSelect.disabled = !supportsScale;
   elements.spectrogramMelBandsSelect.disabled = !supportsMelBands;
   elements.spectrogramMfccCoefficientsSelect.disabled = !supportsMfccOptions;
   elements.spectrogramMfccMelBandsSelect.disabled = !supportsMfccOptions;
   elements.spectrogramScalogramOmegaSlider.disabled = !supportsScalogramOptions;
-  elements.spectrogramScalogramHopSelect.disabled = !supportsHopControl;
   elements.spectrogramMinDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMaxDbSlider.disabled = !supportsDbWindow;
   renderSpectrogramDbWindowUi(dbWindow);
@@ -1236,10 +1263,12 @@ function getEffectiveSpectrogramRenderConfig() {
     state.spectrogramConfig.scalogramMinFrequency,
     state.spectrogramConfig.scalogramMaxFrequency,
   );
+  const fftSize = normalizeSpectrogramFftSize(state.spectrogramConfig.fftSize);
+  const overlapRatio = normalizeSpectrogramOverlapRatio(state.spectrogramConfig.overlapRatio);
   return {
     analysisType,
     colormapDistribution: normalizeSpectrogramColormapDistribution(state.spectrogramConfig.colormapDistribution),
-    fftSize: normalizeSpectrogramFftSize(state.spectrogramConfig.fftSize),
+    fftSize,
     frequencyScale: analysisType === 'spectrogram'
       ? normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale)
       : 'log' as SpectrogramFrequencyScale,
@@ -1250,13 +1279,21 @@ function getEffectiveSpectrogramRenderConfig() {
     mfccCoefficientCount: normalizeSpectrogramMfccCoefficientCount(state.spectrogramConfig.mfccCoefficientCount),
     mfccMelBandCount: normalizeSpectrogramMfccMelBandCount(state.spectrogramConfig.mfccMelBandCount),
     windowFunction: normalizeSpectrogramWindowFunction(state.spectrogramConfig.windowFunction),
-    scalogramHopSamples: getEffectiveScalogramHopSamples(state.spectrogramConfig.scalogramHopSamples),
+    scalogramHopSamples: getEffectiveSpectrogramHopSamples(analysisType, fftSize, overlapRatio),
     scalogramMaxFrequency: scalogramFrequencyRange.maxFrequency,
     scalogramMinFrequency: scalogramFrequencyRange.minFrequency,
     scalogramOmega0: normalizeSpectrogramScalogramOmega0(state.spectrogramConfig.scalogramOmega0),
     scalogramRowDensity: normalizeSpectrogramScalogramRowDensity(state.spectrogramConfig.scalogramRowDensity),
     minDecibels: dbWindow.minDecibels,
-    overlapRatio: normalizeSpectrogramOverlapRatio(state.spectrogramConfig.overlapRatio),
+    overlapRatio,
+  };
+}
+
+function getPersistedSpectrogramDefaults() {
+  return {
+    ...getEffectiveSpectrogramRenderConfig(),
+    // Hop is derived from overlap for every analysis type.
+    scalogramHopSamples: DEFAULT_SCALOGRAM_HOP_SAMPLES,
   };
 }
 
@@ -1318,6 +1355,7 @@ function resetCurrentSpectrogramTypeToDefaults(): void {
       state.spectrogramConfig.mfccMelBandCount = DEFAULT_MFCC_MEL_BAND_COUNT;
       break;
     case 'scalogram':
+      state.spectrogramConfig.overlapRatio = DEFAULT_SPECTROGRAM_OVERLAP_RATIO;
       state.spectrogramConfig.scalogramHopSamples = DEFAULT_SCALOGRAM_HOP_SAMPLES;
       state.spectrogramConfig.scalogramMinFrequency = DEFAULT_SCALOGRAM_MIN_FREQUENCY;
       state.spectrogramConfig.scalogramMaxFrequency = DEFAULT_SCALOGRAM_MAX_FREQUENCY;
@@ -1327,6 +1365,7 @@ function resetCurrentSpectrogramTypeToDefaults(): void {
       state.spectrogramConfig.maxDecibels = dbWindow.maxDecibels;
       break;
     case 'chroma':
+      state.spectrogramConfig.overlapRatio = DEFAULT_SPECTROGRAM_OVERLAP_RATIO;
       state.spectrogramConfig.windowFunction = DEFAULT_SPECTROGRAM_WINDOW_FUNCTION;
       state.spectrogramConfig.scalogramHopSamples = DEFAULT_SCALOGRAM_HOP_SAMPLES;
       break;
@@ -1345,7 +1384,7 @@ function schedulePersistSpectrogramDefaults(): void {
     state.spectrogramDefaultsPersistTimer = null;
     vscode.postMessage({
       type: 'persistSpectrogramDefaults',
-      body: getEffectiveSpectrogramRenderConfig(),
+      body: getPersistedSpectrogramDefaults(),
     });
   }, 160);
 }
@@ -2609,13 +2648,6 @@ function attachUiEvents(): void {
     );
     elements.spectrogramScalogramOmegaValue.textContent = String(state.spectrogramConfig.scalogramOmega0);
     scheduleSpectrogramConfigRefresh();
-    scheduleKeyboardSurfaceFocus();
-  });
-  elements.spectrogramScalogramHopSelect.addEventListener('change', () => {
-    state.spectrogramConfig.scalogramHopSamples = normalizeSpectrogramScalogramHopSetting(
-      elements.spectrogramScalogramHopSelect.value,
-    );
-    refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });
   elements.spectrogramScaleSelect.addEventListener('change', () => {
