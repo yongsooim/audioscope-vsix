@@ -12,10 +12,15 @@ export function normalizePlaybackRateSelection(value) {
 
 interface PlaybackRateControllerDeps {
   elements: AudioscopeElements;
+  scheduleKeyboardSurfaceFocus: () => void;
   state: any;
 }
 
-export function createAudioscopePlaybackRateController({ elements, state }: PlaybackRateControllerDeps) {
+export function createAudioscopePlaybackRateController({
+  elements,
+  scheduleKeyboardSurfaceFocus,
+  state,
+}: PlaybackRateControllerDeps) {
   function getPlaybackRateOptionButtons() {
     return Array.from(elements.playbackRateMenu.querySelectorAll<HTMLButtonElement>('.transport-rate-option'));
   }
@@ -54,9 +59,17 @@ export function createAudioscopePlaybackRateController({ elements, state }: Play
       button.setAttribute('aria-selected', option.selected ? 'true' : 'false');
       button.tabIndex = option.selected ? 0 : -1;
       button.textContent = option.textContent?.trim() || `${option.value}x`;
+      button.addEventListener('pointerdown', (event) => {
+        if (event.pointerType === 'mouse' && event.button !== 0) {
+          return;
+        }
+
+        event.preventDefault();
+      });
       button.addEventListener('click', () => {
         applyPlaybackRateSelection(option.value);
-        closePlaybackRateMenu({ restoreFocus: true });
+        closePlaybackRateMenu();
+        scheduleKeyboardSurfaceFocus();
       });
       fragment.append(button);
     }

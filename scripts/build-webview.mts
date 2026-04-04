@@ -7,11 +7,12 @@ const projectRoot = path.resolve(scriptDirectory, '..');
 
 await build({
   input: {
-    audioscope: path.join(projectRoot, 'src-webview', 'audioscope.ts'),
-    audioAnalysisWorker: path.join(projectRoot, 'src-webview', 'audioAnalysisWorker.ts'),
+    audioscope: path.join(projectRoot, 'src-webview', 'app.ts'),
+    audioEngineWorker: path.join(projectRoot, 'src-webview', 'audioEngineWorker.ts'),
+    audioAnalysisWorker: path.join(projectRoot, 'src-webview', 'audio-analysis', 'worker.ts'),
     embeddedDecodeWorker: path.join(projectRoot, 'src-webview', 'embeddedDecodeWorker.ts'),
-    interactiveWaveformWorker: path.join(projectRoot, 'src-webview', 'interactiveWaveformWorker.ts'),
-    audioTransportProcessor: path.join(projectRoot, 'src-webview', 'audioTransportProcessor.ts'),
+    interactiveWaveformWorker: path.join(projectRoot, 'src-webview', 'interactive-waveform', 'worker.ts'),
+    audioTransportProcessor: path.join(projectRoot, 'src-webview', 'transport', 'audioTransportProcessor.ts'),
   },
   output: {
     dir: path.join(projectRoot, 'dist', 'webview'),

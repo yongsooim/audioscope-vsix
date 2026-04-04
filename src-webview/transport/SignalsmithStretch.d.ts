@@ -1,4 +1,4 @@
-declare module './vendor/SignalsmithStretch.mjs' {
+declare module '../vendor/SignalsmithStretch.mjs' {
   export interface SignalsmithStretchSchedule {
     active?: boolean;
     input?: number;

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import type { ExecFileException } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
@@ -253,7 +254,7 @@ function execFileAsync(command: string, args: string[], timeout: number): Promis
         timeout,
         windowsHide: true,
       },
-      (error, stdout, stderr) => {
+      (error: ExecFileException | null, stdout: string, stderr: string) => {
         if (error) {
           reject(error);
           return;
@@ -303,7 +304,7 @@ export async function runEmbeddedFfprobe(resource: vscode.Uri, timeout: number):
     );
 
     return stdout;
-  } finally {
+} finally {
     await resourceHandle.cleanup();
   }
 }

@@ -1,5 +1,5 @@
 import { AUDIO_TRANSPORT_PROCESSOR_NAME } from './audioTransportShared';
-import SignalsmithStretch from './vendor/SignalsmithStretch.mjs';
+import SignalsmithStretch from '../vendor/SignalsmithStretch.mjs';
 
 const DEFAULT_SAMPLE_RATE = 48000;
 const DEFAULT_PLAYBACK_RATE = 1;
@@ -20,6 +20,15 @@ export interface PlaybackSession {
   sourceSampleRate: number;
 }
 
+export interface PlaybackClockSnapshot {
+  currentFrameFloat: number;
+  durationFrames: number;
+  loopEndFrame: number | null;
+  loopStartFrame: number | null;
+  playing: boolean;
+  sampleRate: number;
+}
+
 interface PlaybackSnapshotState {
   contextTime: number;
   currentFrame: number;
@@ -35,6 +44,7 @@ interface AudioTransportOptions {
 
 export interface AudioTransport {
   dispose(): Promise<void>;
+  getPlaybackClockState(): PlaybackClockSnapshot | null;
   getCurrentTime(): number;
   getDuration(): number;
   getLastFallbackReason(): string | null;
@@ -269,6 +279,30 @@ class AudioWorkletCopyTransport {
     return this.normalizePausedTime(this.pausedAtSeconds);
   }
 
+  getPlaybackClockState(): PlaybackClockSnapshot | null {
+    if (!this.playbackSession) {
+      return null;
+    }
+
+    const sourceLength = this.playbackSession.sourceLength;
+    const currentFrameFloat = this.snapshotState
+      ? this.projectFrameFromSnapshot(this.snapshotState)
+      : clampFramePrecise(this.pausedAtSeconds * this.getSourceSampleRate(), sourceLength);
+    const hasLoop = this.loopRange && this.loopRange.end > this.loopRange.start;
+    const loopFrames = hasLoop
+      ? this.getControlLoopFrames()
+      : { loopEndFrame: null, loopStartFrame: null };
+
+    return {
+      currentFrameFloat,
+      durationFrames: sourceLength,
+      loopEndFrame: loopFrames.loopEndFrame,
+      loopStartFrame: loopFrames.loopStartFrame,
+      playing: this.isPlaying(),
+      sampleRate: this.getSourceSampleRate(),
+    };
+  }
+
   getDuration(): number {
     return this.playbackSession?.durationSeconds ?? 0;
   }
@@ -286,7 +320,7 @@ class AudioWorkletCopyTransport {
   }
 
   isPlaying(): boolean {
-    return this.playing || this.snapshotState?.playing === true;
+    return !this.ended && (this.playing || this.snapshotState?.playing === true);
   }
 
   setPlaybackRate(_rate: number): void {
@@ -584,7 +618,7 @@ class AudioWorkletCopyTransport {
       const body = message.body as WorkletStateMessage['body'] | undefined;
       this.snapshotState = {
         contextTime: Number(body?.contextTime) || 0,
-        currentFrame: clampFrame(
+        currentFrame: clampFramePrecise(
           Number(body?.currentFrame) || 0,
           this.playbackSession?.sourceLength ?? 0,
         ),
@@ -607,7 +641,7 @@ class AudioWorkletCopyTransport {
     const sourceLength = this.playbackSession?.sourceLength ?? 0;
 
     if (!snapshotState?.playing || snapshotState.ended) {
-      return clampFrame(snapshotState?.currentFrame ?? 0, sourceLength);
+      return clampFramePrecise(snapshotState?.currentFrame ?? 0, sourceLength);
     }
 
     const nowContextTime = Number(this.audioContext?.currentTime) || 0;
@@ -617,13 +651,13 @@ class AudioWorkletCopyTransport {
     if (this.loopRange && this.loopRange.end > this.loopRange.start) {
       const { loopEndFrame, loopStartFrame } = this.getControlLoopFrames();
       const loopSpan = Math.max(1, loopEndFrame - loopStartFrame);
-      return clampFrame(
+      return clampFramePrecise(
         loopStartFrame + positiveModulo(projectedFrame - loopStartFrame, loopSpan),
         sourceLength,
       );
     }
 
-    return clampFrame(projectedFrame, sourceLength);
+    return clampFramePrecise(projectedFrame, sourceLength);
   }
 
   applyObservedState(currentFrame: number, playing: boolean, ended: boolean): number {
@@ -662,7 +696,7 @@ class AudioWorkletCopyTransport {
 
   sourceFrameToSeconds(frame: number): number {
     const sourceLength = this.playbackSession?.sourceLength ?? 0;
-    const safeFrame = clampFrame(frame, sourceLength);
+    const safeFrame = clampFramePrecise(frame, sourceLength);
     const duration = this.getDuration();
     return clamp(safeFrame / this.getSourceSampleRate(), 0, duration);
   }
@@ -768,6 +802,10 @@ class HybridAudioTransport implements AudioTransport {
 
   getCurrentTime(): number {
     return this.getActiveTransport().getCurrentTime();
+  }
+
+  getPlaybackClockState(): PlaybackClockSnapshot | null {
+    return this.getActiveTransport().getPlaybackClockState();
   }
 
   getDuration(): number {
@@ -1003,6 +1041,26 @@ class StretchAudioTransport implements AudioTransport {
     }
 
     return this.normalizePausedTime(this.pausedAtSeconds);
+  }
+
+  getPlaybackClockState(): PlaybackClockSnapshot | null {
+    if (!this.playbackSession) {
+      return null;
+    }
+
+    const sampleRate = this.playbackSession.sourceSampleRate || DEFAULT_SAMPLE_RATE;
+    const sourceLength = this.playbackSession.sourceLength;
+    const currentFrameFloat = clampFramePrecise(this.getCurrentTime() * sampleRate, sourceLength);
+    const hasLoop = this.loopRange && this.loopRange.end > this.loopRange.start;
+
+    return {
+      currentFrameFloat,
+      durationFrames: sourceLength,
+      loopEndFrame: hasLoop ? clampFramePrecise(this.loopRange.end * sampleRate, sourceLength) : null,
+      loopStartFrame: hasLoop ? clampFramePrecise(this.loopRange.start * sampleRate, sourceLength) : null,
+      playing: this.isPlaying(),
+      sampleRate,
+    };
   }
 
   getDuration(): number {
@@ -1427,6 +1485,12 @@ function clamp(value: number, min: number, max: number): number {
 function clampFrame(frame: number, sourceLength: number): number {
   const maxFrame = Math.max(0, Math.trunc(Number(sourceLength) || 0));
   const normalizedFrame = Math.round(Number(frame) || 0);
+  return clamp(normalizedFrame, 0, maxFrame);
+}
+
+function clampFramePrecise(frame: number, sourceLength: number): number {
+  const maxFrame = Math.max(0, Math.trunc(Number(sourceLength) || 0));
+  const normalizedFrame = Number(frame) || 0;
   return clamp(normalizedFrame, 0, maxFrame);
 }
 

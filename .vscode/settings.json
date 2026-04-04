@@ -1,0 +1,5 @@
+{
+  // This workspace only authors TypeScript; the JavaScript files are generated or vendored.
+  // Keep VS Code from type-checking those files via the implicit JS project.
+  "js/ts.implicitProjectConfig.checkJs": false
+}

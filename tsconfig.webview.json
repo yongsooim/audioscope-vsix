@@ -8,6 +8,7 @@
       "DOM",
       "WebWorker"
     ],
+    "strict": false,
     "skipLibCheck": true,
     "noEmit": true
   },

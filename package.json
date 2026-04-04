@@ -1,42 +1,53 @@
 {
   "name": "audioscope",
   "displayName": "audioscope",
-  "description": "Audio waveform and spectrogram viewer playback, zoom, loop",
+  "description": "VS Code audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review",
   "version": "1.0.0",
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yongsooim/wave-scope-vsix.git"
+    "url": "https://github.com/yongsooim/audioscope-vsix.git"
   },
-  "homepage": "https://github.com/yongsooim/wave-scope-vsix#readme",
+  "homepage": "https://github.com/yongsooim/audioscope-vsix#readme",
   "bugs": {
-    "url": "https://github.com/yongsooim/wave-scope-vsix/issues"
+    "url": "https://github.com/yongsooim/audioscope-vsix/issues"
   },
   "license": "MIT",
   "icon": "images/icon.png",
   "keywords": [
-    "audio",
-    "ffmpeg",
+    "audio inspector",
+    "audio analysis",
+    "audio editor",
     "waveform",
     "spectrogram",
+    "mel",
     "mel-spectrogram",
+    "mfcc",
     "scalogram",
+    "chroma",
+    "playback",
+    "loop",
+    "loop selection",
+    "metadata",
     "loudness",
-    "ITU-R BS.1770",
+    "LUFS",
+    "integrated LUFS",
+    "EBU R 128",
+    "LRA",
+    "ffmpeg",
+    "ffprobe",
     "mp3",
     "wav",
-    "wave",
+    "ogg",
     "flac",
     "m4a",
-    "ogg",
-    "oga",
     "aac",
     "opus",
-    "aif",
-    "aiff"
+    "aiff",
+    "aif"
   ],
   "files": [
-    "out/*.js",
+    "out/**",
     "dist/**",
     "src-webview/**/*.css",
     "src-webview/vendor/**/*.mjs",
@@ -45,18 +56,15 @@
     "CHANGELOG.md",
     "FFMPEG_SOURCE.md",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "src-wasm/third_party/ffmpeg/COPYING.LGPLv2.1",
+    "src-wasm/third_party/ffmpeg/COPYING.LGPLv3"
   ],
   "engines": {
     "vscode": "^1.100.0"
   },
   "categories": [
     "Other"
-  ],
-  "activationEvents": [
-    "onStartupFinished",
-    "onCommand:audioscope.openActiveFileInAudioscope",
-    "onCustomEditor:audioscope.editor"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -78,6 +86,92 @@
           "default": "high",
           "scope": "resource",
           "description": "Controls spectrogram analysis quality for audioscope. Higher presets request denser time/frequency detail."
+        },
+        "audioscope.spectrogramDefaults": {
+          "type": "object",
+          "scope": "window",
+          "additionalProperties": false,
+          "default": {
+            "analysisType": "spectrogram",
+            "colormapDistribution": "balanced",
+            "fftSize": 4096,
+            "frequencyScale": "log",
+            "maxDecibels": 0,
+            "melBandCount": 256,
+            "mfccCoefficientCount": 20,
+            "mfccMelBandCount": 128,
+            "minDecibels": -80,
+            "overlapRatio": 0.75,
+            "scalogramHopSamples": 0,
+            "scalogramMaxFrequency": 20000,
+            "scalogramMinFrequency": 20,
+            "scalogramOmega0": 6,
+            "scalogramRowDensity": 1,
+            "windowFunction": "hann"
+          },
+          "description": "Stores the default audioscope spectrogram settings that new files open with.",
+          "properties": {
+            "analysisType": {
+              "type": "string",
+              "enum": ["spectrogram", "mel", "mfcc", "scalogram", "chroma"]
+            },
+            "colormapDistribution": {
+              "type": "string",
+              "enum": ["balanced", "contrast", "soft"]
+            },
+            "fftSize": {
+              "type": "number",
+              "enum": [1024, 2048, 4096, 8192, 16384]
+            },
+            "frequencyScale": {
+              "type": "string",
+              "enum": ["log", "mixed", "linear"]
+            },
+            "maxDecibels": {
+              "type": "number"
+            },
+            "melBandCount": {
+              "type": "number",
+              "enum": [128, 256, 512]
+            },
+            "mfccCoefficientCount": {
+              "type": "number",
+              "enum": [13, 20, 32, 40]
+            },
+            "mfccMelBandCount": {
+              "type": "number",
+              "enum": [128, 256, 512]
+            },
+            "minDecibels": {
+              "type": "number"
+            },
+            "overlapRatio": {
+              "type": "number",
+              "enum": [0.5, 0.75, 0.875, 0.9375]
+            },
+            "scalogramHopSamples": {
+              "type": "number",
+              "enum": [0, 256, 512, 1024, 2048, 4096]
+            },
+            "scalogramMaxFrequency": {
+              "type": "number"
+            },
+            "scalogramMinFrequency": {
+              "type": "number"
+            },
+            "scalogramOmega0": {
+              "type": "number",
+              "enum": [4, 5, 6, 7, 8, 10, 12]
+            },
+            "scalogramRowDensity": {
+              "type": "number",
+              "enum": [0.5, 0.75, 1, 1.5, 2, 3, 4]
+            },
+            "windowFunction": {
+              "type": "string",
+              "enum": ["hann", "hamming", "blackman", "rectangular"]
+            }
+          }
         }
       }
     },
@@ -145,6 +239,6 @@
     "@types/vscode": "^1.100.0",
     "rolldown": "^1.0.0-rc.12",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.2"
+    "typescript": "^6.0.2"
   }
 }

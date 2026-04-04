@@ -1,0 +1,7 @@
+{
+  "extends": "../tsconfig.webview.json",
+  "include": [
+    "./**/*.ts",
+    "./**/*.d.ts"
+  ]
+}

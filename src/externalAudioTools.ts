@@ -23,14 +23,35 @@ export interface ExternalToolStatusPayload {
 }
 
 export interface AudioscopePayload {
+  audioBytes: ArrayBuffer | null;
   documentUri: string;
   externalTools: ExternalToolStatusPayload;
   fileBacked: boolean;
   fileExtension: string;
   fileName: string;
   fileSize: number | null;
+  spectrogramDefaults: SpectrogramDefaultsPayload;
   spectrogramQuality: 'balanced' | 'high' | 'max';
   sourceUri: string;
+}
+
+export interface SpectrogramDefaultsPayload {
+  analysisType: 'chroma' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
+  colormapDistribution: 'balanced' | 'contrast' | 'soft';
+  fftSize: number;
+  frequencyScale: 'linear' | 'log' | 'mixed';
+  maxDecibels: number;
+  melBandCount: number;
+  mfccCoefficientCount: number;
+  mfccMelBandCount: number;
+  minDecibels: number;
+  overlapRatio: number;
+  scalogramHopSamples: number;
+  scalogramMaxFrequency: number;
+  scalogramMinFrequency: number;
+  scalogramOmega0: number;
+  scalogramRowDensity: number;
+  windowFunction: 'blackman' | 'hamming' | 'hann' | 'rectangular';
 }
 
 export interface MediaMetadataSummaryPayload {
@@ -270,18 +291,6 @@ function parseNumberValue(value: unknown): number | null {
   }
 
   return null;
-}
-
-function getPrimaryAudioStream(rawPayload: FfprobeJsonPayload): FfprobeStreamSection | null {
-  const streams = Array.isArray(rawPayload.streams) ? rawPayload.streams : [];
-  return streams.find((stream) => stream.codec_type === 'audio') ?? null;
-}
-
-function getAudioDurationSeconds(rawPayload: FfprobeJsonPayload): number | null {
-  const primaryAudioStream = getPrimaryAudioStream(rawPayload);
-  const formatSection = rawPayload.format;
-
-  return parseNumberValue(primaryAudioStream?.duration) ?? parseNumberValue(formatSection?.duration);
 }
 
 function formatFrequencyText(value: number | null): string | null {

@@ -1,5 +1,13 @@
 import { clamp } from '../core/format';
 
+const MIXED_FREQUENCY_PIVOT_HZ = 1000;
+const MIXED_FREQUENCY_PIVOT_POSITION = 0.5;
+const SLANEY_MEL_FREQUENCY_MIN = 0;
+const SLANEY_MEL_FREQUENCY_STEP = 200 / 3;
+const SLANEY_MEL_LOG_REGION_START_HZ = 1000;
+const SLANEY_MEL_LOG_REGION_START_MEL = (SLANEY_MEL_LOG_REGION_START_HZ - SLANEY_MEL_FREQUENCY_MIN) / SLANEY_MEL_FREQUENCY_STEP;
+const SLANEY_MEL_LOG_STEP = Math.log(6.4) / 27;
+
 export function buildLinearFrequencyTicks(
   minFrequency: number,
   maxFrequency: number,
@@ -32,6 +40,33 @@ export function buildLinearFrequencyTicks(
   }
 
   return [...new Set(ticks.map((tick) => Math.round(tick)))]
+    .filter((tick) => tick >= safeMin && tick <= safeMax)
+    .sort((left, right) => right - left);
+}
+
+export function buildLogFrequencyTicks(
+  minFrequency: number,
+  maxFrequency: number,
+): number[] {
+  const safeMin = Math.max(1, minFrequency);
+  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const multipliers = [1, 2, 5];
+  const ticks: number[] = [];
+  const minExponent = Math.floor(Math.log10(safeMin));
+  const maxExponent = Math.ceil(Math.log10(safeMax));
+
+  for (let exponent = minExponent; exponent <= maxExponent; exponent += 1) {
+    const magnitude = 10 ** exponent;
+
+    for (const multiplier of multipliers) {
+      const tick = multiplier * magnitude;
+      if (tick >= safeMin && tick <= safeMax) {
+        ticks.push(Math.round(tick));
+      }
+    }
+  }
+
+  return [...new Set(ticks)]
     .filter((tick) => tick >= safeMin && tick <= safeMax)
     .sort((left, right) => right - left);
 }
@@ -72,17 +107,72 @@ export function getFrequencyAtLogPosition(position: number, minFrequency: number
   return Math.exp(start + ratio * (end - start));
 }
 
+function getMixedFrequencyPivot(minFrequency: number, maxFrequency: number): number {
+  const safeMin = Math.max(1, minFrequency);
+  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  return clamp(MIXED_FREQUENCY_PIVOT_HZ, safeMin, safeMax);
+}
+
+export function getMixedFrequencyPosition(frequency: number, minFrequency: number, maxFrequency: number): number {
+  const safeMin = Math.max(1, minFrequency);
+  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const pivot = getMixedFrequencyPivot(safeMin, safeMax);
+  const current = clamp(frequency, safeMin, safeMax);
+
+  if (current <= pivot || pivot >= safeMax) {
+    const lowerRatio = pivot <= safeMin
+      ? 1
+      : (current - safeMin) / Math.max(1e-9, pivot - safeMin);
+    return 1 - (lowerRatio * MIXED_FREQUENCY_PIVOT_POSITION);
+  }
+
+  const start = Math.log(pivot);
+  const end = Math.log(safeMax);
+  const currentLog = Math.log(current);
+  const upperRatio = (currentLog - start) / Math.max(1e-9, end - start);
+  return (1 - MIXED_FREQUENCY_PIVOT_POSITION) * (1 - upperRatio);
+}
+
+export function getFrequencyAtMixedPosition(position: number, minFrequency: number, maxFrequency: number): number {
+  const safeMin = Math.max(1, minFrequency);
+  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const pivot = getMixedFrequencyPivot(safeMin, safeMax);
+  const clampedPosition = clamp(position, 0, 1);
+
+  if (clampedPosition >= (1 - MIXED_FREQUENCY_PIVOT_POSITION) || pivot >= safeMax) {
+    const lowerRatio = 1 - (clampedPosition / Math.max(1e-9, MIXED_FREQUENCY_PIVOT_POSITION));
+    return safeMin + (pivot - safeMin) * clamp(lowerRatio, 0, 1);
+  }
+
+  const upperRatio = 1 - (clampedPosition / Math.max(1e-9, 1 - MIXED_FREQUENCY_PIVOT_POSITION));
+  const start = Math.log(pivot);
+  const end = Math.log(safeMax);
+  return Math.exp(start + clamp(upperRatio, 0, 1) * (end - start));
+}
+
 function frequencyToMel(frequency: number): number {
-  return 1127 * Math.log(1 + (frequency / 700));
+  const safeFrequency = Math.max(0, frequency);
+
+  if (safeFrequency < SLANEY_MEL_LOG_REGION_START_HZ) {
+    return (safeFrequency - SLANEY_MEL_FREQUENCY_MIN) / SLANEY_MEL_FREQUENCY_STEP;
+  }
+
+  return SLANEY_MEL_LOG_REGION_START_MEL
+    + (Math.log(safeFrequency / SLANEY_MEL_LOG_REGION_START_HZ) / SLANEY_MEL_LOG_STEP);
 }
 
 function melToFrequency(melValue: number): number {
-  return 700 * (Math.exp(melValue / 1127) - 1);
+  if (melValue < SLANEY_MEL_LOG_REGION_START_MEL) {
+    return SLANEY_MEL_FREQUENCY_MIN + (SLANEY_MEL_FREQUENCY_STEP * melValue);
+  }
+
+  return SLANEY_MEL_LOG_REGION_START_HZ
+    * Math.exp(SLANEY_MEL_LOG_STEP * (melValue - SLANEY_MEL_LOG_REGION_START_MEL));
 }
 
 export function getMelFrequencyPosition(frequency: number, minFrequency: number, maxFrequency: number): number {
-  const safeMin = Math.max(1, minFrequency);
-  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const safeMin = Math.max(0, minFrequency);
+  const safeMax = Math.max(safeMin + 1, maxFrequency);
   const start = frequencyToMel(safeMin);
   const end = frequencyToMel(safeMax);
   const current = frequencyToMel(clamp(frequency, safeMin, safeMax));
@@ -91,8 +181,8 @@ export function getMelFrequencyPosition(frequency: number, minFrequency: number,
 }
 
 export function getFrequencyAtMelPosition(position: number, minFrequency: number, maxFrequency: number): number {
-  const safeMin = Math.max(1, minFrequency);
-  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const safeMin = Math.max(0, minFrequency);
+  const safeMax = Math.max(safeMin + 1, maxFrequency);
   const start = frequencyToMel(safeMin);
   const end = frequencyToMel(safeMax);
   const ratio = 1 - clamp(position, 0, 1);

@@ -162,7 +162,7 @@ export function snapWaveformRenderRange(
   candidateRange: TimeRange,
   duration: number,
   renderWidth: number,
-  renderScale: number,
+  _renderScale: number,
 ): TimeRange {
   const renderSpan = Math.max(0, candidateRange.end - candidateRange.start);
   const clampedDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
@@ -172,17 +172,9 @@ export function snapWaveformRenderRange(
     return candidateRange;
   }
 
-  const columnCount = Math.max(1, Math.round(renderWidth * renderScale));
-  const secondsPerColumn = renderSpan / columnCount;
-
-  if (!Number.isFinite(secondsPerColumn) || secondsPerColumn <= 0) {
-    return candidateRange;
-  }
-
   const lowerBound = clamp(displayRange.end - renderSpan, 0, maxStart);
   const upperBound = clamp(displayRange.start, lowerBound, maxStart);
-  const snappedStart = Math.round(candidateRange.start / secondsPerColumn) * secondsPerColumn;
-  const nextStart = clamp(snappedStart, lowerBound, upperBound);
+  const nextStart = clamp(candidateRange.start, lowerBound, upperBound);
 
   return {
     start: nextStart,
@@ -191,8 +183,8 @@ export function snapWaveformRenderRange(
 }
 
 export function quantizeWaveformCssOffset(offsetPx: number, renderScale: number): number {
-  const deviceScale = Math.max(1, renderScale);
-  return Math.round(offsetPx * deviceScale) / deviceScale;
+  void renderScale;
+  return offsetPx;
 }
 
 export function isRangeBuffered(

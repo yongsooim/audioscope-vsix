@@ -8,6 +8,9 @@
 - Bundled revision for this release: `7d57621b832a68c7b150fb2aab1c02e14c82144d`
 - Vendored source path in this repository: `src-wasm/third_party/ffmpeg`
 - Local modifications inside the FFmpeg submodule for this release: none
+- Included LGPL license texts in this distribution:
+  - `src-wasm/third_party/ffmpeg/COPYING.LGPLv2.1`
+  - `src-wasm/third_party/ffmpeg/COPYING.LGPLv3`
 
 ## Rebuilding The Bundled Media Tools
 

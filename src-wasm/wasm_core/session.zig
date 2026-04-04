@@ -2,10 +2,12 @@ const core = @import("./core.zig");
 const spectrogram = @import("./spectrogram.zig");
 
 pub fn freeWaveLevels() void {
-    if (core.g_session.levels.len == 0) return;
-    for (core.g_session.levels) |*level| level.deinit();
-    core.allocator.free(core.g_session.levels);
-    core.g_session.levels = &.{};
+    if (core.g_session.levels.len > 0) {
+        for (core.g_session.levels) |*level| level.deinit();
+        core.allocator.free(core.g_session.levels);
+        core.g_session.levels = &.{};
+    }
+    core.g_session.waveform_build = .{};
 }
 
 pub fn computeLevelCount(sample_count: i32) i32 {
@@ -27,7 +29,9 @@ pub fn resetSessionState() void {
     freeWaveLevels();
     spectrogram.freeFftResources();
     spectrogram.freeBandLayoutResources();
+    spectrogram.freeChromaLayoutResources();
     spectrogram.freeScalogramResources();
+    spectrogram.freeConstantQResources();
     if (core.g_session.samples.len > 0) core.allocator.free(core.g_session.samples);
     core.g_session = .{};
 }

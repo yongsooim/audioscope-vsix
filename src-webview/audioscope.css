@@ -26,6 +26,8 @@
   --overview-track-border: rgba(103, 129, 178, 0.22);
   --overview-thumb-start: #4f8cff;
   --overview-thumb-end: #2f6df3;
+  --loop-accent: rgba(255, 223, 154, 0.8);
+  --loop-accent-glow: rgba(251, 191, 36, 0.32);
   --selection-fill: rgba(96, 165, 250, 0.14);
   --selection-border: rgba(191, 219, 254, 0.28);
   --cursor: rgba(191, 219, 254, 0.92);
@@ -146,10 +148,10 @@ body {
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 140ms ease;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.72) rgba(10, 16, 29, 0.56);
+  
 }
 
 .media-metadata-detail::-webkit-scrollbar {
@@ -267,6 +269,7 @@ body {
   min-height: var(--viewport-splitter-size);
   cursor: row-resize;
   touch-action: none;
+  -webkit-user-select: none;
   user-select: none;
   background:
     linear-gradient(180deg, rgba(116, 143, 189, 0.04) 0%, rgba(116, 143, 189, 0.16) 50%, rgba(116, 143, 189, 0.04) 100%);
@@ -293,12 +296,10 @@ body {
     0 0 0 1px rgba(148, 163, 184, 0.16),
     0 10px 20px rgba(0, 0, 0, 0.24);
   opacity: 0.82;
-  transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
 }
 
 .viewport-splitter:hover .viewport-splitter-handle,
 .viewport-splitter[data-dragging="true"] .viewport-splitter-handle {
-  transform: scaleX(1.12);
   opacity: 1;
   background: rgba(219, 234, 254, 0.94);
 }
@@ -377,7 +378,7 @@ body {
 .wave-toolbar-group-loop #wave-loop-label {
   flex: 1 1 120px;
   min-width: 0;
-  color: rgba(110, 168, 255, 0.96);
+  color: var(--loop-accent);
   width: 120px;
   max-width: none;
   overflow: hidden;
@@ -389,8 +390,8 @@ body {
   background: linear-gradient(180deg, rgba(11, 20, 40, 0.94) 0%, rgba(8, 14, 28, 0.9) 100%);
   cursor: default;
   pointer-events: none;
-  user-select: none;
   -webkit-user-select: none;
+  user-select: none;
   -webkit-user-drag: none;
 }
 
@@ -401,8 +402,8 @@ body {
   text-align: center;
   cursor: default;
   pointer-events: none;
-  user-select: none;
   -webkit-user-select: none;
+  user-select: none;
   -webkit-user-drag: none;
 }
 
@@ -428,6 +429,7 @@ body {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 10px 24px rgba(0, 0, 0, 0.1);
+  -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
 }
 
@@ -454,6 +456,7 @@ body {
   border: none;
   background: transparent;
   box-shadow: none;
+  -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
 
@@ -469,16 +472,11 @@ body {
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
-  transition: border-color 120ms ease, transform 120ms ease, background 120ms ease;
 }
 
 .wave-tool-button:hover {
   border-color: rgba(147, 197, 253, 0.34);
   background: linear-gradient(180deg, rgba(23, 35, 60, 0.98) 0%, rgba(12, 20, 38, 0.98) 100%);
-}
-
-.wave-tool-button:active {
-  transform: translateY(1px);
 }
 
 .wave-tool-button:disabled,
@@ -522,13 +520,13 @@ body {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 10px 24px rgba(0, 0, 0, 0.1);
+  -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
   color: rgba(191, 219, 254, 0.78);
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0.01em;
-  transition: border-color 140ms ease, background 140ms ease, color 140ms ease, box-shadow 140ms ease;
 }
 
 .wave-follow-toggle-track {
@@ -541,7 +539,6 @@ body {
   border-radius: 999px;
   background: rgba(71, 85, 105, 0.72);
   box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.45);
-  transition: background 140ms ease;
 }
 
 .wave-follow-toggle-thumb {
@@ -550,7 +547,6 @@ body {
   border-radius: 999px;
   background: rgba(226, 232, 240, 0.96);
   box-shadow: 0 1px 4px rgba(15, 23, 42, 0.32);
-  transition: transform 140ms ease, background 140ms ease;
 }
 
 .wave-follow-toggle-input:checked + .wave-follow-toggle-button {
@@ -607,7 +603,6 @@ body {
   pointer-events: none;
   transform: translate3d(0, 0, 0);
   transform-origin: left center;
-  will-change: transform;
 }
 
 .waveform-canvas {
@@ -618,7 +613,6 @@ body {
   height: 100%;
   transform: translate3d(0, 0, 0);
   transform-origin: left center;
-  will-change: width, transform;
 }
 
 .waveform-hit-target {
@@ -705,8 +699,8 @@ body {
   width: 2px;
   transform: translateX(-50%);
   border-radius: 999px;
-  background: rgba(255, 223, 154, 0.8);
-  box-shadow: 0 0 2px rgba(251, 191, 36, 0.32);
+  background: var(--loop-accent);
+  box-shadow: 0 0 2px var(--loop-accent-glow);
 }
 
 .spectrogram-loop-handle {
@@ -728,7 +722,6 @@ body {
   height: 100%;
   transform: translate3d(0, 0, 0);
   transform-origin: left center;
-  will-change: transform;
 }
 
 .waveform-axis-tick {
@@ -762,6 +755,7 @@ body {
   position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
+  --spectrogram-axis-width: 30px;
   width: 100%;
   max-width: 100%;
   margin: 0 !important;
@@ -774,7 +768,7 @@ body {
 .spectrogram-axis {
   position: absolute;
   inset: 0 auto 0 0;
-  width: 76px;
+  width: var(--spectrogram-axis-width);
   z-index: 4;
   overflow: visible;
   pointer-events: none;
@@ -803,7 +797,6 @@ body {
   height: 100%;
   cursor: pointer;
   transform-origin: left center;
-  will-change: width, transform;
 }
 
 .spectrogram-meta {
@@ -814,15 +807,75 @@ body {
   display: grid;
   gap: 7px;
   justify-items: stretch;
-  padding: 8px 10px;
   border: 1px solid rgba(191, 219, 254, 0.1);
-  border-radius: 11px;
-  background: linear-gradient(180deg, rgba(7, 11, 22, 0.56) 0%, rgba(5, 9, 18, 0.46) 100%);
+  background: linear-gradient(180deg, rgba(7, 11, 22, 0.5) 0%, rgba(5, 9, 18, 0.4) 100%);
   white-space: nowrap;
+  -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+  user-select: none;
   box-shadow:
     0 10px 24px rgba(0, 0, 0, 0.12),
     inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.spectrogram-meta * {
+  -webkit-user-drag: none;
+}
+
+.spectrogram-meta[data-open="false"] {
+  padding: 6px 7px;
+  border-radius: 999px;
+}
+
+.spectrogram-meta[data-open="true"] {
+  padding: 8px 10px;
+  border-radius: 11px;
+}
+
+.spectrogram-meta-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 9px;
+  border: 1px solid rgba(191, 219, 254, 0.12);
+  border-radius: 999px;
+  background: rgba(10, 16, 29, 0.56);
+  color: rgba(245, 249, 255, 0.98);
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.spectrogram-meta-toggle::after {
+  content: "+";
+  color: rgba(191, 219, 254, 0.72);
+}
+
+.spectrogram-meta[data-open="true"] .spectrogram-meta-toggle::after {
+  content: "-";
+}
+
+.spectrogram-meta-toggle:hover {
+  border-color: rgba(191, 219, 254, 0.18);
+  background: rgba(12, 18, 33, 0.66);
+}
+
+.spectrogram-meta-toggle:focus,
+.spectrogram-meta-toggle:focus-visible {
+  outline: none !important;
+  border-color: rgba(191, 219, 254, 0.16);
+  box-shadow: none !important;
+}
+
+.spectrogram-meta-controls {
+  display: grid;
+  gap: 7px;
 }
 
 .spectrogram-control {
@@ -832,6 +885,23 @@ body {
   gap: 7px;
   min-width: 0;
   width: 100%;
+}
+
+.spectrogram-control-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+
+.spectrogram-control-inline .spectrogram-control-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.spectrogram-control-slider {
+  align-items: start;
 }
 
 .spectrogram-control-label {
@@ -849,12 +919,13 @@ body {
   padding: 3px 8px;
   border: 1px solid rgba(191, 219, 254, 0.12);
   border-radius: 7px;
-  background: rgba(10, 16, 29, 0.62);
+  background: rgba(10, 16, 29, 0.56);
   color: rgba(245, 249, 255, 0.98);
   font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
   font-size: 10px;
   font-weight: 700;
   line-height: 1.2;
+  cursor: pointer;
 }
 
 .spectrogram-control-select:focus,
@@ -867,6 +938,154 @@ body {
 .spectrogram-control-select:disabled {
   opacity: 0.56;
   cursor: not-allowed;
+}
+
+.spectrogram-control-button {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid rgba(191, 219, 254, 0.12);
+  border-radius: 7px;
+  background: rgba(10, 16, 29, 0.56);
+  color: rgba(245, 249, 255, 0.98);
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.spectrogram-control-button:hover {
+  border-color: rgba(191, 219, 254, 0.18);
+  background: rgba(12, 18, 33, 0.66);
+}
+
+.spectrogram-control-button:focus,
+.spectrogram-control-button:focus-visible {
+  outline: none !important;
+  border-color: rgba(191, 219, 254, 0.16);
+  box-shadow: none !important;
+}
+
+.spectrogram-control-slider-group {
+  display: grid;
+  gap: 4px;
+  min-width: 118px;
+}
+
+.spectrogram-control-slider-group-single {
+  position: relative;
+  min-width: 118px;
+  padding-top: 22px;
+}
+
+.spectrogram-control-slider-group-dual {
+  position: relative;
+  min-width: 118px;
+  padding-top: 22px;
+}
+
+.spectrogram-control-range-dual {
+  position: absolute;
+  inset: 9px 0 auto 0;
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      90deg,
+      rgba(71, 85, 105, 0.44) 0%,
+      rgba(71, 85, 105, 0.44) var(--range-start, 0%),
+      rgba(96, 165, 250, 0.9) var(--range-start, 0%),
+      rgba(96, 165, 250, 0.9) var(--range-end, 100%),
+      rgba(71, 85, 105, 0.44) var(--range-end, 100%),
+      rgba(71, 85, 105, 0.44) 100%
+    );
+  pointer-events: none;
+}
+
+.spectrogram-control-range-single {
+  position: absolute;
+  inset: 9px 0 auto 0;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(71, 85, 105, 0.44);
+  pointer-events: none;
+}
+
+.spectrogram-control-range {
+  position: absolute;
+  inset: 0 0 auto 0;
+  width: 100%;
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+  cursor: ew-resize;
+}
+
+.spectrogram-control-range-min {
+  z-index: 2;
+}
+
+.spectrogram-control-range-max {
+  z-index: 3;
+}
+
+.spectrogram-control-range-single-input {
+  z-index: 2;
+}
+
+.spectrogram-control-range::-webkit-slider-runnable-track {
+  height: 22px;
+  background: transparent;
+}
+
+.spectrogram-control-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: 5px;
+  border: 1px solid rgba(191, 219, 254, 0.78);
+  border-radius: 999px;
+  background: rgba(248, 250, 252, 0.98);
+  box-shadow:
+    0 0 0 1px rgba(8, 13, 24, 0.82),
+    0 1px 4px rgba(15, 23, 42, 0.32);
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+
+.spectrogram-control-range::-moz-range-track {
+  height: 22px;
+  background: transparent;
+  border: 0;
+}
+
+.spectrogram-control-range::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: 1px solid rgba(191, 219, 254, 0.78);
+  border-radius: 999px;
+  background: rgba(248, 250, 252, 0.98);
+  box-shadow:
+    0 0 0 1px rgba(8, 13, 24, 0.82),
+    0 1px 4px rgba(15, 23, 42, 0.32);
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+
+.spectrogram-control-range:focus,
+.spectrogram-control-range:focus-visible {
+  outline: none !important;
+}
+
+.spectrogram-control-slider-value {
+  color: rgba(226, 232, 240, 0.88);
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .spectrogram-hit-target {
@@ -984,17 +1203,15 @@ body {
   white-space: nowrap;
   pointer-events: none;
   opacity: 0;
-  transform: translate3d(0, 6px, 0);
-  transition: opacity 120ms ease, transform 120ms ease;
   box-shadow:
     0 10px 24px rgba(0, 0, 0, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
 }
 
 .surface-hover-tooltip.visible {
   opacity: 1;
-  transform: translate3d(0, 0, 0);
 }
 
 .surface-hover-tooltip-detail {
@@ -1015,6 +1232,7 @@ body {
   border-top: 1px solid rgba(147, 197, 253, 0.16);
   background:
     linear-gradient(180deg, rgba(12, 19, 34, 0.98) 0%, rgba(7, 11, 22, 0.99) 100%);
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   box-shadow: 0 -12px 24px rgba(0, 0, 0, 0.28);
   scrollbar-width: none;
@@ -1171,6 +1389,7 @@ body {
   box-shadow:
     0 16px 32px rgba(0, 0, 0, 0.34),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   pointer-events: auto;
 }
@@ -1238,9 +1457,9 @@ body {
     inset 0 0 0 1px rgba(255, 255, 255, 0.05),
     0 0 0 1px rgba(79, 140, 255, 0.1),
     0 8px 18px rgba(37, 99, 235, 0.12);
+  -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   pointer-events: none;
-  will-change: left, width;
 }
 
 .timeline-current-marker {
@@ -1276,14 +1495,11 @@ body {
   white-space: nowrap;
   pointer-events: none;
   opacity: 0;
-  transform: translate3d(-50%, 4px, 0);
-  transition: opacity 120ms ease, transform 120ms ease;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24);
 }
 
 .timeline-hover-tooltip.visible {
   opacity: 1;
-  transform: translate3d(-50%, 0, 0);
 }
 
 .timeline:focus,
@@ -1385,8 +1601,8 @@ body {
   font-variant-numeric: tabular-nums;
   text-align: right;
   cursor: default;
-  user-select: none;
   -webkit-user-select: none;
+  user-select: none;
 }
 
 .loudness-summary {
@@ -1538,11 +1754,7 @@ body {
 
   .spectrogram-panel {
     padding: 0 var(--surface-inline-padding) !important;
-  }
-
-  .spectrogram-axis {
-    inset: 0 auto 0 0;
-    width: 60px;
+    --spectrogram-axis-width: 60px;
   }
 
   .viewport-splitter-handle {

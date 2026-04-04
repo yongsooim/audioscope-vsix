@@ -1,11 +1,32 @@
 const core = @import("./core.zig");
 const session = @import("./session.zig");
 
-fn pickWaveformLevel(samples_per_pixel: f64) ?*const core.WaveLevel {
+fn isWaveformLevelRangeBuilt(level_index: usize, end_sample: f64) bool {
+    if (level_index >= core.g_session.levels.len) return false;
+    if (!core.g_session.waveform_build.active) return true;
+
+    const build_level_index = core.g_session.waveform_build.current_level_index;
+    const target_level_index = @as(i32, @intCast(level_index));
+    if (build_level_index > target_level_index) return true;
+    if (build_level_index < target_level_index) return false;
+
+    const level = &core.g_session.levels[level_index];
+    const clamped_end_sample = clampSamplePosition(end_sample);
+    const required_end_block = core.ceilDivI32(
+        @as(i32, @intFromFloat(@ceil(clamped_end_sample))),
+        level.block_size,
+    );
+    return required_end_block <= core.g_session.waveform_build.current_block_index;
+}
+
+fn pickWaveformLevel(samples_per_pixel: f64, end_sample: f64) ?*const core.WaveLevel {
     var selected: ?*const core.WaveLevel = null;
 
-    for (core.g_session.levels) |*level| {
+    for (core.g_session.levels, 0..) |*level, level_index| {
         if (@as(f64, @floatFromInt(level.block_size)) <= samples_per_pixel * 1.5) {
+            if (!isWaveformLevelRangeBuilt(level_index, end_sample)) {
+                continue;
+            }
             selected = level;
             continue;
         }
@@ -35,16 +56,13 @@ fn getLevelRange(level: *const core.WaveLevel, start_sample: i32, end_sample: i3
         return .{ .min = 1.0, .max = -1.0 };
     }
 
-    const min_result = core.reduceMinMax(
-        level.min_peaks[@as(usize, @intCast(start_block))..@as(usize, @intCast(end_block))],
-        false,
-    );
-    const max_result = core.reduceMinMax(
-        level.max_peaks[@as(usize, @intCast(start_block))..@as(usize, @intCast(end_block))],
-        false,
-    );
+    var peak: f32 = 0.0;
+    var block_index = start_block;
+    while (block_index < end_block) : (block_index += 1) {
+        peak = core.maxF32(peak, level.abs_peaks[@as(usize, @intCast(block_index))]);
+    }
 
-    return .{ .min = min_result.min, .max = max_result.max };
+    return .{ .min = -peak, .max = peak };
 }
 
 const StableLevelSlicePlan = struct {
@@ -138,9 +156,11 @@ fn computeStableSampleSlicePlan(start_sample: f64, end_sample: f64, _: i32) Stab
     };
 }
 
-pub export fn wave_build_waveform_pyramid() i32 {
-    if (core.g_session.samples.len == 0 or core.g_session.sample_count <= 0) return 0;
+fn peakFromRange(result: core.RangeResult) f32 {
+    return core.maxF32(@abs(result.min), @abs(result.max));
+}
 
+fn prepareWaveformLevels() i32 {
     session.freeWaveLevels();
 
     const level_count = session.computeLevelCount(core.g_session.sample_count);
@@ -150,59 +170,111 @@ pub export fn wave_build_waveform_pyramid() i32 {
     for (core.g_session.levels) |*level| level.* = .{};
 
     var block_size = core.min_level_block_size;
-    var previous_level: ?*core.WaveLevel = null;
-    for (core.g_session.levels, 0..) |*level, block_index| {
-        _ = block_index;
+    for (core.g_session.levels) |*level| {
         const block_count = core.ceilDivI32(core.g_session.sample_count, block_size);
         level.block_size = block_size;
         level.block_count = block_count;
-        level.min_peaks = core.allocator.alloc(f32, @as(usize, @intCast(block_count))) catch {
+        level.abs_peaks = core.allocator.alloc(f32, @as(usize, @intCast(block_count))) catch {
             session.freeWaveLevels();
             return 0;
         };
-        level.max_peaks = core.allocator.alloc(f32, @as(usize, @intCast(block_count))) catch {
-            session.freeWaveLevels();
-            return 0;
-        };
-
-        var sample_block_index: usize = 0;
-        if (previous_level) |parent_level| {
-            while (sample_block_index < level.min_peaks.len) : (sample_block_index += 1) {
-                const start = @as(i32, @intCast(sample_block_index)) * core.level_scale_factor;
-                const end = core.minI32(parent_level.block_count, start + core.level_scale_factor);
-                var min_peak: f32 = 1.0;
-                var max_peak: f32 = -1.0;
-                var parent_index = start;
-
-                while (parent_index < end) : (parent_index += 1) {
-                    const parent_usize = @as(usize, @intCast(parent_index));
-                    min_peak = core.minF32(min_peak, parent_level.min_peaks[parent_usize]);
-                    max_peak = core.maxF32(max_peak, parent_level.max_peaks[parent_usize]);
-                }
-
-                level.min_peaks[sample_block_index] = min_peak;
-                level.max_peaks[sample_block_index] = max_peak;
-            }
-        } else {
-            while (sample_block_index < level.min_peaks.len) : (sample_block_index += 1) {
-                const start = @as(i32, @intCast(sample_block_index)) * block_size;
-                const end = core.minI32(core.g_session.sample_count, start + block_size);
-                const result = core.reduceMinMax(
-                    core.g_session.samples[@as(usize, @intCast(start))..@as(usize, @intCast(end))],
-                    true,
-                );
-                level.min_peaks[sample_block_index] = result.min;
-                level.max_peaks[sample_block_index] = result.max;
-            }
-        }
-
-        previous_level = level;
-
-        if (core.ceilDivI32(core.g_session.sample_count, block_size) <= core.min_level_buckets) break;
+        @memset(level.abs_peaks, 0);
         block_size *= core.level_scale_factor;
     }
 
+    core.g_session.waveform_build = .{
+        .active = true,
+        .current_block_index = 0,
+        .current_level_index = 0,
+    };
+
     return @as(i32, @intCast(core.g_session.levels.len));
+}
+
+fn buildWaveformPyramidBlock(level_index: i32, block_index: i32) void {
+    const level = &core.g_session.levels[@as(usize, @intCast(level_index))];
+    const block_usize = @as(usize, @intCast(block_index));
+
+    if (level_index > 0) {
+        const parent_level = &core.g_session.levels[@as(usize, @intCast(level_index - 1))];
+        const start = block_index * core.level_scale_factor;
+        const end = core.minI32(parent_level.block_count, start + core.level_scale_factor);
+        var peak: f32 = 0.0;
+        var parent_index = start;
+
+        while (parent_index < end) : (parent_index += 1) {
+            peak = core.maxF32(
+                peak,
+                parent_level.abs_peaks[@as(usize, @intCast(parent_index))],
+            );
+        }
+
+        level.abs_peaks[block_usize] = peak;
+        return;
+    }
+
+    const start = block_index * level.block_size;
+    const end = core.minI32(core.g_session.sample_count, start + level.block_size);
+    const result = core.reduceMinMax(
+        core.g_session.samples[@as(usize, @intCast(start))..@as(usize, @intCast(end))],
+        false,
+    );
+    level.abs_peaks[block_usize] = peakFromRange(result);
+}
+
+pub export fn wave_begin_waveform_pyramid_build() i32 {
+    if (core.g_session.samples.len == 0 or core.g_session.sample_count <= 0) return 0;
+    return prepareWaveformLevels();
+}
+
+pub export fn wave_build_waveform_pyramid_step(max_blocks: i32) i32 {
+    if (core.g_session.samples.len == 0 or core.g_session.sample_count <= 0 or core.g_session.levels.len == 0) {
+        return 0;
+    }
+
+    if (!core.g_session.waveform_build.active) {
+        return 1;
+    }
+
+    var remaining_blocks = core.maxI32(1, max_blocks);
+    while (remaining_blocks > 0 and core.g_session.waveform_build.active) : (remaining_blocks -= 1) {
+        if (core.g_session.waveform_build.current_level_index >= @as(i32, @intCast(core.g_session.levels.len))) {
+            core.g_session.waveform_build.active = false;
+            break;
+        }
+
+        const level = &core.g_session.levels[@as(usize, @intCast(core.g_session.waveform_build.current_level_index))];
+        if (core.g_session.waveform_build.current_block_index >= level.block_count) {
+            core.g_session.waveform_build.current_level_index += 1;
+            core.g_session.waveform_build.current_block_index = 0;
+            continue;
+        }
+
+        buildWaveformPyramidBlock(
+            core.g_session.waveform_build.current_level_index,
+            core.g_session.waveform_build.current_block_index,
+        );
+        core.g_session.waveform_build.current_block_index += 1;
+
+        if (core.g_session.waveform_build.current_block_index >= level.block_count) {
+            core.g_session.waveform_build.current_level_index += 1;
+            core.g_session.waveform_build.current_block_index = 0;
+        }
+    }
+
+    if (core.g_session.waveform_build.current_level_index >= @as(i32, @intCast(core.g_session.levels.len))) {
+        core.g_session.waveform_build.active = false;
+    }
+
+    return if (core.g_session.waveform_build.active) 0 else 1;
+}
+
+pub export fn wave_build_waveform_pyramid() i32 {
+    const level_count = wave_begin_waveform_pyramid_build();
+    if (level_count <= 0) return 0;
+
+    while (wave_build_waveform_pyramid_step(1_048_576) == 0) {}
+    return level_count;
 }
 
 pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column_count: i32, output_ptr: usize, meta_output_ptr: usize) i32 {
@@ -220,34 +292,36 @@ pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column
     const requested_end_sample = clampSamplePosition(clamped_end * sample_rate_f64);
     const requested_sample_span = maxF64(1.0, requested_end_sample - requested_start_sample);
     const samples_per_pixel = requested_sample_span / @as(f64, @floatFromInt(column_count));
-    const selected_level = pickWaveformLevel(samples_per_pixel);
+    const selected_level = pickWaveformLevel(samples_per_pixel, requested_end_sample);
+
+    writeWaveformSliceMeta(
+        meta_output_ptr,
+        samplePositionToSeconds(requested_start_sample),
+        samplePositionToSeconds(requested_end_sample),
+    );
 
     if (selected_level) |level| {
-        const plan = computeStableLevelSlicePlan(level, requested_start_sample, requested_end_sample, column_count);
-        writeWaveformSliceMeta(
-            meta_output_ptr,
-            samplePositionToSeconds(plan.actual_start_sample),
-            samplePositionToSeconds(plan.actual_end_sample),
-        );
-
         var column_index: i32 = 0;
-        const actual_block_span = core.maxI32(1, plan.actual_end_block - plan.actual_start_block);
         while (column_index < column_count) : (column_index += 1) {
-            const column_start_block = plan.actual_start_block + @as(i32, @intFromFloat(@floor(
-                (@as(f64, @floatFromInt(column_index)) * @as(f64, @floatFromInt(actual_block_span)))
-                    / @as(f64, @floatFromInt(column_count)),
+            const column_start_sample = @as(i32, @intFromFloat(@floor(
+                requested_start_sample + (
+                    (@as(f64, @floatFromInt(column_index)) * requested_sample_span)
+                        / @as(f64, @floatFromInt(column_count))
+                ),
             )));
-            const column_end_block = plan.actual_start_block + @as(i32, @intFromFloat(@ceil(
-                (@as(f64, @floatFromInt(column_index + 1)) * @as(f64, @floatFromInt(actual_block_span)))
-                    / @as(f64, @floatFromInt(column_count)),
+            const column_end_sample = @as(i32, @intFromFloat(@ceil(
+                requested_start_sample + (
+                    (@as(f64, @floatFromInt(column_index + 1)) * requested_sample_span)
+                        / @as(f64, @floatFromInt(column_count))
+                ),
             )));
-            const start_block = core.clampi32(column_start_block, 0, core.maxI32(0, level.block_count - 1));
-            const end_block = core.clampi32(core.maxI32(start_block + 1, column_end_block), start_block + 1, level.block_count);
-            const result = getLevelRange(
-                level,
-                start_block * level.block_size,
-                end_block * level.block_size,
+            const safe_start_sample = core.clampi32(column_start_sample, 0, core.maxI32(0, core.g_session.sample_count - 1));
+            const safe_end_sample = core.clampi32(
+                core.maxI32(safe_start_sample + 1, column_end_sample),
+                safe_start_sample + 1,
+                core.g_session.sample_count,
             );
+            const result = getLevelRange(level, safe_start_sample, safe_end_sample);
 
             output[@as(usize, @intCast(column_index * 2))] = result.min;
             output[@as(usize, @intCast((column_index * 2) + 1))] = result.max;
@@ -256,23 +330,19 @@ pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column
         return 1;
     }
 
-    const plan = computeStableSampleSlicePlan(requested_start_sample, requested_end_sample, column_count);
-    writeWaveformSliceMeta(
-        meta_output_ptr,
-        samplePositionToSeconds(plan.actual_start_sample),
-        samplePositionToSeconds(plan.actual_end_sample),
-    );
-
     var column_index: i32 = 0;
-    const actual_sample_span = core.maxI32(1, plan.actual_end_sample_index - plan.actual_start_sample_index);
     while (column_index < column_count) : (column_index += 1) {
-        const raw_start_sample = plan.actual_start_sample_index + @as(i32, @intFromFloat(@floor(
-            (@as(f64, @floatFromInt(column_index)) * @as(f64, @floatFromInt(actual_sample_span)))
-                / @as(f64, @floatFromInt(column_count)),
+        const raw_start_sample = @as(i32, @intFromFloat(@floor(
+            requested_start_sample + (
+                (@as(f64, @floatFromInt(column_index)) * requested_sample_span)
+                    / @as(f64, @floatFromInt(column_count))
+            ),
         )));
-        const raw_end_sample = plan.actual_start_sample_index + @as(i32, @intFromFloat(@ceil(
-            (@as(f64, @floatFromInt(column_index + 1)) * @as(f64, @floatFromInt(actual_sample_span)))
-                / @as(f64, @floatFromInt(column_count)),
+        const raw_end_sample = @as(i32, @intFromFloat(@ceil(
+            requested_start_sample + (
+                (@as(f64, @floatFromInt(column_index + 1)) * requested_sample_span)
+                    / @as(f64, @floatFromInt(column_count))
+            ),
         )));
         const column_start_sample = core.clampi32(raw_start_sample, 0, core.maxI32(0, core.g_session.sample_count - 1));
         const column_end_sample = core.clampi32(

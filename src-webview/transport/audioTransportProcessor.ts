@@ -221,10 +221,11 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
   }
 
   publishState(force: boolean): void {
-    const currentFrame = clampFrame(Math.floor(this.positionFrame), this.sourceLength);
+    const currentFrame = clampFrameFloat(this.positionFrame, this.sourceLength);
+    const publishedFrame = Math.floor(currentFrame);
 
     const changed = force
-      || currentFrame !== this.lastPublishedFrame
+      || publishedFrame !== this.lastPublishedFrame
       || this.playing !== this.lastPublishedPlaying
       || this.ended !== this.lastPublishedEnded;
 
@@ -239,7 +240,7 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
     }
 
     this.snapshotCountdown = SNAPSHOT_INTERVAL_QUANTA;
-    this.lastPublishedFrame = currentFrame;
+    this.lastPublishedFrame = publishedFrame;
     this.lastPublishedPlaying = this.playing;
     this.lastPublishedEnded = this.ended;
 
@@ -270,6 +271,14 @@ function zeroRemainingFrames(output: Float32Array[], startIndex: number): void {
 }
 
 function clampFrame(value: number, sourceLength: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.min(Math.max(0, value), Math.max(0, sourceLength));
+}
+
+function clampFrameFloat(value: number, sourceLength: number): number {
   if (!Number.isFinite(value)) {
     return 0;
   }
