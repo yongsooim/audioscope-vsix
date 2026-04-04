@@ -143,6 +143,7 @@ struct FftParams {
 @group(0) @binding(0) var<uniform> params: FftParams;
 @group(0) @binding(1) var<storage, read> sourceSpectrum: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> targetSpectrum: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read> twiddleFactors: array<vec2<f32>>;
 
 fn complexMul(left: vec2<f32>, right: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(
@@ -174,14 +175,18 @@ fn runScalogramFftStage(
   let butterflyIndex = globalIndex % butterfliesPerSequence;
   let j = butterflyIndex / l;
   let k = butterflyIndex % l;
+  let halfFftSize = max(1u, fftSize / 2u);
   let baseIndex = sequenceIndex * fftSize;
   let evenIndex = (2u * j * l) + k;
   let oddIndex = evenIndex + l;
   let outputEvenIndex = (j * l) + k;
   let outputOddIndex = ((j + q) * l) + k;
-  let direction = select(-1.0, 1.0, inverseFlag != 0u);
-  let angle = (direction * TWO_PI * f32(j)) / f32(2u * q);
-  let twiddle = vec2<f32>(cos(angle), sin(angle));
+  let baseTwiddle = twiddleFactors[(stageIndex * halfFftSize) + j];
+  let twiddle = select(
+    vec2<f32>(baseTwiddle.x, -baseTwiddle.y),
+    baseTwiddle,
+    inverseFlag != 0u,
+  );
   let evenValue = sourceSpectrum[baseIndex + evenIndex];
   let oddValue = sourceSpectrum[baseIndex + oddIndex];
   let twiddledOdd = complexMul(oddValue, twiddle);

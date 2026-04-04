@@ -139,6 +139,9 @@ struct ComputeParams {
 @group(0) @binding(2) var<storage, read> chromaAssignments: array<u32>;
 @group(0) @binding(3) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
+var<workgroup> chromaValues: array<f32, 12>;
+var<workgroup> chromaColumnMax: f32;
+
 fn normalizeCqtChromaValue(value: f32, columnMax: f32, distributionGamma: f32) -> f32 {
   if (columnMax <= 1e-8) {
     return 0.0;
@@ -147,34 +150,49 @@ fn normalizeCqtChromaValue(value: f32, columnMax: f32, distributionGamma: f32) -
   return pow(clamp(value / columnMax, 0.0, 1.0), clamp(distributionGamma, 0.2, 2.5));
 }
 
-@compute @workgroup_size(8, 8)
-fn renderCqtChromaTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
-  let columnIndex = globalId.x;
-  let rowIndex = globalId.y;
+@compute @workgroup_size(12, 1, 1)
+fn renderCqtChromaTexture(
+  @builtin(workgroup_id) workgroupId: vec3<u32>,
+  @builtin(local_invocation_id) localId: vec3<u32>,
+) {
+  let columnIndex = workgroupId.x;
+  let rowIndex = localId.x;
   let columnCount = params.header0.x;
   let rowCount = params.header0.y;
   let binCount = params.header0.z;
 
-  if (columnIndex >= columnCount || rowIndex >= rowCount) {
+  if (columnIndex >= columnCount) {
     return;
   }
 
-  let baseIndex = columnIndex * binCount;
-  var chromaValues = array<f32, 12>(
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-  );
+  chromaValues[rowIndex] = 0.0;
+  if (rowIndex == 0u) {
+    chromaColumnMax = 0.0;
+  }
+  workgroupBarrier();
 
-  for (var binIndex = 0u; binIndex < binCount; binIndex += 1u) {
-    let chromaIndex = min(chromaAssignments[binIndex], rowCount - 1u);
-    chromaValues[chromaIndex] += cqtValues[baseIndex + binIndex];
+  if (rowIndex == 0u) {
+    let baseIndex = columnIndex * binCount;
+
+    for (var binIndex = 0u; binIndex < binCount; binIndex += 1u) {
+      let chromaIndex = min(chromaAssignments[binIndex], rowCount - 1u);
+      chromaValues[chromaIndex] += cqtValues[baseIndex + binIndex];
+    }
+
+    var columnMax = 0.0;
+    for (var chromaIndex = 0u; chromaIndex < rowCount; chromaIndex += 1u) {
+      columnMax = max(columnMax, chromaValues[chromaIndex]);
+    }
+    chromaColumnMax = columnMax;
   }
 
-  var columnMax = 0.0;
-  for (var chromaIndex = 0u; chromaIndex < rowCount; chromaIndex += 1u) {
-    columnMax = max(columnMax, chromaValues[chromaIndex]);
+  workgroupBarrier();
+
+  if (rowIndex >= rowCount) {
+    return;
   }
 
-  let normalized = normalizeCqtChromaValue(chromaValues[rowIndex], columnMax, params.padding1.x);
+  let normalized = normalizeCqtChromaValue(chromaValues[rowIndex], chromaColumnMax, params.padding1.x);
   let targetRow = i32((rowCount - 1u) - rowIndex);
   textureStore(outputTexture, vec2<i32>(i32(columnIndex), targetRow), paletteColor(normalized));
 }
