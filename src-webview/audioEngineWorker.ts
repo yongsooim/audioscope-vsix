@@ -53,12 +53,14 @@ import {
   drawRawSamplePlot,
   drawRepresentativeSamplePlot,
   drawWaveformEnvelope,
+  fillRepresentativeSampleCache,
   formatMfccValue,
   formatSampleOrdinal,
   formatSampleValue,
+  getRepresentativeSampleCacheCapacity,
   getWaveformMarkerYRatio,
-  pickRepresentativeSamplePoint,
   resolveWaveformPlotMode,
+  type RepresentativeSampleCache,
 } from './audio-engine-worker/waveformRender';
 import {
   DEFAULT_MFCC_COEFFICIENT_COUNT,
@@ -157,6 +159,19 @@ interface WaveformRenderCacheState {
   renderScale: number;
   renderWidthCssPx: number;
   sessionRevision: number;
+}
+
+interface WaveformRepresentativeCacheState {
+  bucketCount: number;
+  bucketSize: number;
+  bucketStartIndex: number;
+  drawColumns: number;
+  sampleCount: number;
+  sampleIndices: Int32Array | null;
+  sampleStartFrame: number;
+  sampleValues: Float32Array | null;
+  sessionRevision: number;
+  visibleSampleCount: number;
 }
 
 interface SpectrogramSurfaceState {
@@ -307,6 +322,7 @@ interface EngineState {
     targetStartFrame: number;
   };
   waveformCache: WaveformRenderCacheState;
+  waveformRepresentativeCache: WaveformRepresentativeCacheState;
   waveformSurface: WaveformSurfaceState;
   spectrogramSurface: SpectrogramSurfaceState;
 }
@@ -336,6 +352,19 @@ const waveformCache: WaveformRenderCacheState = {
   renderScale: 1,
   renderWidthCssPx: 0,
   sessionRevision: -1,
+};
+
+const waveformRepresentativeCache: WaveformRepresentativeCacheState = {
+  bucketCount: 0,
+  bucketSize: 0,
+  bucketStartIndex: 0,
+  drawColumns: 0,
+  sampleCount: 0,
+  sampleIndices: null,
+  sampleStartFrame: 0,
+  sampleValues: null,
+  sessionRevision: -1,
+  visibleSampleCount: 0,
 };
 
 let runtimePromise: Promise<WaveCoreRuntime> | null = null;
@@ -391,6 +420,7 @@ const state: EngineState = {
     targetStartFrame: 0,
   },
   waveformCache,
+  waveformRepresentativeCache,
   waveformSurface,
   spectrogramSurface,
 };
@@ -501,6 +531,17 @@ function invalidateWaveformCache(): void {
   state.waveformCache.sessionRevision = -1;
 }
 
+function invalidateWaveformRepresentativeCache(): void {
+  state.waveformRepresentativeCache.bucketCount = 0;
+  state.waveformRepresentativeCache.bucketSize = 0;
+  state.waveformRepresentativeCache.bucketStartIndex = 0;
+  state.waveformRepresentativeCache.drawColumns = 0;
+  state.waveformRepresentativeCache.sampleCount = 0;
+  state.waveformRepresentativeCache.sampleStartFrame = 0;
+  state.waveformRepresentativeCache.sessionRevision = -1;
+  state.waveformRepresentativeCache.visibleSampleCount = 0;
+}
+
 function areRangeFramesEqual(left: RangeFrames | null, right: RangeFrames | null): boolean {
   if (left === right) {
     return true;
@@ -533,6 +574,7 @@ function handleInitSurfaces(message: EngineMainToWorkerMessage & { type: 'InitSu
   resizeWaveformSurface();
   resizeSpectrogramSurface();
   invalidateWaveformCache();
+  invalidateWaveformRepresentativeCache();
   state.renderSurfacesRevision += 1;
   state.viewport.renderWidthPx = state.waveformSurface.widthCssPx;
   emitUiState();
@@ -558,6 +600,7 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
   disposeWasmSession(runtime.module);
   clearTileCache();
   invalidateWaveformCache();
+  invalidateWaveformRepresentativeCache();
 
   const durationSeconds = durationFrames / sampleRate;
   if (!runtime.module._wave_prepare_session(durationFrames, sampleRate, durationSeconds)) {
@@ -849,6 +892,7 @@ function applyViewportIntent(intent: ViewportIntent): void {
       resizeWaveformSurface();
       resizeSpectrogramSurface();
       invalidateWaveformCache();
+      invalidateWaveformRepresentativeCache();
       state.viewport.renderWidthPx = waveformWidthCssPx;
       clampViewportToDuration();
       if (changed) {
@@ -1467,8 +1511,8 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
   if (!rawSamplePlotMode && !samplePlotMode) {
     if (!state.session.waveformBuilt) {
       invalidateWaveformCache();
-      const slice = ensureWaveformSliceCapacity(module, columnCount * 2);
-      if (!module._wave_extract_waveform_slice(
+      const peaks = ensureWaveformSliceCapacity(module, columnCount);
+      if (!module._wave_extract_waveform_peaks(
         viewStartSeconds,
         viewEndSeconds,
         columnCount,
@@ -1485,7 +1529,7 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
       drawWaveformEnvelope(
         context,
         canvas,
-        slice,
+        peaks,
         columnCount,
         renderHeightCssPx,
         surface.renderScale,
@@ -1511,9 +1555,9 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
       const cacheColumnCount = Math.max(1, cacheSurface.canvas.width);
       const cacheViewStartSeconds = framesToSeconds(bufferedPlan.renderRange.startFrame);
       const cacheViewEndSeconds = framesToSeconds(bufferedPlan.renderRange.endFrame);
-      const slice = ensureWaveformSliceCapacity(module, cacheColumnCount * 2);
+      const peaks = ensureWaveformSliceCapacity(module, cacheColumnCount);
 
-      if (!module._wave_extract_waveform_slice(
+      if (!module._wave_extract_waveform_peaks(
         cacheViewStartSeconds,
         cacheViewEndSeconds,
         cacheColumnCount,
@@ -1530,7 +1574,7 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
       drawWaveformEnvelope(
         cacheSurface.context,
         cacheSurface.canvas,
-        slice,
+        peaks,
         cacheColumnCount,
         renderHeightCssPx,
         surface.renderScale,
@@ -1544,8 +1588,8 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
     }
 
     if (!presentWaveformCacheRange(context, canvas, range)) {
-      const slice = ensureWaveformSliceCapacity(module, columnCount * 2);
-      if (!module._wave_extract_waveform_slice(
+      const peaks = ensureWaveformSliceCapacity(module, columnCount);
+      if (!module._wave_extract_waveform_peaks(
         viewStartSeconds,
         viewEndSeconds,
         columnCount,
@@ -1562,7 +1606,7 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
       drawWaveformEnvelope(
         context,
         canvas,
-        slice,
+        peaks,
         columnCount,
         renderHeightCssPx,
         surface.renderScale,
@@ -1596,6 +1640,12 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
   }
 
   invalidateWaveformCache();
+  const representativeCache = getRepresentativeSampleCache(
+    sampleData,
+    range.startFrame,
+    visibleSampleCount,
+    columnCount,
+  );
   drawRepresentativeSamplePlot(
     context,
     canvas,
@@ -1607,6 +1657,7 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
     Math.max(0, visibleSampleCount - 1),
     renderHeightCssPx,
     surface.renderScale,
+    representativeCache,
   );
   return plotMode;
 }
@@ -2274,16 +2325,21 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
 
   let sampleIndex = frameAtPointer;
   if (state.viewport.plotMode === 'sample') {
-    const bucketSize = Math.max(1, Math.round(visibleSampleCount / renderColumnCount));
-    const samplePosition = sampleStartFrame + ratioX * visibleSampleSpan;
-    const bucketIndex = Math.floor(samplePosition / bucketSize);
-    const representative = pickRepresentativeSamplePoint(
+    const representativeCache = getRepresentativeSampleCache(
       sampleData,
-      bucketIndex * bucketSize,
-      bucketIndex * bucketSize + bucketSize,
+      sampleStartFrame,
+      visibleSampleCount,
+      renderColumnCount,
     );
-    if (representative) {
-      sampleIndex = representative.sampleIndex;
+    const samplePosition = sampleStartFrame + ratioX * visibleSampleSpan;
+    const bucketOffset = clamp(
+      Math.floor(samplePosition / Math.max(1, representativeCache.bucketSize)) - representativeCache.bucketStartIndex,
+      0,
+      Math.max(0, representativeCache.bucketCount - 1),
+    );
+
+    if (representativeCache.bucketCount > 0) {
+      sampleIndex = representativeCache.sampleIndices[bucketOffset] ?? sampleIndex;
     }
   }
 
@@ -2752,6 +2808,71 @@ function getWaveformSampleData(module: WaveCoreModule): Float32Array | null {
   return getHeapF32View(module, state.session.waveformPcmPointer, state.session.durationFrames);
 }
 
+function ensureWaveformRepresentativeCacheCapacity(capacity: number): void {
+  const safeCapacity = Math.max(1, Math.round(capacity || 0));
+
+  if (!state.waveformRepresentativeCache.sampleIndices || state.waveformRepresentativeCache.sampleIndices.length < safeCapacity) {
+    state.waveformRepresentativeCache.sampleIndices = new Int32Array(safeCapacity);
+  }
+
+  if (!state.waveformRepresentativeCache.sampleValues || state.waveformRepresentativeCache.sampleValues.length < safeCapacity) {
+    state.waveformRepresentativeCache.sampleValues = new Float32Array(safeCapacity);
+  }
+}
+
+function getRepresentativeSampleCache(
+  samples: Float32Array,
+  sampleStartFrame: number,
+  visibleSampleCount: number,
+  drawColumns: number,
+): RepresentativeSampleCache {
+  const cache = state.waveformRepresentativeCache;
+
+  if (
+    cache.sessionRevision === state.session.sessionRevision
+    && cache.sampleCount === samples.length
+    && cache.sampleStartFrame === sampleStartFrame
+    && cache.visibleSampleCount === visibleSampleCount
+    && cache.drawColumns === drawColumns
+    && cache.sampleIndices
+    && cache.sampleValues
+  ) {
+    return {
+      bucketCount: cache.bucketCount,
+      bucketSize: cache.bucketSize,
+      bucketStartIndex: cache.bucketStartIndex,
+      sampleIndices: cache.sampleIndices,
+      sampleValues: cache.sampleValues,
+    };
+  }
+
+  ensureWaveformRepresentativeCacheCapacity(
+    getRepresentativeSampleCacheCapacity(sampleStartFrame, visibleSampleCount, drawColumns),
+  );
+
+  const representativeCache = fillRepresentativeSampleCache(
+    samples,
+    sampleStartFrame,
+    visibleSampleCount,
+    drawColumns,
+    state.waveformRepresentativeCache.sampleIndices as Int32Array,
+    state.waveformRepresentativeCache.sampleValues as Float32Array,
+  );
+
+  cache.bucketCount = representativeCache.bucketCount;
+  cache.bucketSize = representativeCache.bucketSize;
+  cache.bucketStartIndex = representativeCache.bucketStartIndex;
+  cache.drawColumns = drawColumns;
+  cache.sampleCount = samples.length;
+  cache.sampleIndices = representativeCache.sampleIndices;
+  cache.sampleStartFrame = sampleStartFrame;
+  cache.sampleValues = representativeCache.sampleValues;
+  cache.sessionRevision = state.session.sessionRevision;
+  cache.visibleSampleCount = visibleSampleCount;
+
+  return representativeCache;
+}
+
 function ensureWaveformSliceCapacity(module: WaveCoreModule, floatCount: number): Float32Array {
   if (state.session.waveformSliceCapacity >= floatCount && state.session.waveformSlicePointer) {
     const view = getHeapF32View(module, state.session.waveformSlicePointer, floatCount);
@@ -2804,6 +2925,7 @@ function disposeWasmSession(module: WaveCoreModule): void {
   state.session.waveformBuilt = false;
   state.session.initialized = false;
   invalidateWaveformCache();
+  invalidateWaveformRepresentativeCache();
 }
 
 function getHeapF32View(module: WaveCoreModule, pointer: number, length: number): Float32Array {

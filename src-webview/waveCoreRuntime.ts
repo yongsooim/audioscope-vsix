@@ -7,6 +7,7 @@ const exportedFunctionNames = [
   'wave_begin_waveform_pyramid_build',
   'wave_build_waveform_pyramid',
   'wave_build_waveform_pyramid_step',
+  'wave_extract_waveform_peaks',
   'wave_extract_waveform_slice',
   'wave_plan_waveform_follow_render',
   'wave_plan_spectrogram_follow_render',
@@ -32,6 +33,13 @@ export interface WaveCoreModule {
   _wave_build_waveform_pyramid(): number;
   _wave_build_waveform_pyramid_step(maxBlocks: number): number;
   _wave_dispose_session(): number;
+  _wave_extract_waveform_peaks(
+    viewStart: number,
+    viewEnd: number,
+    columnCount: number,
+    outputPointer: number,
+    metaOutputPointer: number,
+  ): number;
   _wave_extract_waveform_slice(
     viewStart: number,
     viewEnd: number,

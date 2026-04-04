@@ -56,6 +56,7 @@ export interface SpectrogramDefaultsPayload {
 
 export interface MediaMetadataSummaryPayload {
   bitrateText: string | null;
+  bitDepthText: string | null;
   channelText: string | null;
   codecText: string | null;
   containerText: string | null;
@@ -67,6 +68,7 @@ export interface MediaMetadataSummaryPayload {
 
 export interface MediaMetadataStreamPayload {
   bitRateText: string | null;
+  bitDepthText: string | null;
   channelLayout: string | null;
   channels: number | null;
   codecLongName: string | null;
@@ -162,6 +164,8 @@ interface FfprobeDispositionSection {
 
 interface FfprobeStreamSection {
   bit_rate?: string;
+  bits_per_raw_sample?: string;
+  bits_per_sample?: number | string;
   channel_layout?: string;
   channels?: number;
   codec_long_name?: string;
@@ -336,6 +340,51 @@ function formatBitrateText(value: number | null): string | null {
   return `${Math.round(value / 1000).toLocaleString()} kbps`;
 }
 
+function inferBitDepthFromSampleFormat(sampleFormat: string | null | undefined): string | null {
+  const normalized = sampleFormat?.trim().toLowerCase() ?? '';
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.startsWith('flt')) {
+    return '32-bit float';
+  }
+
+  if (normalized.startsWith('dbl')) {
+    return '64-bit float';
+  }
+
+  const match = normalized.match(/(?:u|s)(\d+)/u);
+  if (!match) {
+    return null;
+  }
+
+  const bits = Number(match[1]);
+  return Number.isFinite(bits) && bits > 0 ? `${bits}-bit` : null;
+}
+
+function formatBitDepthText(
+  bitsPerRawSample: number | null,
+  bitsPerSample: number | null,
+  sampleFormat: string | null | undefined,
+): string | null {
+  const preferredBits = Number.isFinite(bitsPerRawSample) && bitsPerRawSample && bitsPerRawSample > 0
+    ? bitsPerRawSample
+    : bitsPerSample;
+
+  if (Number.isFinite(preferredBits) && preferredBits && preferredBits > 0) {
+    const formatHint = inferBitDepthFromSampleFormat(sampleFormat);
+    if (formatHint?.includes('float')) {
+      return formatHint;
+    }
+
+    return `${Math.round(preferredBits)}-bit`;
+  }
+
+  return inferBitDepthFromSampleFormat(sampleFormat);
+}
+
 function formatSizeText(value: number | null): string | null {
   if (!Number.isFinite(value) || !value || value <= 0) {
     return null;
@@ -429,6 +478,11 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
 
   const summary: MediaMetadataSummaryPayload = {
     bitrateText: formatBitrateText(parseNumberValue(primaryAudioStream?.bit_rate) ?? parseNumberValue(formatSection?.bit_rate)),
+    bitDepthText: formatBitDepthText(
+      parseNumberValue(primaryAudioStream?.bits_per_raw_sample),
+      parseNumberValue(primaryAudioStream?.bits_per_sample),
+      primaryAudioStream?.sample_fmt ?? null,
+    ),
     channelText: formatChannelText(primaryAudioStream?.channels ?? null, primaryAudioStream?.channel_layout ?? null),
     codecText: formatCodecText(primaryAudioStream),
     containerText: formatContainerText(formatSection),
@@ -441,6 +495,7 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
   summary.segments = [
     summary.codecText ?? summary.containerText,
     summary.sampleRateText,
+    summary.bitDepthText,
     summary.channelText,
     summary.bitrateText,
     summary.durationText,
@@ -463,6 +518,11 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
     probeSource: 'ffprobe',
     streams: streams.map((stream) => ({
       bitRateText: formatBitrateText(parseNumberValue(stream.bit_rate)),
+      bitDepthText: formatBitDepthText(
+        parseNumberValue(stream.bits_per_raw_sample),
+        parseNumberValue(stream.bits_per_sample),
+        stream.sample_fmt ?? null,
+      ),
       channelLayout: stream.channel_layout ?? null,
       channels: typeof stream.channels === 'number' ? stream.channels : null,
       codecLongName: stream.codec_long_name ?? null,

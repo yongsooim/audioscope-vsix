@@ -1,12 +1,6 @@
 import { WEBGPU_PALETTE_SHADER_HELPERS } from './shaderCommon';
 
 export const WEBGPU_SPECTROGRAM_INPUT_SHADER = /* wgsl */`
-const TWO_PI: f32 = 6.283185307179586;
-const WINDOW_HANN: u32 = 0u;
-const WINDOW_HAMMING: u32 = 1u;
-const WINDOW_BLACKMAN: u32 = 2u;
-const WINDOW_RECTANGULAR: u32 = 3u;
-
 struct ComputeParams {
   header0: vec4<u32>,
   header1: vec4<u32>,
@@ -17,6 +11,7 @@ struct ComputeParams {
 @group(0) @binding(0) var<uniform> params: ComputeParams;
 @group(0) @binding(1) var<storage, read> pcmSamples: array<f32>;
 @group(0) @binding(2) var<storage, read_write> outputSpectrum: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read> windowCoefficients: array<f32>;
 
 @compute @workgroup_size(64)
 fn prepareSpectrogramInput(
@@ -26,7 +21,6 @@ fn prepareSpectrogramInput(
   let fftSize = params.header0.x;
   let columnCount = params.header0.y;
   let sampleCount = params.header0.w;
-  let windowFunction = params.header1.y;
   let decimationFactor = max(params.header1.z, 1u);
   let totalSamples = fftSize * columnCount;
   let linearIndex = globalId.x + (globalId.y * numWorkgroups.x * 64u);
@@ -74,16 +68,7 @@ fn prepareSpectrogramInput(
     sample = sum / f32(decimationFactor);
   }
 
-  let denominator = max(f32(max(fftSize, 2u) - 1u), 1.0);
-  let phase = TWO_PI * f32(sampleOffset) / denominator;
-  var window = 0.5 - (0.5 * cos(phase));
-  if (windowFunction == WINDOW_HAMMING) {
-    window = 0.54 - (0.46 * cos(phase));
-  } else if (windowFunction == WINDOW_BLACKMAN) {
-    window = 0.42 - (0.5 * cos(phase)) + (0.08 * cos(phase * 2.0));
-  } else if (windowFunction == WINDOW_RECTANGULAR) {
-    window = 1.0;
-  }
+  let window = windowCoefficients[sampleOffset];
   outputSpectrum[(columnIndex * fftSize) + sampleOffset] = vec2<f32>(sample * window, 0.0);
 }
 `;
@@ -101,6 +86,7 @@ struct ComputeParams {
 @group(0) @binding(0) var<uniform> params: ComputeParams;
 @group(0) @binding(1) var<storage, read> sourceSpectrum: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> targetSpectrum: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read> twiddleFactors: array<vec2<f32>>;
 
 fn complexMul(left: vec2<f32>, right: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(
@@ -131,13 +117,14 @@ fn runSpectrogramFftStage(
   let localIndex = butterflyIndex % butterfliesPerColumn;
   let j = localIndex / l;
   let k = localIndex % l;
+  let halfFftSize = max(1u, fftSize / 2u);
   let columnBase = columnIndex * fftSize;
   let evenIndex = columnBase + ((2u * j * l) + k);
   let oddIndex = evenIndex + l;
   let outputEvenIndex = columnBase + ((j * l) + k);
   let outputOddIndex = columnBase + (((j + q) * l) + k);
-  let angle = (-TWO_PI * f32(j)) / f32(2u * q);
-  let twiddle = vec2<f32>(cos(angle), sin(angle));
+  let baseTwiddle = twiddleFactors[(stageIndex * halfFftSize) + j];
+  let twiddle = vec2<f32>(baseTwiddle.x, -baseTwiddle.y);
   let evenValue = sourceSpectrum[evenIndex];
   let oddValue = sourceSpectrum[oddIndex];
   let twiddledOdd = complexMul(oddValue, twiddle);

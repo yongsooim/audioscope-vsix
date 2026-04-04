@@ -1,4 +1,12 @@
 import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from '../waveCoreRuntime';
+import {
+  drawRawSamplePlot as drawSharedRawSamplePlot,
+  drawRepresentativeSamplePlot as drawSharedRepresentativeSamplePlot,
+  drawWaveformEnvelope as drawSharedWaveformEnvelope,
+  fillRepresentativeSampleCache,
+  getRepresentativeSampleCacheCapacity,
+  type RepresentativeSampleCache,
+} from '../audio-engine-worker/waveformRender';
 import { resizeInteractiveWaveformSurface } from './renderer';
 import {
   WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
@@ -76,8 +84,15 @@ interface AnalysisState {
   duration: number;
   initialized: boolean;
   plotMode: WaveformPlotMode;
+  representativeBucketCount: number;
+  representativeBucketSize: number;
+  representativeBucketStartIndex: number;
+  representativeDrawColumns: number;
+  representativeSampleIndices: Int32Array | null;
+  representativeSampleStartPosition: number;
   representativeSampleValues: Float32Array | null;
   representativeSampleValuesCapacity: number;
+  representativeSampleVisibleCount: number;
   runtimeVariant: string;
   sampleCount: number;
   sampleRate: number;
@@ -205,8 +220,15 @@ function createEmptyAnalysisState(): AnalysisState {
     sampleCount: 0,
     duration: 0,
     runtimeVariant: WAVEFORM_RUNTIME_VARIANT,
+    representativeBucketCount: 0,
+    representativeBucketSize: 0,
+    representativeBucketStartIndex: 0,
+    representativeDrawColumns: 0,
+    representativeSampleIndices: null,
+    representativeSampleStartPosition: 0,
     representativeSampleValues: null,
     representativeSampleValuesCapacity: 0,
+    representativeSampleVisibleCount: 0,
     plotMode: 'envelope',
     waveformData: null,
     waveformPcmPointer: 0,
@@ -384,6 +406,12 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
 
     analysisState.waveformData = null;
     analysisState.waveformBuilt = false;
+    analysisState.representativeBucketCount = 0;
+    analysisState.representativeBucketSize = 0;
+    analysisState.representativeBucketStartIndex = 0;
+    analysisState.representativeDrawColumns = 0;
+    analysisState.representativeSampleStartPosition = 0;
+    analysisState.representativeSampleVisibleCount = 0;
     analysisState.waveformSlice = null;
     analysisState.waveformSliceCapacity = 0;
   }
@@ -495,11 +523,11 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
   surfaceState.color = color;
   resizeDisplaySurface();
 
-  let slice: Float32Array | null = null;
+  let peaks: Float32Array | null = null;
   if (!rawSamplePlotMode && !samplePlotMode) {
-    slice = ensureWaveformSliceCapacity(module, columnCount * 2);
+    peaks = ensureWaveformSliceCapacity(module, columnCount);
 
-    if (!module._wave_extract_waveform_slice(
+    if (!module._wave_extract_waveform_peaks(
       viewStart,
       viewEnd,
       columnCount,
@@ -526,13 +554,16 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
   }
 
   if (rawSamplePlotMode && sampleData instanceof Float32Array) {
-    drawRawSamplePlot(
-      renderSurface,
+    drawSharedRawSamplePlot(
+      renderSurface.context,
+      renderSurface.canvas,
       sampleData,
       color,
       pixelsPerSample,
       sampleStartPosition,
       visibleSampleSpan,
+      height,
+      renderScale,
     );
     if (generation !== latestRequestedGeneration) {
       return;
@@ -552,14 +583,24 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
   }
 
   if (samplePlotMode && sampleData instanceof Float32Array) {
-    drawRepresentativeSamplePlot(
-      renderSurface,
+    const representativeCache = getRepresentativeSampleCache(
+      sampleData,
+      sampleStartPosition,
+      visibleSampleCount,
+      columnCount,
+    );
+    drawSharedRepresentativeSamplePlot(
+      renderSurface.context,
+      renderSurface.canvas,
       sampleData,
       color,
       pixelsPerSample,
       sampleStartPosition,
       visibleSampleCount,
       visibleSampleSpan,
+      height,
+      renderScale,
+      representativeCache,
     );
     if (generation !== latestRequestedGeneration) {
       return;
@@ -578,7 +619,17 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     return;
   }
 
-  drawFrame(renderSurface, slice, columnCount, color, false, pixelsPerSample);
+  if (peaks) {
+    drawSharedWaveformEnvelope(
+      renderSurface.context,
+      renderSurface.canvas,
+      peaks,
+      columnCount,
+      height,
+      renderScale,
+      color,
+    );
+  }
   if (generation !== latestRequestedGeneration) {
     return;
   }
@@ -1113,6 +1164,68 @@ function ensureWaveformSliceCapacity(module: WaveCoreModule, floatCount: number)
   return analysisState.waveformSlice;
 }
 
+function ensureRepresentativeSampleCacheCapacity(capacity: number): void {
+  const safeCapacity = Math.max(1, Math.round(capacity || 0));
+
+  if (!analysisState.representativeSampleIndices || analysisState.representativeSampleIndices.length < safeCapacity) {
+    analysisState.representativeSampleIndices = new Int32Array(safeCapacity);
+  }
+
+  if (!analysisState.representativeSampleValues || analysisState.representativeSampleValues.length < safeCapacity) {
+    analysisState.representativeSampleValues = new Float32Array(safeCapacity);
+    analysisState.representativeSampleValuesCapacity = safeCapacity;
+  }
+}
+
+function getRepresentativeSampleCache(
+  samples: Float32Array,
+  sampleStartPosition: number,
+  visibleSampleCount: number,
+  drawColumns: number,
+): RepresentativeSampleCache {
+  if (
+    analysisState.attachedSessionVersion >= 0
+    && analysisState.representativeSampleIndices
+    && analysisState.representativeSampleValues
+    && analysisState.representativeDrawColumns === drawColumns
+    && Math.abs(analysisState.representativeSampleStartPosition - sampleStartPosition) <= 1e-9
+    && analysisState.representativeSampleVisibleCount === visibleSampleCount
+    && analysisState.sampleCount === samples.length
+  ) {
+    return {
+      bucketCount: analysisState.representativeBucketCount,
+      bucketSize: analysisState.representativeBucketSize,
+      bucketStartIndex: analysisState.representativeBucketStartIndex,
+      sampleIndices: analysisState.representativeSampleIndices,
+      sampleValues: analysisState.representativeSampleValues,
+    };
+  }
+
+  ensureRepresentativeSampleCacheCapacity(
+    getRepresentativeSampleCacheCapacity(sampleStartPosition, visibleSampleCount, drawColumns),
+  );
+
+  const representativeCache = fillRepresentativeSampleCache(
+    samples,
+    sampleStartPosition,
+    visibleSampleCount,
+    drawColumns,
+    analysisState.representativeSampleIndices as Int32Array,
+    analysisState.representativeSampleValues as Float32Array,
+  );
+
+  analysisState.representativeBucketCount = representativeCache.bucketCount;
+  analysisState.representativeBucketSize = representativeCache.bucketSize;
+  analysisState.representativeBucketStartIndex = representativeCache.bucketStartIndex;
+  analysisState.representativeDrawColumns = drawColumns;
+  analysisState.representativeSampleIndices = representativeCache.sampleIndices;
+  analysisState.representativeSampleStartPosition = sampleStartPosition;
+  analysisState.representativeSampleValues = representativeCache.sampleValues;
+  analysisState.representativeSampleVisibleCount = visibleSampleCount;
+
+  return representativeCache;
+}
+
 function hasRenderableWaveformData(_waveformData: unknown): boolean {
   return Boolean(analysisState.waveformPcmPointer && analysisState.sampleCount > 0);
 }
@@ -1146,6 +1259,12 @@ function disposeWasmSession(module: WaveCoreModule) {
 
   module._wave_dispose_session();
   analysisState.waveformPcmPointer = 0;
+  analysisState.representativeBucketCount = 0;
+  analysisState.representativeBucketSize = 0;
+  analysisState.representativeBucketStartIndex = 0;
+  analysisState.representativeDrawColumns = 0;
+  analysisState.representativeSampleStartPosition = 0;
+  analysisState.representativeSampleVisibleCount = 0;
   analysisState.waveformSliceMetaPointer = 0;
   analysisState.waveformSlicePointer = 0;
   analysisState.waveformSlice = null;

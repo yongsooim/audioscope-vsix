@@ -12,6 +12,7 @@ import {
 import {
   getWindowValue,
   WINDOW_FUNCTION_CODES,
+  type SpectrogramWindowFunction,
 } from '../windowShared';
 import {
   buildTileCacheKey,
@@ -198,6 +199,19 @@ interface MfccDctBasisResource {
   key: string;
 }
 
+interface WebGpuFftTwiddleResource {
+  buffer: any;
+  fftSize: number;
+  key: string;
+}
+
+interface WebGpuWindowResource {
+  buffer: any;
+  fftSize: number;
+  key: string;
+  windowFunction: SpectrogramWindowFunction;
+}
+
 interface ScalogramKernelResource {
   key: string;
   rowBuffer: any;
@@ -236,6 +250,7 @@ interface WebGpuStftScratchSlot {
   basePongBuffer: any;
   fftBindGroupForward: any;
   fftBindGroupReverse: any;
+  inputWindowKey: string | null;
   mfccMelBuffer: any;
   mfccMelBufferCapacity: number;
   lowInputBindGroup: any;
@@ -267,6 +282,8 @@ interface WebGpuStftComputeState {
   renderSpectrogramPipeline: any;
   scratchFftSize: number;
   scratchSlots: WebGpuStftScratchSlot[];
+  twiddleResources: Map<string, WebGpuFftTwiddleResource>;
+  windowResources: Map<string, WebGpuWindowResource>;
 }
 
 interface WebGpuScalogramComputeState {
@@ -298,6 +315,7 @@ interface WebGpuScalogramComputeState {
   pcmSampleCount: number;
   renderBindGroupLayout: any;
   renderPipeline: any;
+  twiddleResources: Map<string, WebGpuFftTwiddleResource>;
 }
 
 interface WebGpuCqtComputeState {
@@ -348,14 +366,13 @@ function createScratchBuffer(byteLength: number): { buffer: ArrayBuffer; view: D
   };
 }
 
-const stftComputeParamsScratch = createScratchBuffer(64);
-const stftRenderParamsScratch = createScratchBuffer(64);
 const scalogramComputeParamsScratch = createScratchBuffer(64);
 const cqtComputeParamsScratch = createScratchBuffer(64);
 const cqtRenderParamsScratch = createScratchBuffer(64);
 const scalogramFftStageParamsScratch = createScratchBuffer(16);
 const scalogramFftMultiplyParamsScratch = createScratchBuffer(16);
 const scalogramFftRenderParamsScratch = createScratchBuffer(64);
+const stftParamBlockScratch = createScratchBuffer(256 * WEBGPU_STFT_PARAM_ENTRIES_PER_SLOT * WEBGPU_STFT_SCRATCH_SLOT_COUNT);
 
 const surfaceState = {
   backend: 'uninitialized' as SurfaceBackend,
@@ -653,6 +670,34 @@ function destroyMfccBasisResources(computeState: WebGpuStftComputeState | null):
   computeState.mfccBasisResources.clear();
 }
 
+function destroyWindowResources(computeState: WebGpuStftComputeState | null): void {
+  if (!computeState) {
+    return;
+  }
+
+  for (const resource of computeState.windowResources.values()) {
+    if (resource.buffer && typeof resource.buffer.destroy === 'function') {
+      resource.buffer.destroy();
+    }
+  }
+
+  computeState.windowResources.clear();
+}
+
+function destroyTwiddleResources(resources: Map<string, WebGpuFftTwiddleResource> | null | undefined): void {
+  if (!resources) {
+    return;
+  }
+
+  for (const resource of resources.values()) {
+    if (resource.buffer && typeof resource.buffer.destroy === 'function') {
+      resource.buffer.destroy();
+    }
+  }
+
+  resources.clear();
+}
+
 function destroyScalogramKernelResources(computeState: WebGpuScalogramComputeState | null): void {
   if (!computeState) {
     return;
@@ -779,6 +824,8 @@ function destroyWebGpuStftComputeState(computeState: WebGpuStftComputeState | nu
 
   destroySpectrogramBandLayoutResources(computeState);
   destroyMfccBasisResources(computeState);
+  destroyWindowResources(computeState);
+  destroyTwiddleResources(computeState.twiddleResources);
 
   destroyWebGpuStftScratchSlots(computeState);
 
@@ -805,6 +852,7 @@ function destroyWebGpuScalogramComputeState(computeState: WebGpuScalogramCompute
   destroyScalogramKernelResources(computeState);
   destroyScalogramFftResources(computeState);
   destroyScalogramFftWindowResources(computeState);
+  destroyTwiddleResources(computeState.twiddleResources);
   destroyScalogramFftScratchBuffers(computeState);
   for (const buffer of [computeState.paramBuffer, computeState.pcmBuffer, computeState.fftParamBuffer]) {
     if (buffer && typeof buffer.destroy === 'function') {
@@ -1674,10 +1722,6 @@ function getWebGpuTileSubmitBatchSize(plan: RenderRequestPlan): number {
     return 1;
   }
 
-  if (plan.requestKind === 'visible' && plan.analysisType === 'spectrogram') {
-    return 1;
-  }
-
   return plan.requestKind === 'visible'
     ? WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE
     : WEBGPU_OVERVIEW_TILE_SUBMIT_BATCH_SIZE;
@@ -1696,6 +1740,14 @@ async function ensurePlanTiles(
   for (let batchStart = 0; batchStart < tileIndices.length; batchStart += submitBatchSize) {
     let batchRendered = false;
     const batchEnd = Math.min(tileIndices.length, batchStart + submitBatchSize);
+    const pendingBatchTiles: Array<{
+      cacheKey: string;
+      existingTile: TileRecord | null;
+      tileEnd: number;
+      tileIndex: number;
+      tileStart: number;
+      webGpuSlotIndex: number;
+    }> = [];
 
     for (let batchIndex = batchStart; batchIndex < batchEnd; batchIndex += 1) {
       const tileIndex = tileIndices[batchIndex];
@@ -1709,13 +1761,72 @@ async function ensurePlanTiles(
       const existingTile = getTileRecord(cacheKey);
 
       if (!existingTile || existingTile.complete !== true) {
-        const tileRecord = await renderTile(runtime, plan, tileIndex, tileStart, tileEnd, {
+        pendingBatchTiles.push({
           cacheKey,
-          deferWebGpuReady: submitBatchSize > 1,
           existingTile,
+          tileEnd,
+          tileIndex,
+          tileStart,
+          webGpuSlotIndex: batchIndex - batchStart,
+        });
+      } else if (submitBatchSize === 1) {
+        onTileReady?.();
+      }
+    }
+
+    if (
+      pendingBatchTiles.length > 1
+      && canUseWebGpuNativeCompute(plan)
+      && plan.analysisType !== 'scalogram'
+      && plan.analysisType !== 'chroma'
+      && surfaceState.webGpu
+    ) {
+      const batchWorkItems = pendingBatchTiles.map((item) => {
+        const tileRecord = item.existingTile ?? createTileRecord({
+          cacheKey: item.cacheKey,
+          rowCount: plan.rowCount,
+          tileEnd: item.tileEnd,
+          tileIndex: item.tileIndex,
+          tileStart: item.tileStart,
+        });
+        setTileRecord(item.cacheKey, tileRecord);
+
+        return {
+          scratchSlotIndex: item.webGpuSlotIndex,
+          tileEnd: item.tileEnd,
+          tileRecord,
+          tileStart: item.tileStart,
+        };
+      });
+
+      const batchOk = await renderStftTileBatchWithWebGpu(plan, batchWorkItems);
+      if (!batchOk) {
+        for (const item of pendingBatchTiles) {
+          const tileRecord = await renderTile(runtime, plan, item.tileIndex, item.tileStart, item.tileEnd, {
+            cacheKey: item.cacheKey,
+            deferWebGpuReady: submitBatchSize > 1,
+            existingTile: item.existingTile,
+            onChunkReady: submitBatchSize > 1 ? undefined : onTileReady,
+            shouldAbort,
+            webGpuSlotIndex: item.webGpuSlotIndex,
+          });
+
+          if (!tileRecord) {
+            return false;
+          }
+        }
+      } else {
+        batchRendered = true;
+      }
+    } else {
+      for (const item of pendingBatchTiles) {
+        const tileRecord = await renderTile(runtime, plan, item.tileIndex, item.tileStart, item.tileEnd, {
+          cacheKey: item.cacheKey,
+          deferWebGpuReady: submitBatchSize > 1,
+          existingTile: item.existingTile,
           onChunkReady: submitBatchSize > 1 ? undefined : onTileReady,
           shouldAbort,
-          webGpuSlotIndex: batchIndex - batchStart,
+          webGpuSlotIndex: item.webGpuSlotIndex,
         });
 
         if (!tileRecord) {
@@ -1723,8 +1834,6 @@ async function ensurePlanTiles(
         }
 
         batchRendered = true;
-      } else if (submitBatchSize === 1) {
-        onTileReady?.();
       }
     }
 
@@ -2042,6 +2151,114 @@ function drawBackground(context: OffscreenCanvasRenderingContext2D, width: numbe
 
 function getFftStageCount(fftSize: number): number {
   return Math.max(1, Math.round(Math.log2(Math.max(2, fftSize))));
+}
+
+function buildWindowCacheKey(fftSize: number, windowFunction: SpectrogramWindowFunction): string {
+  return `fft${fftSize}:win${windowFunction}`;
+}
+
+function buildFftTwiddleCacheKey(fftSize: number): string {
+  return `fft${fftSize}`;
+}
+
+function createWindowCoefficientData(fftSize: number, windowFunction: SpectrogramWindowFunction): Float32Array {
+  const safeFftSize = Math.max(1, Math.round(fftSize));
+  const data = new Float32Array(safeFftSize);
+
+  for (let index = 0; index < safeFftSize; index += 1) {
+    data[index] = getWindowValue(windowFunction, index, safeFftSize);
+  }
+
+  return data;
+}
+
+function createFftTwiddleData(fftSize: number): Float32Array {
+  const safeFftSize = Math.max(2, Math.round(fftSize));
+  const stageCount = getFftStageCount(safeFftSize);
+  const halfFftSize = Math.max(1, Math.trunc(safeFftSize / 2));
+  const data = new Float32Array(stageCount * halfFftSize * 2);
+
+  for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+    const q = 1 << stageIndex;
+    const stageOffset = stageIndex * halfFftSize * 2;
+
+    for (let j = 0; j < q; j += 1) {
+      const angle = (Math.PI * j) / q;
+      const twiddleOffset = stageOffset + (j * 2);
+      data[twiddleOffset] = Math.cos(angle);
+      data[twiddleOffset + 1] = Math.sin(angle);
+    }
+  }
+
+  return data;
+}
+
+function getStftWindowResource(
+  fftSize: number,
+  windowFunction: SpectrogramWindowFunction,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuStftComputeState,
+): WebGpuWindowResource | null {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return null;
+  }
+
+  const cacheKey = buildWindowCacheKey(fftSize, windowFunction);
+  const cached = computeState.windowResources.get(cacheKey) ?? null;
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const resource: WebGpuWindowResource = {
+      buffer: createGpuBufferWithData(
+        webGpu.device,
+        globals.bufferUsage.STORAGE,
+        createWindowCoefficientData(fftSize, windowFunction),
+      ),
+      fftSize,
+      key: cacheKey,
+      windowFunction,
+    };
+    computeState.windowResources.set(cacheKey, resource);
+    return resource;
+  } catch {
+    return null;
+  }
+}
+
+function getTwiddleResource(
+  fftSize: number,
+  webGpu: WebGpuCompositorState,
+  resourceMap: Map<string, WebGpuFftTwiddleResource>,
+): WebGpuFftTwiddleResource | null {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return null;
+  }
+
+  const cacheKey = buildFftTwiddleCacheKey(fftSize);
+  const cached = resourceMap.get(cacheKey) ?? null;
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const resource: WebGpuFftTwiddleResource = {
+      buffer: createGpuBufferWithData(
+        webGpu.device,
+        globals.bufferUsage.STORAGE,
+        createFftTwiddleData(fftSize),
+      ),
+      fftSize,
+      key: cacheKey,
+    };
+    resourceMap.set(cacheKey, resource);
+    return resource;
+  } catch {
+    return null;
+  }
 }
 
 function getMixedFrequencyPivot(minFrequency: number, maxFrequency: number): number {
@@ -2867,7 +3084,9 @@ function writeBufferAtOffset(target: any, offset: number, data: ArrayBuffer): vo
   webGpu.device.queue.writeBuffer(target, offset, data);
 }
 
-function createStftComputeParamsData(
+function writeStftComputeParamsData(
+  view: DataView,
+  byteOffset: number,
   plan: RenderRequestPlan,
   {
     columnCount,
@@ -2888,30 +3107,30 @@ function createStftComputeParamsData(
     tileStart: number;
     useLowFrequencyEnhancement: boolean;
   },
-): ArrayBuffer {
-  const { buffer, view } = stftComputeParamsScratch;
+): void {
   const halfFftSize = Math.max(1, plan.fftSize / 2);
   const powerScale = 1 / (halfFftSize * halfFftSize);
 
-  view.setUint32(0, plan.fftSize, true);
-  view.setUint32(4, columnCount, true);
-  view.setUint32(8, plan.rowCount, true);
-  view.setUint32(12, sampleCount, true);
-  view.setUint32(16, slotStageIndex, true);
-  view.setUint32(20, WINDOW_FUNCTION_CODES[plan.windowFunction] ?? 0, true);
-  view.setUint32(24, decimationFactor, true);
-  view.setUint32(28, useLowFrequencyEnhancement ? 1 : 0, true);
-  view.setFloat32(32, tileStart, true);
-  view.setFloat32(36, tileSpan, true);
-  view.setFloat32(40, sampleRate, true);
-  view.setFloat32(44, powerScale, true);
-  view.setFloat32(48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
-  view.setFloat32(52, plan.minDecibels, true);
-  view.setFloat32(56, plan.maxDecibels, true);
-  return buffer;
+  view.setUint32(byteOffset, plan.fftSize, true);
+  view.setUint32(byteOffset + 4, columnCount, true);
+  view.setUint32(byteOffset + 8, plan.rowCount, true);
+  view.setUint32(byteOffset + 12, sampleCount, true);
+  view.setUint32(byteOffset + 16, slotStageIndex, true);
+  view.setUint32(byteOffset + 20, WINDOW_FUNCTION_CODES[plan.windowFunction] ?? 0, true);
+  view.setUint32(byteOffset + 24, decimationFactor, true);
+  view.setUint32(byteOffset + 28, useLowFrequencyEnhancement ? 1 : 0, true);
+  view.setFloat32(byteOffset + 32, tileStart, true);
+  view.setFloat32(byteOffset + 36, tileSpan, true);
+  view.setFloat32(byteOffset + 40, sampleRate, true);
+  view.setFloat32(byteOffset + 44, powerScale, true);
+  view.setFloat32(byteOffset + 48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
+  view.setFloat32(byteOffset + 52, plan.minDecibels, true);
+  view.setFloat32(byteOffset + 56, plan.maxDecibels, true);
 }
 
-function createStftRenderParamsData(
+function writeStftRenderParamsData(
+  view: DataView,
+  byteOffset: number,
   plan: RenderRequestPlan,
   {
     columnCount,
@@ -2928,27 +3147,98 @@ function createStftRenderParamsData(
     tileStart: number;
     useLowFrequencyEnhancement: boolean;
   },
-): ArrayBuffer {
-  const { buffer, view } = stftRenderParamsScratch;
+): void {
   const halfFftSize = Math.max(1, plan.fftSize / 2);
   const powerScale = 1 / (halfFftSize * halfFftSize);
 
-  view.setUint32(0, plan.fftSize, true);
-  view.setUint32(4, columnCount, true);
-  view.setUint32(8, plan.rowCount, true);
-  view.setUint32(12, sampleCount, true);
-  view.setUint32(16, plan.melBandCount, true);
-  view.setUint32(20, ANALYSIS_TYPE_CODES[plan.analysisType] ?? 0, true);
-  view.setUint32(24, plan.decimationFactor, true);
-  view.setUint32(28, useLowFrequencyEnhancement ? 1 : 0, true);
-  view.setFloat32(32, tileStart, true);
-  view.setFloat32(36, tileSpan, true);
-  view.setFloat32(40, sampleRate, true);
-  view.setFloat32(44, powerScale, true);
-  view.setFloat32(48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
-  view.setFloat32(52, plan.minDecibels, true);
-  view.setFloat32(56, plan.maxDecibels, true);
-  return buffer;
+  view.setUint32(byteOffset, plan.fftSize, true);
+  view.setUint32(byteOffset + 4, columnCount, true);
+  view.setUint32(byteOffset + 8, plan.rowCount, true);
+  view.setUint32(byteOffset + 12, sampleCount, true);
+  view.setUint32(byteOffset + 16, plan.melBandCount, true);
+  view.setUint32(byteOffset + 20, ANALYSIS_TYPE_CODES[plan.analysisType] ?? 0, true);
+  view.setUint32(byteOffset + 24, plan.decimationFactor, true);
+  view.setUint32(byteOffset + 28, useLowFrequencyEnhancement ? 1 : 0, true);
+  view.setFloat32(byteOffset + 32, tileStart, true);
+  view.setFloat32(byteOffset + 36, tileSpan, true);
+  view.setFloat32(byteOffset + 40, sampleRate, true);
+  view.setFloat32(byteOffset + 44, powerScale, true);
+  view.setFloat32(byteOffset + 48, COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution], true);
+  view.setFloat32(byteOffset + 52, plan.minDecibels, true);
+  view.setFloat32(byteOffset + 56, plan.maxDecibels, true);
+}
+
+function writeStftParamBlock(
+  plan: RenderRequestPlan,
+  slotIndex: number,
+  {
+    columnCount,
+    sampleCount,
+    sampleRate,
+    stageCount,
+    tileSpan,
+    tileStart,
+    useLowFrequencyEnhancement,
+  }: {
+    columnCount: number;
+    sampleCount: number;
+    sampleRate: number;
+    stageCount: number;
+    tileSpan: number;
+    tileStart: number;
+    useLowFrequencyEnhancement: boolean;
+  },
+): number {
+  const slotBaseOffset = slotIndex * (256 * WEBGPU_STFT_PARAM_ENTRIES_PER_SLOT);
+  const view = stftParamBlockScratch.view;
+
+  writeStftComputeParamsData(view, slotBaseOffset, plan, {
+    columnCount,
+    decimationFactor: 1,
+    sampleCount,
+    sampleRate,
+    slotStageIndex: 0,
+    tileSpan,
+    tileStart,
+    useLowFrequencyEnhancement,
+  });
+
+  if (useLowFrequencyEnhancement) {
+    writeStftComputeParamsData(view, slotBaseOffset + 256, plan, {
+      columnCount,
+      decimationFactor: plan.decimationFactor,
+      sampleCount,
+      sampleRate,
+      slotStageIndex: 0,
+      tileSpan,
+      tileStart,
+      useLowFrequencyEnhancement,
+    });
+  }
+
+  for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+    writeStftComputeParamsData(view, slotBaseOffset + (256 * (2 + stageIndex)), plan, {
+      columnCount,
+      decimationFactor: 1,
+      sampleCount,
+      sampleRate,
+      slotStageIndex: stageIndex,
+      tileSpan,
+      tileStart,
+      useLowFrequencyEnhancement,
+    });
+  }
+
+  writeStftRenderParamsData(view, slotBaseOffset + (256 * (2 + stageCount)), plan, {
+    columnCount,
+    sampleCount,
+    sampleRate,
+    tileSpan,
+    tileStart,
+    useLowFrequencyEnhancement,
+  });
+
+  return slotBaseOffset + (256 * (3 + stageCount));
 }
 
 function createScalogramComputeParamsData(
@@ -3277,6 +3567,11 @@ function getScalogramFftWindowResource(
     return null;
   }
 
+  const twiddleResource = getTwiddleResource(fftWindow.fftSize, webGpu, computeState.twiddleResources);
+  if (!twiddleResource) {
+    return null;
+  }
+
   try {
     const inputData = createScalogramFftInputData(
       fftWindow.fftSize,
@@ -3315,6 +3610,7 @@ function getScalogramFftWindowResource(
           { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 16 } },
           { binding: 1, resource: { buffer: forwardSourceBuffer } },
           { binding: 2, resource: { buffer: forwardTargetBuffer } },
+          { binding: 3, resource: { buffer: twiddleResource.buffer } },
         ],
       });
       computePass.setBindGroup(0, bindGroup, [paramOffset]);
@@ -3394,6 +3690,11 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
           buffer: { type: 'storage' },
           visibility: globals.shaderStage.COMPUTE,
         },
+        {
+          binding: 3,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
       ],
     });
     const fftBindGroupLayout = webGpu.device.createBindGroupLayout({
@@ -3411,6 +3712,11 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
         {
           binding: 2,
           buffer: { type: 'storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
+        {
+          binding: 3,
+          buffer: { type: 'read-only-storage' },
           visibility: globals.shaderStage.COMPUTE,
         },
       ],
@@ -3618,6 +3924,8 @@ function initializeWebGpuStftCompute(webGpu: WebGpuCompositorState): WebGpuStftC
       }),
       scratchFftSize: 0,
       scratchSlots: [],
+      twiddleResources: new Map(),
+      windowResources: new Map(),
     };
   } catch {
     return null;
@@ -3778,6 +4086,11 @@ function initializeWebGpuScalogramCompute(webGpu: WebGpuCompositorState): WebGpu
           buffer: { type: 'storage' },
           visibility: globals.shaderStage.COMPUTE,
         },
+        {
+          binding: 3,
+          buffer: { type: 'read-only-storage' },
+          visibility: globals.shaderStage.COMPUTE,
+        },
       ],
     });
     const fftMultiplyBindGroupLayout = webGpu.device.createBindGroupLayout({
@@ -3927,6 +4240,7 @@ function initializeWebGpuScalogramCompute(webGpu: WebGpuCompositorState): WebGpu
           bindGroupLayouts: [renderBindGroupLayout],
         }),
       }),
+      twiddleResources: new Map(),
     };
   } catch {
     return null;
@@ -3966,6 +4280,42 @@ function ensureWebGpuPcmBuffer(
   return true;
 }
 
+function createStftInputBindGroup(
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuStftComputeState,
+  pcmBuffer: any,
+  targetBuffer: any,
+  windowBuffer: any,
+): any {
+  return webGpu.device.createBindGroup({
+    layout: computeState.inputBindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+      { binding: 1, resource: { buffer: pcmBuffer } },
+      { binding: 2, resource: { buffer: targetBuffer } },
+      { binding: 3, resource: { buffer: windowBuffer } },
+    ],
+  });
+}
+
+function createStftFftBindGroup(
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuStftComputeState,
+  sourceBuffer: any,
+  targetBuffer: any,
+  twiddleBuffer: any,
+): any {
+  return webGpu.device.createBindGroup({
+    layout: computeState.fftBindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+      { binding: 1, resource: { buffer: sourceBuffer } },
+      { binding: 2, resource: { buffer: targetBuffer } },
+      { binding: 3, resource: { buffer: twiddleBuffer } },
+    ],
+  });
+}
+
 function ensureWebGpuStftScratchBuffers(
   plan: RenderRequestPlan,
   webGpu: WebGpuCompositorState,
@@ -3973,6 +4323,12 @@ function ensureWebGpuStftScratchBuffers(
 ): boolean {
   const globals = getWebGpuGlobals();
   if (!globals || !computeState.pcmBuffer) {
+    return false;
+  }
+
+  const twiddleResource = getTwiddleResource(plan.fftSize, webGpu, computeState.twiddleResources);
+  const windowResource = getStftWindowResource(plan.fftSize, plan.windowFunction, webGpu, computeState);
+  if (!twiddleResource || !windowResource) {
     return false;
   }
 
@@ -4003,64 +4359,81 @@ function ensureWebGpuStftScratchBuffers(
       });
 
       computeState.scratchSlots.push({
-        baseInputBindGroup: webGpu.device.createBindGroup({
-          layout: computeState.inputBindGroupLayout,
-          entries: [
-            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-            { binding: 1, resource: { buffer: computeState.pcmBuffer } },
-            { binding: 2, resource: { buffer: basePingBuffer } },
-          ],
-        }),
+        baseInputBindGroup: createStftInputBindGroup(
+          webGpu,
+          computeState,
+          computeState.pcmBuffer,
+          basePingBuffer,
+          windowResource.buffer,
+        ),
         basePingBuffer,
         basePongBuffer,
-        fftBindGroupForward: webGpu.device.createBindGroup({
-          layout: computeState.fftBindGroupLayout,
-          entries: [
-            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-            { binding: 1, resource: { buffer: basePingBuffer } },
-            { binding: 2, resource: { buffer: basePongBuffer } },
-          ],
-        }),
-        fftBindGroupReverse: webGpu.device.createBindGroup({
-          layout: computeState.fftBindGroupLayout,
-          entries: [
-            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-            { binding: 1, resource: { buffer: basePongBuffer } },
-            { binding: 2, resource: { buffer: basePingBuffer } },
-          ],
-        }),
+        fftBindGroupForward: createStftFftBindGroup(
+          webGpu,
+          computeState,
+          basePingBuffer,
+          basePongBuffer,
+          twiddleResource.buffer,
+        ),
+        fftBindGroupReverse: createStftFftBindGroup(
+          webGpu,
+          computeState,
+          basePongBuffer,
+          basePingBuffer,
+          twiddleResource.buffer,
+        ),
+        inputWindowKey: windowResource.key,
         mfccMelBuffer: null,
         mfccMelBufferCapacity: 0,
-        lowInputBindGroup: webGpu.device.createBindGroup({
-          layout: computeState.inputBindGroupLayout,
-          entries: [
-            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-            { binding: 1, resource: { buffer: computeState.pcmBuffer } },
-            { binding: 2, resource: { buffer: lowPingBuffer } },
-          ],
-        }),
+        lowInputBindGroup: createStftInputBindGroup(
+          webGpu,
+          computeState,
+          computeState.pcmBuffer,
+          lowPingBuffer,
+          windowResource.buffer,
+        ),
         lowPingBuffer,
         lowPongBuffer,
-        lowStageBindGroupForward: webGpu.device.createBindGroup({
-          layout: computeState.fftBindGroupLayout,
-          entries: [
-            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-            { binding: 1, resource: { buffer: lowPingBuffer } },
-            { binding: 2, resource: { buffer: lowPongBuffer } },
-          ],
-        }),
-        lowStageBindGroupReverse: webGpu.device.createBindGroup({
-          layout: computeState.fftBindGroupLayout,
-          entries: [
-            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-            { binding: 1, resource: { buffer: lowPongBuffer } },
-            { binding: 2, resource: { buffer: lowPingBuffer } },
-          ],
-        }),
+        lowStageBindGroupForward: createStftFftBindGroup(
+          webGpu,
+          computeState,
+          lowPingBuffer,
+          lowPongBuffer,
+          twiddleResource.buffer,
+        ),
+        lowStageBindGroupReverse: createStftFftBindGroup(
+          webGpu,
+          computeState,
+          lowPongBuffer,
+          lowPingBuffer,
+          twiddleResource.buffer,
+        ),
       });
     }
 
     computeState.scratchFftSize = plan.fftSize;
+  } else {
+    for (const slot of computeState.scratchSlots) {
+      if (slot.inputWindowKey === windowResource.key) {
+        continue;
+      }
+
+      slot.baseInputBindGroup = createStftInputBindGroup(
+        webGpu,
+        computeState,
+        computeState.pcmBuffer,
+        slot.basePingBuffer,
+        windowResource.buffer,
+      );
+      slot.lowInputBindGroup = createStftInputBindGroup(
+        webGpu,
+        computeState,
+        computeState.pcmBuffer,
+        slot.lowPingBuffer,
+        windowResource.buffer,
+      );
+      slot.inputWindowKey = windowResource.key;
+    }
   }
 
   return true;
@@ -4134,13 +4507,21 @@ function ensureWebGpuCqtValueBuffer(
   }
 }
 
-async function renderStftTileWithWebGpu(
+interface StftTileBatchWorkItem {
+  scratchSlotIndex: number;
+  tileEnd: number;
+  tileRecord: TileRecord;
+  tileStart: number;
+}
+
+async function renderStftTileBatchWithWebGpu(
   plan: RenderRequestPlan,
-  tileRecord: TileRecord,
-  tileStart: number,
-  tileEnd: number,
-  scratchSlotIndex: number,
+  tileBatch: StftTileBatchWorkItem[],
 ): Promise<boolean> {
+  if (tileBatch.length === 0) {
+    return true;
+  }
+
   const webGpu = surfaceState.webGpu;
   if (!webGpu) {
     return false;
@@ -4167,206 +4548,243 @@ async function renderStftTileWithWebGpu(
     return false;
   }
 
-  if (!ensureTileGpuResources(tileRecord, webGpu, { requiresStorage: true, uploadIfDirty: false })) {
-    return false;
-  }
-
   const stageCount = getFftStageCount(plan.fftSize);
-  const columnCount = tileRecord.columnCount;
   const sampleCount = analysisState.sampleCount;
-  const tileSpan = Math.max((1 / analysisState.sampleRate), tileEnd - tileStart);
   const useLowFrequencyEnhancement = plan.analysisType === 'spectrogram'
     && 'hasEnhancedRows' in layoutResource
     && layoutResource.hasEnhancedRows
     && plan.decimationFactor > 1;
-  const [inputDispatchX, inputDispatchY] = getLinearComputeDispatchSize(
-    columnCount * plan.fftSize,
-    webGpu.device,
-  );
-  const [fftDispatchX, fftDispatchY] = getLinearComputeDispatchSize(
-    columnCount * (plan.fftSize / 2),
-    webGpu.device,
-  );
-  const slotIndex = Math.max(0, Math.min(computeState.scratchSlots.length - 1, scratchSlotIndex));
-  const scratchSlot = computeState.scratchSlots[slotIndex] ?? null;
-  if (!scratchSlot) {
-    return false;
-  }
-  if (plan.analysisType === 'mfcc' && !ensureWebGpuMfccScratchBuffer(scratchSlot, plan, tileRecord, webGpu)) {
-    return false;
-  }
-  const slotParamOffsetBase = computeState.paramSetStride * slotIndex;
 
   try {
-    writeBufferAtOffset(computeState.paramBuffer, slotParamOffsetBase, createStftComputeParamsData(plan, {
-      columnCount,
-      decimationFactor: 1,
-      sampleCount,
-      sampleRate: analysisState.sampleRate,
-      slotStageIndex: 0,
-      tileSpan,
-      tileStart,
-      useLowFrequencyEnhancement,
-    }));
+    const workItems: Array<{
+      fftDispatchX: number;
+      fftDispatchY: number;
+      inputDispatchX: number;
+      inputDispatchY: number;
+      melDispatchX: number;
+      melDispatchY: number;
+      renderBindGroup: any;
+      renderDispatchX: number;
+      renderDispatchY: number;
+      renderParamOffset: number;
+      scratchSlot: WebGpuStftScratchSlot;
+      slotParamOffsetBase: number;
+      tileRecord: TileRecord;
+      useLowFrequencyEnhancement: boolean;
+    }> = [];
+    let maxParamWriteEnd = 0;
 
-    if (useLowFrequencyEnhancement) {
-      writeBufferAtOffset(computeState.paramBuffer, slotParamOffsetBase + computeState.paramStride, createStftComputeParamsData(plan, {
-        columnCount,
-        decimationFactor: plan.decimationFactor,
-        sampleCount,
-        sampleRate: analysisState.sampleRate,
-        slotStageIndex: 0,
-        tileSpan,
-        tileStart,
-        useLowFrequencyEnhancement,
-      }));
-    }
+    for (const batchItem of tileBatch) {
+      const tileRecord = batchItem.tileRecord;
+      if (!ensureTileGpuResources(tileRecord, webGpu, { requiresStorage: true, uploadIfDirty: false })) {
+        return false;
+      }
 
-    for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
-      writeBufferAtOffset(
-        computeState.paramBuffer,
-        slotParamOffsetBase + (computeState.paramStride * (2 + stageIndex)),
-        createStftComputeParamsData(plan, {
+      const columnCount = tileRecord.columnCount;
+      const tileSpan = Math.max((1 / analysisState.sampleRate), batchItem.tileEnd - batchItem.tileStart);
+      const [inputDispatchX, inputDispatchY] = getLinearComputeDispatchSize(
+        columnCount * plan.fftSize,
+        webGpu.device,
+      );
+      const [fftDispatchX, fftDispatchY] = getLinearComputeDispatchSize(
+        columnCount * (plan.fftSize / 2),
+        webGpu.device,
+      );
+      const slotIndex = Math.max(0, Math.min(computeState.scratchSlots.length - 1, batchItem.scratchSlotIndex));
+      const scratchSlot = computeState.scratchSlots[slotIndex] ?? null;
+      if (!scratchSlot) {
+        return false;
+      }
+      if (plan.analysisType === 'mfcc' && !ensureWebGpuMfccScratchBuffer(scratchSlot, plan, tileRecord, webGpu)) {
+        return false;
+      }
+
+      const slotParamOffsetBase = computeState.paramSetStride * slotIndex;
+      maxParamWriteEnd = Math.max(
+        maxParamWriteEnd,
+        writeStftParamBlock(plan, slotIndex, {
           columnCount,
-          decimationFactor: 1,
           sampleCount,
           sampleRate: analysisState.sampleRate,
-          slotStageIndex: stageIndex,
+          stageCount,
           tileSpan,
-          tileStart,
+          tileStart: batchItem.tileStart,
           useLowFrequencyEnhancement,
         }),
       );
+
+      const renderParamOffset = slotParamOffsetBase + (computeState.paramStride * (2 + stageCount));
+      const finalBaseBuffer = stageCount % 2 === 0 ? scratchSlot.basePingBuffer : scratchSlot.basePongBuffer;
+      const finalLowBuffer = useLowFrequencyEnhancement
+        ? (stageCount % 2 === 0 ? scratchSlot.lowPingBuffer : scratchSlot.lowPongBuffer)
+        : finalBaseBuffer;
+
+      let renderBindGroup: any = null;
+      if (plan.analysisType === 'mel') {
+        const melResource = layoutResource as WeightedBandLayoutResource;
+        renderBindGroup = webGpu.device.createBindGroup({
+          layout: computeState.renderMelBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+            { binding: 1, resource: { buffer: finalBaseBuffer } },
+            { binding: 2, resource: { buffer: melResource.rowBuffer } },
+            { binding: 3, resource: { buffer: melResource.binBuffer } },
+            { binding: 4, resource: { buffer: melResource.weightBuffer } },
+            { binding: 5, resource: tileRecord.gpuTextureView },
+          ],
+        });
+      } else if (plan.analysisType === 'mfcc') {
+        const melResource = layoutResource as WeightedBandLayoutResource;
+        renderBindGroup = {
+          melEnergy: webGpu.device.createBindGroup({
+            layout: computeState.renderMelEnergyBindGroupLayout,
+            entries: [
+              { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+              { binding: 1, resource: { buffer: finalBaseBuffer } },
+              { binding: 2, resource: { buffer: melResource.rowBuffer } },
+              { binding: 3, resource: { buffer: melResource.binBuffer } },
+              { binding: 4, resource: { buffer: melResource.weightBuffer } },
+              { binding: 5, resource: { buffer: scratchSlot.mfccMelBuffer } },
+            ],
+          }),
+          mfcc: webGpu.device.createBindGroup({
+            layout: computeState.renderMfccBindGroupLayout,
+            entries: [
+              { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+              { binding: 1, resource: { buffer: scratchSlot.mfccMelBuffer } },
+              { binding: 2, resource: { buffer: mfccBasisResource!.buffer } },
+              { binding: 3, resource: tileRecord.gpuTextureView },
+            ],
+          }),
+        };
+      } else {
+        const spectrogramResource = layoutResource as SpectrogramBandLayoutResource;
+        renderBindGroup = webGpu.device.createBindGroup({
+          layout: computeState.renderSpectrogramBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
+            { binding: 1, resource: { buffer: finalBaseBuffer } },
+            { binding: 2, resource: { buffer: finalLowBuffer } },
+            { binding: 3, resource: { buffer: spectrogramResource.buffer } },
+            { binding: 4, resource: tileRecord.gpuTextureView },
+          ],
+        });
+      }
+
+      workItems.push({
+        fftDispatchX,
+        fftDispatchY,
+        inputDispatchX,
+        inputDispatchY,
+        melDispatchX: Math.ceil(columnCount / 8),
+        melDispatchY: Math.ceil(plan.melBandCount / 8),
+        renderBindGroup,
+        renderDispatchX: Math.ceil(columnCount / 8),
+        renderDispatchY: Math.ceil(plan.rowCount / 8),
+        renderParamOffset,
+        scratchSlot,
+        slotParamOffsetBase,
+        tileRecord,
+        useLowFrequencyEnhancement,
+      });
     }
 
-    const renderParamOffset = slotParamOffsetBase + (computeState.paramStride * (2 + stageCount));
-    writeBufferAtOffset(computeState.paramBuffer, renderParamOffset, createStftRenderParamsData(plan, {
-      columnCount,
-      sampleCount,
-      sampleRate: analysisState.sampleRate,
-      tileSpan,
-      tileStart,
-      useLowFrequencyEnhancement,
-    }));
+    if (maxParamWriteEnd <= 0) {
+      return false;
+    }
+
+    webGpu.device.queue.writeBuffer(
+      computeState.paramBuffer,
+      0,
+      new Uint8Array(stftParamBlockScratch.buffer, 0, maxParamWriteEnd),
+    );
 
     const commandEncoder = webGpu.device.createCommandEncoder();
     const computePass = commandEncoder.beginComputePass();
 
-    computePass.setPipeline(computeState.inputPipeline);
-    computePass.setBindGroup(0, scratchSlot.baseInputBindGroup, [slotParamOffsetBase]);
-    computePass.dispatchWorkgroups(inputDispatchX, inputDispatchY);
+    for (const workItem of workItems) {
+      computePass.setPipeline(computeState.inputPipeline);
+      computePass.setBindGroup(0, workItem.scratchSlot.baseInputBindGroup, [workItem.slotParamOffsetBase]);
+      computePass.dispatchWorkgroups(workItem.inputDispatchX, workItem.inputDispatchY);
 
-    if (useLowFrequencyEnhancement && scratchSlot.lowInputBindGroup) {
-      computePass.setBindGroup(0, scratchSlot.lowInputBindGroup, [slotParamOffsetBase + computeState.paramStride]);
-      computePass.dispatchWorkgroups(inputDispatchX, inputDispatchY);
-    }
+      if (workItem.useLowFrequencyEnhancement && workItem.scratchSlot.lowInputBindGroup) {
+        computePass.setBindGroup(0, workItem.scratchSlot.lowInputBindGroup, [workItem.slotParamOffsetBase + computeState.paramStride]);
+        computePass.dispatchWorkgroups(workItem.inputDispatchX, workItem.inputDispatchY);
+      }
 
-    computePass.setPipeline(computeState.fftPipeline);
-    for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
-      const paramOffset = slotParamOffsetBase + (computeState.paramStride * (2 + stageIndex));
-      computePass.setBindGroup(
-        0,
-        stageIndex % 2 === 0 ? scratchSlot.fftBindGroupForward : scratchSlot.fftBindGroupReverse,
-        [paramOffset],
-      );
-      computePass.dispatchWorkgroups(fftDispatchX, fftDispatchY);
-    }
-
-    if (useLowFrequencyEnhancement) {
+      computePass.setPipeline(computeState.fftPipeline);
       for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
-        const paramOffset = slotParamOffsetBase + (computeState.paramStride * (2 + stageIndex));
+        const paramOffset = workItem.slotParamOffsetBase + (computeState.paramStride * (2 + stageIndex));
         computePass.setBindGroup(
           0,
-          stageIndex % 2 === 0 ? scratchSlot.lowStageBindGroupForward : scratchSlot.lowStageBindGroupReverse,
+          stageIndex % 2 === 0 ? workItem.scratchSlot.fftBindGroupForward : workItem.scratchSlot.fftBindGroupReverse,
           [paramOffset],
         );
-        computePass.dispatchWorkgroups(fftDispatchX, fftDispatchY);
+        computePass.dispatchWorkgroups(workItem.fftDispatchX, workItem.fftDispatchY);
       }
+
+      if (workItem.useLowFrequencyEnhancement) {
+        for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+          const paramOffset = workItem.slotParamOffsetBase + (computeState.paramStride * (2 + stageIndex));
+          computePass.setBindGroup(
+            0,
+            stageIndex % 2 === 0 ? workItem.scratchSlot.lowStageBindGroupForward : workItem.scratchSlot.lowStageBindGroupReverse,
+            [paramOffset],
+          );
+          computePass.dispatchWorkgroups(workItem.fftDispatchX, workItem.fftDispatchY);
+        }
+      }
+
+      if (plan.analysisType === 'mfcc') {
+        computePass.setPipeline(computeState.renderMelEnergyPipeline);
+        computePass.setBindGroup(0, workItem.renderBindGroup.melEnergy, [workItem.renderParamOffset]);
+        computePass.dispatchWorkgroups(workItem.melDispatchX, workItem.melDispatchY);
+
+        computePass.setPipeline(computeState.renderMfccPipeline);
+        computePass.setBindGroup(0, workItem.renderBindGroup.mfcc, [workItem.renderParamOffset]);
+      } else if (plan.analysisType === 'mel') {
+        computePass.setPipeline(computeState.renderMelPipeline);
+        computePass.setBindGroup(0, workItem.renderBindGroup, [workItem.renderParamOffset]);
+      } else {
+        computePass.setPipeline(computeState.renderSpectrogramPipeline);
+        computePass.setBindGroup(0, workItem.renderBindGroup, [workItem.renderParamOffset]);
+      }
+
+      computePass.dispatchWorkgroups(workItem.renderDispatchX, workItem.renderDispatchY);
     }
 
-    const finalBaseBuffer = stageCount % 2 === 0 ? scratchSlot.basePingBuffer : scratchSlot.basePongBuffer;
-    const finalLowBuffer = useLowFrequencyEnhancement
-      ? (stageCount % 2 === 0 ? scratchSlot.lowPingBuffer : scratchSlot.lowPongBuffer)
-      : finalBaseBuffer;
-
-    if (plan.analysisType === 'mel') {
-      const melResource = layoutResource as WeightedBandLayoutResource;
-      const bindGroup = webGpu.device.createBindGroup({
-        layout: computeState.renderMelBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-          { binding: 1, resource: { buffer: finalBaseBuffer } },
-          { binding: 2, resource: { buffer: melResource.rowBuffer } },
-          { binding: 3, resource: { buffer: melResource.binBuffer } },
-          { binding: 4, resource: { buffer: melResource.weightBuffer } },
-          { binding: 5, resource: tileRecord.gpuTextureView },
-        ],
-      });
-      computePass.setPipeline(computeState.renderMelPipeline);
-      computePass.setBindGroup(0, bindGroup, [renderParamOffset]);
-    } else if (plan.analysisType === 'mfcc') {
-      const melResource = layoutResource as WeightedBandLayoutResource;
-      const melEnergyBindGroup = webGpu.device.createBindGroup({
-        layout: computeState.renderMelEnergyBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-          { binding: 1, resource: { buffer: finalBaseBuffer } },
-          { binding: 2, resource: { buffer: melResource.rowBuffer } },
-          { binding: 3, resource: { buffer: melResource.binBuffer } },
-          { binding: 4, resource: { buffer: melResource.weightBuffer } },
-          { binding: 5, resource: { buffer: scratchSlot.mfccMelBuffer } },
-        ],
-      });
-      computePass.setPipeline(computeState.renderMelEnergyPipeline);
-      computePass.setBindGroup(0, melEnergyBindGroup, [renderParamOffset]);
-      computePass.dispatchWorkgroups(
-        Math.ceil(columnCount / 8),
-        Math.ceil(plan.melBandCount / 8),
-      );
-
-      const mfccBindGroup = webGpu.device.createBindGroup({
-        layout: computeState.renderMfccBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-          { binding: 1, resource: { buffer: scratchSlot.mfccMelBuffer } },
-          { binding: 2, resource: { buffer: mfccBasisResource!.buffer } },
-          { binding: 3, resource: tileRecord.gpuTextureView },
-        ],
-      });
-      computePass.setPipeline(computeState.renderMfccPipeline);
-      computePass.setBindGroup(0, mfccBindGroup, [renderParamOffset]);
-    } else {
-      const spectrogramResource = layoutResource as SpectrogramBandLayoutResource;
-      const bindGroup = webGpu.device.createBindGroup({
-        layout: computeState.renderSpectrogramBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: computeState.paramBuffer, size: 64 } },
-          { binding: 1, resource: { buffer: finalBaseBuffer } },
-          { binding: 2, resource: { buffer: finalLowBuffer } },
-          { binding: 3, resource: { buffer: spectrogramResource.buffer } },
-          { binding: 4, resource: tileRecord.gpuTextureView },
-        ],
-      });
-      computePass.setPipeline(computeState.renderSpectrogramPipeline);
-      computePass.setBindGroup(0, bindGroup, [renderParamOffset]);
-    }
-
-    computePass.dispatchWorkgroups(
-      Math.ceil(columnCount / 8),
-      Math.ceil(plan.rowCount / 8),
-    );
     computePass.end();
-
     webGpu.device.queue.submit([commandEncoder.finish()]);
-    tileRecord.gpuDirty = false;
-    tileRecord.renderedColumns = tileRecord.columnCount;
-    tileRecord.complete = true;
+
+    for (const workItem of workItems) {
+      workItem.tileRecord.gpuDirty = false;
+      workItem.tileRecord.renderedColumns = workItem.tileRecord.columnCount;
+      workItem.tileRecord.complete = true;
+    }
+
     return true;
   } catch (error) {
-    destroyTileGpuResources(tileRecord);
+    for (const batchItem of tileBatch) {
+      destroyTileGpuResources(batchItem.tileRecord);
+    }
     markAnalysisTypeWebGpuFallback(plan, error instanceof Error ? error.message : 'STFT GPU compute failed.');
     return false;
   }
+}
+
+async function renderStftTileWithWebGpu(
+  plan: RenderRequestPlan,
+  tileRecord: TileRecord,
+  tileStart: number,
+  tileEnd: number,
+  scratchSlotIndex: number,
+): Promise<boolean> {
+  return renderStftTileBatchWithWebGpu(plan, [{
+    scratchSlotIndex,
+    tileEnd,
+    tileRecord,
+    tileStart,
+  }]);
 }
 
 function shouldUseFftBasedScalogramTile(
@@ -4471,6 +4889,11 @@ async function renderScalogramTileWithFftWebGpu(
     recordScalogramFftPathFailure(computeState);
     return false;
   }
+  const twiddleResource = getTwiddleResource(fftWindow.fftSize, webGpu, computeState.twiddleResources);
+  if (!twiddleResource) {
+    recordScalogramFftPathFailure(computeState);
+    return false;
+  }
 
   try {
     const stageCount = getFftStageCount(fftWindow.fftSize);
@@ -4501,6 +4924,7 @@ async function renderScalogramTileWithFftWebGpu(
           { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 16 } },
           { binding: 1, resource: { buffer: inverseSourceBuffer } },
           { binding: 2, resource: { buffer: inverseTargetBuffer } },
+          { binding: 3, resource: { buffer: twiddleResource.buffer } },
         ],
       }));
 
@@ -4729,10 +5153,7 @@ async function renderCqtChromaTileWithWebGpu(
 
     computePass.setPipeline(computeState.renderChromaPipeline);
     computePass.setBindGroup(0, renderBindGroup);
-    computePass.dispatchWorkgroups(
-      Math.ceil(tileRecord.columnCount / 8),
-      Math.ceil(plan.rowCount / 8),
-    );
+    computePass.dispatchWorkgroups(tileRecord.columnCount, 1);
     computePass.end();
 
     webGpu.device.queue.submit([commandEncoder.finish()]);
