@@ -329,6 +329,7 @@ const {
   movePlaybackRateFocus,
   openPlaybackRateMenu,
   positionPlaybackRateMenu,
+  stepPlaybackRateSelection,
   syncPlaybackRateControl,
 } = createAudioscopePlaybackRateController({
   elements,
@@ -1380,14 +1381,15 @@ function scheduleSpectrogramConfigRefresh({ persist = true } = {}): void {
 }
 
 function getSpectrogramRenderPixelHeight(): number {
-  const screenHeight = Number(window.screen?.height);
-  const fallbackHeight = Math.max(
+  const renderHeight = Math.max(
     1,
-    window.innerHeight || elements.viewport.clientHeight || elements.spectrogram.clientHeight || 1,
+    elements.spectrogramStage.clientHeight,
+    elements.spectrogram.clientHeight,
+    elements.spectrogramPanel.clientHeight,
+    elements.viewport.clientHeight,
+    window.innerHeight,
+    1,
   );
-  const renderHeight = Number.isFinite(screenHeight) && screenHeight > 0
-    ? screenHeight
-    : fallbackHeight;
 
   return Math.max(1, Math.round(renderHeight * DISPLAY_PIXEL_RATIO));
 }
@@ -2421,53 +2423,81 @@ function attachUiEvents(): void {
     }
   });
 
-  window.addEventListener('keydown', (event) => {
+  const handleGlobalShortcut = (event: KeyboardEvent, action: () => void) => {
+    event.preventDefault();
+    event.stopPropagation();
+    action();
+  };
+
+  const handleGlobalShortcutKeydown = (event: KeyboardEvent) => {
     if (event.defaultPrevented) {
       return;
     }
 
-    if (event.code === 'Space' && !isTextEditableTarget(event.target)) {
-      event.preventDefault();
-      void togglePlayback();
+    if (event.ctrlKey || event.metaKey || event.altKey || isTextEditableTarget(event.target)) {
       return;
     }
 
-    if (event.target instanceof HTMLElement && event.target.closest('input, select, button, textarea, [contenteditable="true"]')) {
+    if (event.code === 'Space') {
+      handleGlobalShortcut(event, () => {
+        void togglePlayback();
+      });
       return;
     }
 
     if (event.code === 'ArrowLeft') {
-      event.preventDefault();
-      seekBy(-5);
+      handleGlobalShortcut(event, () => {
+        seekBy(-5);
+      });
       return;
     }
 
     if (event.code === 'ArrowRight') {
-      event.preventDefault();
-      seekBy(5);
+      handleGlobalShortcut(event, () => {
+        seekBy(5);
+      });
+      return;
+    }
+
+    if (event.code === 'ArrowUp') {
+      handleGlobalShortcut(event, () => {
+        stepPlaybackRateSelection(1);
+      });
+      return;
+    }
+
+    if (event.code === 'ArrowDown') {
+      handleGlobalShortcut(event, () => {
+        stepPlaybackRateSelection(-1);
+      });
       return;
     }
 
     if (event.code === 'KeyF' && !event.repeat) {
-      event.preventDefault();
-      sendViewportIntent({
-        enabled: !state.followPlayback,
-        kind: 'setFollow',
+      handleGlobalShortcut(event, () => {
+        sendViewportIntent({
+          enabled: !state.followPlayback,
+          kind: 'setFollow',
+        });
       });
       return;
     }
 
     if (event.code === 'Minus') {
-      event.preventDefault();
-      sendViewportIntent({ direction: 'out', kind: 'zoomStep' });
+      handleGlobalShortcut(event, () => {
+        sendViewportIntent({ direction: 'out', kind: 'zoomStep' });
+      });
       return;
     }
 
     if (event.code === 'Equal') {
-      event.preventDefault();
-      sendViewportIntent({ direction: 'in', kind: 'zoomStep' });
+      handleGlobalShortcut(event, () => {
+        sendViewportIntent({ direction: 'in', kind: 'zoomStep' });
+      });
     }
-  }, { capture: true });
+  };
+
+  window.addEventListener('keydown', handleGlobalShortcutKeydown, { capture: true });
 
   elements.spectrogramTypeSelect.addEventListener('change', () => {
     const previousAnalysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);

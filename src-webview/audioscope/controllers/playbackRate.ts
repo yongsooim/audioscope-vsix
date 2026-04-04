@@ -193,6 +193,29 @@ export function createAudioscopePlaybackRateController({
     focusPlaybackRateOption(nextIndex);
   }
 
+  function stepPlaybackRateSelection(direction) {
+    if (elements.playbackRateSelect.disabled) {
+      return;
+    }
+
+    const options = Array.from(elements.playbackRateSelect.options);
+
+    if (options.length === 0) {
+      return;
+    }
+
+    const currentValue = String(normalizePlaybackRateSelection(elements.playbackRateSelect.value || state.playbackRate));
+    const currentIndex = options.findIndex((option) => String(normalizePlaybackRateSelection(option.value)) === currentValue);
+    const startIndex = currentIndex >= 0 ? currentIndex : options.findIndex((option) => option.selected);
+    const nextIndex = Math.max(0, Math.min(options.length - 1, (startIndex >= 0 ? startIndex : 0) + direction));
+
+    applyPlaybackRateSelection(options[nextIndex]?.value ?? currentValue);
+
+    if (state.playbackRateMenuOpen) {
+      focusPlaybackRateOption(nextIndex);
+    }
+  }
+
   function isPlaybackRateUiTarget(target) {
     return target instanceof Node
       && (
@@ -213,6 +236,7 @@ export function createAudioscopePlaybackRateController({
     movePlaybackRateFocus,
     openPlaybackRateMenu,
     positionPlaybackRateMenu,
+    stepPlaybackRateSelection,
     syncPlaybackRateControl,
     togglePlaybackRateMenu,
   };

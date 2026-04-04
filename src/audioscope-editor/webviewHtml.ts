@@ -37,13 +37,13 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             <div class="wave-toolbar-actions">
               <div class="wave-toolbar-group wave-toolbar-group-zoom">
                 <div id="wave-zoom-chip" class="wave-toolbar-pill wave-toolbar-pill-zoom" aria-live="polite">Zoom 1.0x</div>
-                <button id="wave-zoom-out" class="wave-tool-button" type="button" aria-label="Zoom out waveform">-</button>
+                <button id="wave-zoom-out" class="wave-tool-button" type="button" aria-label="Zoom out waveform" title="Zoom out waveform (-)">-</button>
                 <button id="wave-zoom-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform zoom">1.0x</button>
-                <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform">+</button>
+                <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform" title="Zoom in waveform (+)">+</button>
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-follow">
-                <label class="wave-follow-toggle">
-                  <input id="wave-follow" class="wave-follow-toggle-input" type="checkbox" />
+                <label class="wave-follow-toggle" title="Toggle follow playback (F)">
+                  <input id="wave-follow" class="wave-follow-toggle-input" type="checkbox" aria-keyshortcuts="F" />
                   <span class="wave-follow-toggle-button">
                     <span class="wave-follow-toggle-text">Follow</span>
                     <span class="wave-follow-toggle-track" aria-hidden="true">
@@ -255,9 +255,9 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
         </div>
       </section>
       <footer class="transport" aria-label="Playback controls">
-        <button id="seek-backward" class="transport-button" type="button" disabled>-5s</button>
-        <button id="play-toggle" class="play-toggle" type="button" disabled>Play</button>
-        <button id="seek-forward" class="transport-button" type="button" disabled>+5s</button>
+        <button id="seek-backward" class="transport-button" type="button" aria-keyshortcuts="ArrowLeft" title="Seek backward 5 seconds (Left Arrow)" disabled>-5s</button>
+        <button id="play-toggle" class="play-toggle" type="button" aria-keyshortcuts="Space" title="Toggle playback (Space)" disabled>Play</button>
+        <button id="seek-forward" class="transport-button" type="button" aria-keyshortcuts="ArrowRight" title="Seek forward 5 seconds (Right Arrow)" disabled>+5s</button>
         <div class="transport-rate" role="group" aria-label="Playback speed">
           <span class="transport-rate-label">Speed</span>
           <div id="playback-rate-control" class="transport-rate-control">
@@ -269,6 +269,8 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               aria-controls="playback-rate-menu"
               aria-expanded="false"
               aria-label="Playback speed"
+              aria-keyshortcuts="ArrowUp ArrowDown"
+              title="Adjust playback speed (Up/Down Arrow)"
               disabled
             >1x</button>
             <select id="playback-rate-select" class="transport-rate-select" aria-label="Playback speed" disabled tabindex="-1">
