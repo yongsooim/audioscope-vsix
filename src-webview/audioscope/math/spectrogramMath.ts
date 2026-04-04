@@ -44,6 +44,33 @@ export function buildLinearFrequencyTicks(
     .sort((left, right) => right - left);
 }
 
+export function buildLogFrequencyTicks(
+  minFrequency: number,
+  maxFrequency: number,
+): number[] {
+  const safeMin = Math.max(1, minFrequency);
+  const safeMax = Math.max(safeMin * 1.01, maxFrequency);
+  const multipliers = [1, 2, 5];
+  const ticks: number[] = [];
+  const minExponent = Math.floor(Math.log10(safeMin));
+  const maxExponent = Math.ceil(Math.log10(safeMax));
+
+  for (let exponent = minExponent; exponent <= maxExponent; exponent += 1) {
+    const magnitude = 10 ** exponent;
+
+    for (const multiplier of multipliers) {
+      const tick = multiplier * magnitude;
+      if (tick >= safeMin && tick <= safeMax) {
+        ticks.push(Math.round(tick));
+      }
+    }
+  }
+
+  return [...new Set(ticks)]
+    .filter((tick) => tick >= safeMin && tick <= safeMax)
+    .sort((left, right) => right - left);
+}
+
 export function getLinearFrequencyPosition(frequency: number, minFrequency: number, maxFrequency: number): number {
   const safeMin = Math.max(0, minFrequency);
   const safeMax = Math.max(safeMin + 1, maxFrequency);

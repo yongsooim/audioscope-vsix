@@ -55,10 +55,6 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    "onCommand:audioscope.openActiveFileInAudioscope",
-    "onCustomEditor:audioscope.editor"
-  ],
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
@@ -232,6 +228,6 @@
     "@types/vscode": "^1.100.0",
     "rolldown": "^1.0.0-rc.12",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.2"
+    "typescript": "^6.0.2"
   }
 }

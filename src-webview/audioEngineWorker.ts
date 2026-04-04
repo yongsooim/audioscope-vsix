@@ -1,4 +1,5 @@
 import {
+  buildLogFrequencyTicks,
   buildLinearFrequencyTicks,
   formatFrequencyLabel,
   getFrequencyAtLinearPosition,
@@ -133,7 +134,6 @@ const QUALITY_PRESETS = {
 
 const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
-const SPECTROGRAM_TICKS = [20000, 16000, 12000, 8000, 4000, 2000, 1000, 400, 100, 50, 30];
 const SPECTROGRAM_DB_WINDOW_LIMITS = {
   max: 12,
   min: -120,
@@ -2585,7 +2585,7 @@ function buildFrequencyTicks(): FrequencyTickUi[] {
   const axisMode = getActiveSpectrogramAxisMode();
   const frequencies = axisMode === 'linear'
     ? buildLinearFrequencyTicks(minFrequency, maxFrequency, SPECTROGRAM_LINEAR_TICK_COUNT)
-    : SPECTROGRAM_TICKS.filter((tick) => tick >= minFrequency && tick <= maxFrequency);
+    : buildLogFrequencyTicks(minFrequency, maxFrequency);
 
   return frequencies.map((frequency, index) => {
     let positionRatio = 0;
