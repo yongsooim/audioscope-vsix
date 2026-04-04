@@ -128,14 +128,13 @@
             "mfccMelBandCount": 128,
             "minDecibels": -80,
             "overlapRatio": 0.75,
-            "scalogramHopSamples": 0,
             "scalogramMaxFrequency": 20000,
             "scalogramMinFrequency": 20,
             "scalogramOmega0": 6,
             "scalogramRowDensity": 1,
             "windowFunction": "hann"
           },
-          "description": "Stores the default audioscope spectrogram settings that new files open with.",
+          "description": "Stores the default audioscope spectrogram settings that new files open with. Advanced scalogram frequency range and row density values can be edited in settings JSON.",
           "properties": {
             "analysisType": {
               "type": "string",
@@ -174,10 +173,6 @@
             "overlapRatio": {
               "type": "number",
               "enum": [0.5, 0.75, 0.875, 0.9375]
-            },
-            "scalogramHopSamples": {
-              "type": "number",
-              "enum": [0, 256, 512, 1024, 2048, 4096]
             },
             "scalogramMaxFrequency": {
               "type": "number"
