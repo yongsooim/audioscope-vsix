@@ -58,7 +58,7 @@ src/
   mediaHostCache.ts                    # host-side caching layer
 
 src-webview/
-  audioscope/app.ts                    # webview bootstrap + state wiring
+  app.ts                               # webview bootstrap + state wiring
   audioscope/controllers/*             # feature controllers (transport/load/media/...)
   audioscope/math/*                    # analysis math helpers
 ```
@@ -86,12 +86,6 @@ Build output:
 - `dist/webview/` webview bundles
 - `dist/wasm/` analysis WASM binaries
 - `dist/embedded-tools/` embedded ffmpeg/ffprobe/browser decode tools
-
-## Deployment inspection report
-
-A full packaging readiness review and risk checklist is documented in:
-
-- [`docs/deployment-inspection.md`](./docs/deployment-inspection.md)
 
 ## License
 
