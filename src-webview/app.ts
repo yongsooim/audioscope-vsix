@@ -1,7 +1,9 @@
 import { DISPLAY_MIN_DPR } from './sharedBuffers';
-import { createAudioTransport, type AudioTransport, type PlaybackClockSnapshot, type PlaybackSession } from './transport/audioTransport';
+import type { AudioTransport, PlaybackSession } from './transport/audioTransport';
 import { createAudioscopeElements } from './audioscope/core/elements';
-import { clamp, formatAxisLabel, formatTime } from './audioscope/core/format';
+import { clamp, formatAxisLabel } from './audioscope/core/format';
+import { createAudioscopeFocusController } from './audioscope/controllers/focus';
+import { createAudioscopeLifecycleController } from './audioscope/controllers/lifecycle';
 import {
   createAudioscopeMediaController,
   createExternalToolStatusState,
@@ -18,6 +20,8 @@ import {
   createAudioscopePlaybackRateController,
   normalizePlaybackRateSelection,
 } from './audioscope/controllers/playbackRate';
+import { createAudioscopeTransportLoopController } from './audioscope/controllers/transportLoop';
+import { createAudioscopeViewportController } from './audioscope/controllers/viewport';
 import {
   createAudioscopeLoadController,
   type AudioscopeWorkerBootstrapStateKey,
@@ -26,7 +30,6 @@ import type {
   AnalysisRenderBackend,
   AnalysisSurfaceResetReason,
   EngineWorkerToMainMessage,
-  PlaybackClockState,
   SampleInfoPayload,
   SetViewportIntentMessage,
   SpectrogramAnalysisType,
@@ -287,84 +290,12 @@ const state = {
   waveformViewport: createInitialWaveformViewportState(),
 };
 
-function ensureKeyboardSurfaceTarget(): void {
-  if (document.body.tabIndex !== -1) {
-    document.body.tabIndex = -1;
-  }
-}
-
-function focusKeyboardSurface(): void {
-  if (document.visibilityState !== 'visible') {
-    return;
-  }
-
-  ensureKeyboardSurfaceTarget();
-  window.focus();
-
-  if (document.activeElement !== document.body) {
-    document.body.focus({ preventScroll: true });
-  }
-}
-
-function scheduleKeyboardSurfaceFocus(): void {
-  queueMicrotask(() => {
-    window.requestAnimationFrame(() => {
-      focusKeyboardSurface();
-    });
-  });
-}
-
-function initializeKeyboardSurfaceFocus(): void {
-  ensureKeyboardSurfaceTarget();
-  scheduleKeyboardSurfaceFocus();
-  window.setTimeout(() => {
-    focusKeyboardSurface();
-  }, 120);
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      scheduleKeyboardSurfaceFocus();
-    }
-  });
-}
-
-function isTextEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) {
-    return false;
-  }
-
-  if (target.isContentEditable || target.closest('[contenteditable="true"]')) {
-    return true;
-  }
-
-  const field = target.closest('input, textarea');
-
-  if (field instanceof HTMLTextAreaElement) {
-    return true;
-  }
-
-  if (!(field instanceof HTMLInputElement)) {
-    return false;
-  }
-
-  const inputType = field.type.toLowerCase();
-
-  return inputType === 'email'
-    || inputType === 'number'
-    || inputType === 'password'
-    || inputType === 'search'
-    || inputType === 'tel'
-    || inputType === 'text'
-    || inputType === 'url';
-}
-
-function preventPointerFocus(event: PointerEvent): void {
-  if (event.pointerType === 'mouse' && event.button !== 0) {
-    return;
-  }
-
-  event.preventDefault();
-}
+const {
+  initializeKeyboardSurfaceFocus,
+  isTextEditableTarget,
+  preventPointerFocus,
+  scheduleKeyboardSurfaceFocus,
+} = createAudioscopeFocusController();
 
 const {
   renderLoudnessSummary,
@@ -395,6 +326,59 @@ const {
   elements,
   scheduleKeyboardSurfaceFocus,
   state,
+});
+
+const {
+  destroySession,
+  disposeAnalysisWorker,
+  disposeEngineWorker,
+} = createAudioscopeLifecycleController({
+  createInitialWaveformViewportState,
+  elements,
+  hideSurfaceHoverTooltip,
+  hideWaveformSampleMarker,
+  renderSpectrogramMeta,
+  renderSpectrogramScale,
+  renderWaveformUi,
+  state,
+});
+
+const {
+  hasPlaybackTransport,
+  seekBy,
+  setPlaybackPositionFromFrame,
+  startPlaybackLoop,
+  syncTransport,
+  togglePlayback,
+} = createAudioscopeTransportLoopController({
+  elements,
+  frameToSeconds,
+  getDurationFrames,
+  getEffectiveDurationSeconds,
+  getSampleRate,
+  renderMediaMetadata,
+  state,
+  syncPlaybackRateControl,
+});
+
+const {
+  applyViewportSplit,
+  attachResizeObservers,
+  handleViewportWheel,
+  updateViewportSplitRatioFromClientY,
+} = createAudioscopeViewportController({
+  defaultViewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
+  displayPixelRatio: DISPLAY_PIXEL_RATIO,
+  elements,
+  getDurationFrames,
+  getSpectrogramCanvasTargetSize,
+  getWaveformViewportSize,
+  scheduleSpectrogramRender,
+  sendViewportIntent,
+  splitterFallbackSizePx: VIEWPORT_SPLITTER_FALLBACK_SIZE_PX,
+  state,
+  viewportRatioMax: VIEWPORT_RATIO_MAX,
+  viewportRatioMin: VIEWPORT_RATIO_MIN,
 });
 
 function setAnalysisStatus(message: string, isError = false): void {
@@ -658,44 +642,6 @@ function createModuleWorker(
   return new Worker(bootstrapUrl, { type: 'module' });
 }
 
-function disposeEngineWorker(): void {
-  if (state.engineWorker) {
-    state.engineWorker.terminate();
-    state.engineWorker = null;
-  }
-
-  if (state.engineWorkerBootstrapUrl) {
-    URL.revokeObjectURL(state.engineWorkerBootstrapUrl);
-    state.engineWorkerBootstrapUrl = null;
-  }
-}
-
-function disposeAnalysisWorker(): void {
-  if (state.analysisWorker) {
-    state.analysisWorker.postMessage({ type: 'disposeSession' });
-    state.analysisWorker.terminate();
-    state.analysisWorker = null;
-  }
-
-  state.analysisRuntimeReadyPromise = null;
-  state.resolveAnalysisRuntimeReady = null;
-  state.analysis = null;
-  state.spectrogramSurfaceResetPromise = null;
-  window.cancelAnimationFrame(state.spectrogramFrame);
-  state.spectrogramFrame = 0;
-  state.spectrogramRenderForcePending = false;
-  if (state.spectrogramConfigApplyTimer) {
-    window.clearTimeout(state.spectrogramConfigApplyTimer);
-    state.spectrogramConfigApplyTimer = null;
-  }
-  state.spectrogramConfigPersistPending = false;
-
-  if (state.analysisWorkerBootstrapUrl) {
-    URL.revokeObjectURL(state.analysisWorkerBootstrapUrl);
-    state.analysisWorkerBootstrapUrl = null;
-  }
-}
-
 function createSpectrogramAnalysisState(
   duration: number,
   quality: 'balanced' | 'high' | 'max',
@@ -867,177 +813,6 @@ async function resetSpectrogramSurface(loadToken: number, reason: AnalysisSurfac
     });
 
   return state.spectrogramSurfaceResetPromise;
-}
-
-function destroySession(): void {
-  if (state.spectrogramDefaultsPersistTimer) {
-    window.clearTimeout(state.spectrogramDefaultsPersistTimer);
-    state.spectrogramDefaultsPersistTimer = null;
-  }
-  if (state.spectrogramConfigApplyTimer) {
-    window.clearTimeout(state.spectrogramConfigApplyTimer);
-    state.spectrogramConfigApplyTimer = null;
-  }
-  state.spectrogramConfigPersistPending = false;
-  window.cancelAnimationFrame(state.playbackFrame);
-  state.playbackFrame = 0;
-  window.cancelAnimationFrame(state.spectrogramFrame);
-  state.spectrogramFrame = 0;
-  state.spectrogramRenderForcePending = false;
-  state.selectionDrag = null;
-  state.loopHandleDrag = null;
-  state.engineUiState = null;
-  state.hoverState.waveform = null;
-  state.hoverState.spectrogram = null;
-  state.lastAppliedTransportCommandSerial = 0;
-  hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
-  hideSurfaceHoverTooltip(elements.spectrogramHoverTooltip);
-  hideWaveformSampleMarker();
-  disposeAnalysisWorker();
-  disposeEngineWorker();
-  const audioTransport = state.audioTransport;
-  state.audioTransport = null;
-  void audioTransport?.dispose();
-  state.playbackSession = null;
-  state.waveformCanvas = null;
-  state.spectrogramCanvas = null;
-  state.engineSurfacesPosted = false;
-  state.waveformViewport = createInitialWaveformViewportState();
-  state.followPlayback = false;
-  renderWaveformUi();
-  renderSpectrogramScale();
-  renderSpectrogramMeta();
-}
-
-function createPlaybackTransport(loadToken: number): AudioTransport {
-  const transport = createAudioTransport({
-    onStateChange: () => {
-      if (state.loadToken !== loadToken || state.audioTransport !== transport) {
-        return;
-      }
-
-      state.playbackTransportKind = transport.getTransportKind();
-      state.playbackTransportError = transport.getLastFallbackReason();
-      renderMediaMetadata();
-
-      if (transport.isPlaying()) {
-        startPlaybackLoop();
-        return;
-      }
-
-      syncTransport();
-    },
-    stretchModuleUrl: stretchProcessorScriptUri,
-    workletModuleUrl: audioTransportProcessorScriptUri,
-  });
-
-  state.playbackTransportKind = transport.getTransportKind();
-  state.playbackTransportError = transport.getLastFallbackReason();
-  transport.setPlaybackRate(state.playbackRate);
-  return transport;
-}
-
-function getPlaybackClockState(): PlaybackClockSnapshot | null {
-  return state.audioTransport?.getPlaybackClockState() ?? null;
-}
-
-function toWorkerClockState(clock: PlaybackClockSnapshot | null): PlaybackClockState {
-  return clock
-    ? {
-      currentFrameFloat: clock.currentFrameFloat,
-      durationFrames: clock.durationFrames,
-      loopEndFrame: clock.loopEndFrame,
-      loopStartFrame: clock.loopStartFrame,
-      playing: clock.playing,
-      sampleRate: clock.sampleRate,
-    }
-    : {
-      currentFrameFloat: 0,
-      durationFrames: getDurationFrames(),
-      loopEndFrame: null,
-      loopStartFrame: null,
-      playing: false,
-      sampleRate: getSampleRate(),
-    };
-}
-
-function hasPlaybackTransport(): boolean {
-  return Boolean(state.audioTransport)
-    && (state.playbackTransportKind === 'audio-worklet-copy' || state.playbackTransportKind === 'audio-worklet-stretch')
-    && getEffectiveDurationSeconds() > 0;
-}
-
-function startPlaybackLoop(): void {
-  window.cancelAnimationFrame(state.playbackFrame);
-  state.playbackFrame = window.requestAnimationFrame(() => {
-    state.playbackFrame = 0;
-    syncTransport();
-  });
-}
-
-function syncTransport(): void {
-  const clock = getPlaybackClockState();
-  const durationSeconds = getEffectiveDurationSeconds();
-  const currentTime = clock && clock.sampleRate > 0
-    ? frameToSeconds(Math.round(clock.currentFrameFloat))
-    : 0;
-
-  elements.playToggle.disabled = !hasPlaybackTransport();
-  elements.playToggle.textContent = state.audioTransport?.isPlaying() ? 'Pause' : 'Play';
-  elements.seekBackward.disabled = !hasPlaybackTransport();
-  elements.seekForward.disabled = !hasPlaybackTransport();
-  elements.playbackRateSelect.disabled = !state.audioTransport;
-  elements.playbackRateSelect.value = String(state.playbackRate);
-  elements.timeReadout.textContent = `${formatTime(currentTime)} / ${formatTime(durationSeconds)}`;
-  syncPlaybackRateControl();
-
-  if (state.engineWorker) {
-    state.engineWorker.postMessage({
-      type: 'PlaybackClockTick',
-      body: toWorkerClockState(clock),
-    });
-  }
-
-  if (state.audioTransport?.isPlaying()) {
-    startPlaybackLoop();
-  }
-}
-
-function setPlaybackPositionFromFrame(frame: number): void {
-  if (!state.audioTransport) {
-    return;
-  }
-
-  state.audioTransport.seek(frameToSeconds(frame));
-  syncTransport();
-}
-
-function seekBy(deltaSeconds: number): void {
-  if (!state.audioTransport || !Number.isFinite(deltaSeconds)) {
-    return;
-  }
-  const currentTime = state.audioTransport.getCurrentTime();
-  state.audioTransport.seek(currentTime + deltaSeconds);
-  syncTransport();
-}
-
-async function togglePlayback(): Promise<void> {
-  if (!state.audioTransport) {
-    return;
-  }
-
-  if (!state.audioTransport.isPlaying()) {
-    try {
-      await state.audioTransport.play();
-    } catch (error) {
-      state.playbackTransportError = error instanceof Error ? error.message : String(error);
-      renderMediaMetadata();
-    }
-  } else {
-    state.audioTransport.pause();
-  }
-
-  syncTransport();
 }
 
 function applyTransportCommand(command: TransportCommand | null): void {
@@ -2167,137 +1942,6 @@ function bindLoopHandle(handle: HTMLElement, edge: 'end' | 'start', target: HTML
       surface,
     });
   });
-}
-
-function handleViewportWheel(event: WheelEvent, surface: SurfaceKind, target: HTMLElement): void {
-  if (!state.engineWorker || getDurationFrames() <= 0) {
-    return;
-  }
-  event.preventDefault();
-  const rect = target.getBoundingClientRect();
-  sendViewportIntent({
-    deltaMode: event.deltaMode,
-    deltaX: event.deltaX,
-    deltaY: event.deltaY,
-    kind: 'wheel',
-    pointerRatioX: rect.width > 0 ? clamp((event.clientX - rect.left) / rect.width, 0, 1) : 0.5,
-    surface,
-  });
-}
-
-function getNumericStyleSize(element: HTMLElement | null | undefined, propertyName: string, fallback = 0): number {
-  if (!element) {
-    return fallback;
-  }
-
-  const computedValue = Number.parseFloat(window.getComputedStyle(element)[propertyName as any]);
-  return Number.isFinite(computedValue) ? computedValue : fallback;
-}
-
-function getViewportSplitterSize(): number {
-  return Math.max(
-    1,
-    elements.viewportSplitter?.offsetHeight
-      || getNumericStyleSize(elements.viewportSplitter, 'minHeight', VIEWPORT_SPLITTER_FALLBACK_SIZE_PX),
-  );
-}
-
-function getWavePanelChromeHeight(): number {
-  return Math.max(0, elements.waveToolbar?.offsetHeight || 0) + Math.max(0, elements.waveformAxis?.offsetHeight || 0);
-}
-
-function applyViewportSplit(force = false): void {
-  const splitterSize = getViewportSplitterSize();
-  const wavePanelChromeHeight = getWavePanelChromeHeight();
-  const availableHeight = Math.max(0, elements.viewport.clientHeight - splitterSize - wavePanelChromeHeight);
-
-  if (availableHeight <= 0) {
-    const nextTemplate = `${wavePanelChromeHeight}px ${splitterSize}px 0px`;
-    if (force || elements.viewport.style.gridTemplateRows !== nextTemplate) {
-      elements.viewport.style.gridTemplateRows = nextTemplate;
-    }
-    return;
-  }
-
-  const desiredWaveHeight = availableHeight * clamp(state.viewportSplitRatio, VIEWPORT_RATIO_MIN, VIEWPORT_RATIO_MAX);
-  const waveHeight = Math.round(clamp(desiredWaveHeight, 0, availableHeight));
-  const spectrogramHeight = Math.max(0, availableHeight - waveHeight);
-  const nextTemplate = `${wavePanelChromeHeight + waveHeight}px ${splitterSize}px ${spectrogramHeight}px`;
-
-  if (!force && elements.viewport.style.gridTemplateRows === nextTemplate) {
-    return;
-  }
-
-  elements.viewport.style.gridTemplateRows = nextTemplate;
-}
-
-function updateViewportSplitRatioFromClientY(clientY: number): void {
-  const splitterSize = getViewportSplitterSize();
-  const wavePanelChromeHeight = getWavePanelChromeHeight();
-  const viewportRect = elements.viewport.getBoundingClientRect();
-  const availableHeight = Math.max(0, viewportRect.height - splitterSize - wavePanelChromeHeight);
-  if (availableHeight <= 0) {
-    return;
-  }
-
-  const proposedWaveHeight = clamp(
-    clientY - viewportRect.top - wavePanelChromeHeight - splitterSize / 2,
-    0,
-    availableHeight,
-  );
-  state.viewportSplitRatio = clamp(proposedWaveHeight / availableHeight, VIEWPORT_RATIO_MIN, VIEWPORT_RATIO_MAX);
-  applyViewportSplit(true);
-}
-
-function attachResizeObservers(): void {
-  const resizeObserver = new ResizeObserver(() => {
-    applyViewportSplit();
-    const waveformSize = getWaveformViewportSize();
-    const spectrogramSize = getSpectrogramCanvasTargetSize();
-    const overviewWidth = Math.max(1, elements.waveformOverview.clientWidth);
-
-    const changed =
-      state.observedWaveformViewportWidth !== waveformSize.width
-      || state.observedWaveformViewportHeight !== waveformSize.height
-      || state.observedSpectrogramPixelWidth !== spectrogramSize.pixelWidth
-      || state.observedSpectrogramPixelHeight !== spectrogramSize.pixelHeight
-      || state.observedOverviewWidth !== overviewWidth;
-
-    if (!changed) {
-      return;
-    }
-
-    state.observedWaveformViewportWidth = waveformSize.width;
-    state.observedWaveformViewportHeight = waveformSize.height;
-    state.observedSpectrogramPixelWidth = spectrogramSize.pixelWidth;
-    state.observedSpectrogramPixelHeight = spectrogramSize.pixelHeight;
-    state.observedOverviewWidth = overviewWidth;
-
-    sendViewportIntent({
-      kind: 'resize',
-      spectrogramPixelHeight: spectrogramSize.pixelHeight,
-      spectrogramPixelWidth: spectrogramSize.pixelWidth,
-      waveformHeightCssPx: waveformSize.height,
-      waveformRenderScale: DISPLAY_PIXEL_RATIO,
-      waveformWidthCssPx: waveformSize.width,
-    });
-
-    if (state.analysisWorker) {
-      state.analysisWorker.postMessage({
-        type: 'resizeCanvas',
-        body: {
-          pixelHeight: spectrogramSize.pixelHeight,
-          pixelWidth: spectrogramSize.pixelWidth,
-        },
-      });
-      scheduleSpectrogramRender({ force: true });
-    }
-  });
-
-  resizeObserver.observe(document.body);
-  resizeObserver.observe(elements.viewport);
-  resizeObserver.observe(elements.waveformViewport);
-  resizeObserver.observe(elements.waveformOverview);
 }
 
 function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerToMainMessage): void {

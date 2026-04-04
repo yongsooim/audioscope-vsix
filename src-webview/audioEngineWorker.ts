@@ -43,55 +43,58 @@ import {
 } from './waveCoreRuntime';
 import { normalizeSpectrogramWindowFunction, WINDOW_FUNCTION_CODES } from './windowShared';
 import {
-  WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
-  WAVEFORM_BOTTOM_PADDING_PX as WAVEFORM_BOTTOM_PADDING_PX,
-  WAVEFORM_TOP_PADDING_PX as WAVEFORM_TOP_PADDING_PX,
-} from './interactive-waveform/geometry';
-import {
   CHROMA_BIN_COUNT,
   CQT_DEFAULT_FMIN,
   getChromaBinAtPosition,
   getChromaLabel,
 } from './audio-analysis/chromaShared';
+import {
+  clearWaveformSurface,
+  drawRawSamplePlot,
+  drawRepresentativeSamplePlot,
+  drawWaveformEnvelope,
+  formatMfccValue,
+  formatSampleOrdinal,
+  formatSampleValue,
+  getWaveformMarkerYRatio,
+  pickRepresentativeSamplePoint,
+  resolveWaveformPlotMode,
+} from './audio-engine-worker/waveformRender';
+import {
+  DEFAULT_MFCC_COEFFICIENT_COUNT,
+  DEFAULT_MFCC_MEL_BAND_COUNT,
+  DEFAULT_SCALOGRAM_HOP_SAMPLES,
+  DEFAULT_SCALOGRAM_MAX_FREQUENCY,
+  DEFAULT_SCALOGRAM_MIN_FREQUENCY,
+  DEFAULT_SCALOGRAM_OMEGA0,
+  DEFAULT_SCALOGRAM_ROW_DENSITY,
+  FFT_SIZE_OPTIONS,
+  getDefaultSpectrogramDbWindow,
+  isChromaAnalysisType,
+  LIBROSA_DEFAULT_MEL_BAND_COUNT,
+  normalizeMelBandCount,
+  normalizeMfccCoefficientCount,
+  normalizeMfccMelBandCount,
+  normalizeScalogramFrequencyRange,
+  normalizeScalogramHopSamples,
+  normalizeScalogramOmega0,
+  normalizeScalogramRowDensity,
+  normalizeSpectrogramDbWindow,
+  OVERLAP_RATIO_OPTIONS,
+} from './audio-engine-worker/spectrogramConfig';
 
-const CENTER_LINE_ALPHA = 0.14;
-const DISPLAY_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 24;
-const DISPLAY_RAW_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 1;
 const LOOP_HANDLE_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const MAX_FREQUENCY = 20000;
 const MIN_FREQUENCY = 20;
-const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
-const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
-const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
 const ROW_BUCKET_SIZE = 16;
-const DEFAULT_MFCC_COEFFICIENT_COUNT = 20;
-const DEFAULT_MFCC_MEL_BAND_COUNT = 128;
-const MFCC_COEFFICIENT_OPTIONS = [13, 20, 32, 40];
-const LIBROSA_DEFAULT_MEL_BAND_COUNT = 256;
-const MEL_BAND_COUNT_OPTIONS = [128, 256, 512];
-const DEFAULT_SCALOGRAM_OMEGA0 = 6;
-const DEFAULT_SCALOGRAM_ROW_DENSITY = 1;
-const DEFAULT_SCALOGRAM_MIN_FREQUENCY = 20;
-const DEFAULT_SCALOGRAM_MAX_FREQUENCY = 20000;
-const DEFAULT_SCALOGRAM_HOP_SAMPLES = 1024;
-const SCALOGRAM_OMEGA_OPTIONS = [4, 5, 6, 7, 8, 10, 12];
-const SCALOGRAM_ROW_DENSITY_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 3, 4];
-const SCALOGRAM_HOP_SAMPLES_OPTIONS = [256, 512, 1024, 2048, 4096];
-const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
-const SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 28;
-const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
-const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
 const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
 const SCALOGRAM_ROW_BLOCK_SIZE = 32;
 const SPECTROGRAM_COLUMN_CHUNK_SIZE = 32;
 const SPECTROGRAM_LINEAR_TICK_COUNT = 6;
-const SYMMETRIC_ENVELOPE_GAIN = 0.76;
 const VISIBLE_ROW_OVERSAMPLE = 1.35;
 const WAVEFORM_FOLLOW_RATIO = 0.5;
 const WAVEFORM_MAX_ZOOM_PIXELS_PER_SAMPLE = 8;
-const WAVEFORM_RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 0.9;
-const WAVEFORM_RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 1.15;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2;
 const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
@@ -131,13 +134,6 @@ const QUALITY_PRESETS = {
   },
 } as const;
 
-const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
-const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
-const SPECTROGRAM_DB_WINDOW_LIMITS = {
-  max: 12,
-  min: -120,
-  minimumSpan: 6,
-} as const;
 const COLORMAP_DISTRIBUTION_GAMMAS: Record<SpectrogramColormapDistribution, number> = {
   balanced: 1,
   contrast: 1.18,
@@ -689,139 +685,6 @@ function handleViewportIntent(message: SetViewportIntentMessage): void {
   applyViewportIntent(message.body);
 }
 
-function getDefaultSpectrogramDbWindow(analysisType: SpectrogramAnalysisType): {
-  maxDecibels: number;
-  minDecibels: number;
-} {
-  if (analysisType === 'mel') {
-    return { minDecibels: -92, maxDecibels: 0 };
-  }
-  if (analysisType === 'mfcc') {
-    return { minDecibels: -80, maxDecibels: 0 };
-  }
-  if (analysisType === 'scalogram') {
-    return { minDecibels: -72, maxDecibels: 0 };
-  }
-  return { minDecibels: -80, maxDecibels: 0 };
-}
-
-function normalizeSpectrogramDbWindow(
-  minValue: unknown,
-  maxValue: unknown,
-  analysisType: SpectrogramAnalysisType,
-): {
-  maxDecibels: number;
-  minDecibels: number;
-} {
-  const defaults = getDefaultSpectrogramDbWindow(analysisType);
-  let minDecibels = Number.isFinite(Number(minValue)) ? Math.round(Number(minValue)) : defaults.minDecibels;
-  let maxDecibels = Number.isFinite(Number(maxValue)) ? Math.round(Number(maxValue)) : defaults.maxDecibels;
-
-  minDecibels = clamp(
-    minDecibels,
-    SPECTROGRAM_DB_WINDOW_LIMITS.min,
-    SPECTROGRAM_DB_WINDOW_LIMITS.max - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
-  );
-  maxDecibels = clamp(
-    maxDecibels,
-    SPECTROGRAM_DB_WINDOW_LIMITS.min + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
-    SPECTROGRAM_DB_WINDOW_LIMITS.max,
-  );
-
-  if (maxDecibels < minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan) {
-    maxDecibels = Math.min(
-      SPECTROGRAM_DB_WINDOW_LIMITS.max,
-      minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
-    );
-    minDecibels = Math.min(
-      minDecibels,
-      maxDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
-    );
-  }
-
-  return { minDecibels, maxDecibels };
-}
-
-function normalizeMelBandCount(value: unknown): number {
-  const numericValue = Number(value);
-  return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
-    ? numericValue
-    : LIBROSA_DEFAULT_MEL_BAND_COUNT;
-}
-
-function normalizeMfccCoefficientCount(value: unknown): number {
-  const numericValue = Number(value);
-  return MFCC_COEFFICIENT_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_MFCC_COEFFICIENT_COUNT;
-}
-
-function normalizeMfccMelBandCount(value: unknown): number {
-  const numericValue = Number(value);
-  return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_MFCC_MEL_BAND_COUNT;
-}
-
-function normalizeScalogramOmega0(value: unknown): number {
-  const numericValue = Number(value);
-  return SCALOGRAM_OMEGA_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_SCALOGRAM_OMEGA0;
-}
-
-function normalizeScalogramRowDensity(value: unknown): number {
-  const numericValue = Number(value);
-  return SCALOGRAM_ROW_DENSITY_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_SCALOGRAM_ROW_DENSITY;
-}
-
-function normalizeScalogramHopSamples(value: unknown): number {
-  const numericValue = Number(value);
-  return SCALOGRAM_HOP_SAMPLES_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_SCALOGRAM_HOP_SAMPLES;
-}
-
-function normalizeScalogramFrequencyRange(minValue: unknown, maxValue: unknown): {
-  maxFrequency: number;
-  minFrequency: number;
-} {
-  const ceiling = Math.max(
-    DEFAULT_SCALOGRAM_MIN_FREQUENCY + 1,
-    Math.min(MAX_FREQUENCY, Math.round(state.session.maxFrequency || DEFAULT_SCALOGRAM_MAX_FREQUENCY)),
-  );
-  let minFrequency = Number.isFinite(Number(minValue))
-    ? Math.round(Number(minValue))
-    : DEFAULT_SCALOGRAM_MIN_FREQUENCY;
-  let maxFrequency = Number.isFinite(Number(maxValue))
-    ? Math.round(Number(maxValue))
-    : Math.min(DEFAULT_SCALOGRAM_MAX_FREQUENCY, ceiling);
-
-  minFrequency = clamp(
-    minFrequency,
-    DEFAULT_SCALOGRAM_MIN_FREQUENCY,
-    Math.max(DEFAULT_SCALOGRAM_MIN_FREQUENCY, ceiling - 1),
-  );
-  maxFrequency = clamp(
-    maxFrequency,
-    Math.min(ceiling, minFrequency + 1),
-    ceiling,
-  );
-
-  if (maxFrequency <= minFrequency) {
-    maxFrequency = Math.min(ceiling, minFrequency + 1);
-    minFrequency = Math.min(minFrequency, maxFrequency - 1);
-  }
-
-  return { minFrequency, maxFrequency };
-}
-
-function isChromaAnalysisType(analysisType: SpectrogramAnalysisType): boolean {
-  return analysisType === 'chroma';
-}
-
 function handleSpectrogramConfig(config: {
   analysisType: SpectrogramAnalysisType;
   colormapDistribution: SpectrogramColormapDistribution;
@@ -866,6 +729,7 @@ function handleSpectrogramConfig(config: {
   const nextScalogramOmega0 = normalizeScalogramOmega0(config.scalogramOmega0);
   const nextScalogramRowDensity = normalizeScalogramRowDensity(config.scalogramRowDensity);
   const nextScalogramFrequencyRange = normalizeScalogramFrequencyRange(
+    state.session.maxFrequency,
     config.scalogramMinFrequency,
     config.scalogramMaxFrequency,
   );
@@ -1578,7 +1442,11 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
   const samplesPerPixel = visibleSampleCount / columnCount;
   const pixelsPerSample = columnCount / visibleSampleCount;
   const sampleData = getWaveformSampleData(module);
-  const plotMode = resolveWaveformPlotMode(samplesPerPixel, sampleData instanceof Float32Array);
+  const plotMode = resolveWaveformPlotMode(
+    state.viewport.plotMode,
+    samplesPerPixel,
+    sampleData instanceof Float32Array,
+  );
   const samplePlotMode = plotMode !== 'envelope';
   const rawSamplePlotMode = plotMode === 'raw';
 
@@ -1937,6 +1805,7 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     : normalizeMelBandCount(state.spectrogramConfig.melBandCount);
   const mfccCoefficientCount = normalizeMfccCoefficientCount(state.spectrogramConfig.mfccCoefficientCount);
   const scalogramFrequencyRange = normalizeScalogramFrequencyRange(
+    state.session.maxFrequency,
     state.spectrogramConfig.scalogramMinFrequency,
     state.spectrogramConfig.scalogramMaxFrequency,
   );
@@ -2411,7 +2280,7 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
     label: `${timeLabel} - Sample ${formatSampleOrdinal(sampleIndex + 1)}, Value ${formatSampleValue(sampleValue)}`,
     markerVisible: true,
     markerXRatio: spanFrames <= 0 ? 0 : clamp01((sampleIndex - sampleStartFrame) / Math.max(1, visibleSampleSpan)),
-    markerYRatio: getWaveformMarkerYRatio(sampleValue),
+    markerYRatio: getWaveformMarkerYRatio(state.waveformSurface.heightCssPx, sampleValue),
     requestId,
     surface: 'waveform',
   };
@@ -2530,6 +2399,7 @@ function getActiveSpectrogramFrequencyRange(): {
 } {
   if (state.spectrogramConfig.analysisType === 'scalogram') {
     return normalizeScalogramFrequencyRange(
+      state.session.maxFrequency,
       state.spectrogramConfig.scalogramMinFrequency,
       state.spectrogramConfig.scalogramMaxFrequency,
     );
@@ -2825,383 +2695,6 @@ function ensureWaveformSliceCapacity(module: WaveCoreModule, floatCount: number)
   state.session.waveformSliceCapacity = floatCount;
   state.session.waveformSlice = getHeapF32View(module, pointer, floatCount);
   return state.session.waveformSlice;
-}
-
-function clearWaveformSurface(
-  context: OffscreenCanvasRenderingContext2D,
-  canvas: OffscreenCanvas,
-): void {
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  context.clearRect(0, 0, canvas.width, canvas.height);
-}
-
-function drawWaveformEnvelope(
-  context: OffscreenCanvasRenderingContext2D,
-  canvas: OffscreenCanvas,
-  slice: Float32Array,
-  columnCount: number,
-  heightCssPx: number,
-  renderScale: number,
-  color: string,
-): void {
-  const deviceWidth = Math.max(1, canvas.width);
-  const deviceHeight = Math.max(1, canvas.height);
-  const chartTop = Math.round(WAVEFORM_TOP_PADDING_PX * renderScale);
-  const chartBottom = Math.max(chartTop + 1, Math.round((heightCssPx - WAVEFORM_BOTTOM_PADDING_PX) * renderScale));
-  const chartHeight = Math.max(1, chartBottom - chartTop);
-  const midY = chartTop + chartHeight * 0.5;
-  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
-
-  context.imageSmoothingEnabled = true;
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  context.clearRect(0, 0, deviceWidth, deviceHeight);
-  context.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;
-  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, renderScale));
-  context.fillStyle = color;
-
-  const drawColumns = Math.min(columnCount, deviceWidth);
-  for (let x = 0; x < drawColumns; x += 1) {
-    const sourceIndex = x * 2;
-    const minValue = slice[sourceIndex] ?? 0;
-    const maxValue = slice[sourceIndex + 1] ?? 0;
-    const symmetricPeak = Math.max(Math.abs(minValue), Math.abs(maxValue)) * SYMMETRIC_ENVELOPE_GAIN;
-    const top = clamp(Math.round(midY - symmetricPeak * amplitudeHeight), chartTop, chartBottom);
-    const bottom = clamp(Math.round(midY + symmetricPeak * amplitudeHeight), chartTop, chartBottom);
-    context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));
-  }
-}
-
-function drawRepresentativeSamplePlot(
-  context: OffscreenCanvasRenderingContext2D,
-  canvas: OffscreenCanvas,
-  samples: Float32Array,
-  color: string,
-  pixelsPerSample: number,
-  sampleStartFrame: number,
-  visibleSampleCount: number,
-  visibleSampleSpan: number,
-  heightCssPx: number,
-  renderScale: number,
-): void {
-  const drawColumns = Math.min(Math.max(1, canvas.width), Math.max(1, canvas.width));
-  const deviceWidth = Math.max(1, canvas.width);
-  const deviceHeight = Math.max(1, canvas.height);
-  const chartTop = Math.round(WAVEFORM_TOP_PADDING_PX * renderScale);
-  const chartBottom = Math.max(chartTop + 1, Math.round((heightCssPx - WAVEFORM_BOTTOM_PADDING_PX) * renderScale));
-  const chartHeight = Math.max(1, chartBottom - chartTop);
-  const midY = chartTop + chartHeight * 0.5;
-  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
-  const bucketSize = Math.max(1, Math.round(visibleSampleCount / drawColumns));
-  const plotPoints: Array<{ sampleValue: number; x: number }> = [];
-
-  context.imageSmoothingEnabled = true;
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  context.clearRect(0, 0, deviceWidth, deviceHeight);
-  context.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;
-  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, renderScale));
-  context.strokeStyle = color;
-  context.fillStyle = color;
-  context.lineWidth = Math.max(1, renderScale * SAMPLE_PLOT_LINE_WIDTH_SCALE);
-  context.lineJoin = 'round';
-  context.lineCap = 'round';
-  context.beginPath();
-
-  appendWaveformPlotPoint(plotPoints, 0, getInterpolatedSample(samples, sampleStartFrame));
-
-  const bucketStartIndex = Math.floor(sampleStartFrame / bucketSize);
-  const bucketEndIndex = Math.ceil((sampleStartFrame + visibleSampleCount) / bucketSize);
-  for (let bucketIndex = bucketStartIndex; bucketIndex < bucketEndIndex; bucketIndex += 1) {
-    const samplePoint = pickRepresentativeSamplePoint(samples, bucketIndex * bucketSize, bucketIndex * bucketSize + bucketSize);
-    if (!samplePoint) {
-      continue;
-    }
-    appendWaveformPlotPoint(
-      plotPoints,
-      getRenderableSampleX(samplePoint.sampleIndex, sampleStartFrame, visibleSampleSpan, drawColumns),
-      samplePoint.sampleValue,
-    );
-  }
-
-  appendWaveformPlotPoint(
-    plotPoints,
-    Math.max(0, drawColumns - 1),
-    getInterpolatedSample(samples, sampleStartFrame + visibleSampleSpan),
-  );
-
-  for (let pointIndex = 0; pointIndex < plotPoints.length; pointIndex += 1) {
-    const plotPoint = plotPoints[pointIndex];
-    const y = clamp(midY - plotPoint.sampleValue * amplitudeHeight, chartTop, chartBottom);
-    if (pointIndex === 0) {
-      context.moveTo(plotPoint.x, y);
-    } else {
-      context.lineTo(plotPoint.x, y);
-    }
-  }
-  context.stroke();
-
-  if (pixelsPerSample >= SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE) {
-    const pointSize = Math.max(1.5, renderScale * 1.1);
-    context.beginPath();
-    for (const plotPoint of plotPoints) {
-      const y = clamp(midY - plotPoint.sampleValue * amplitudeHeight, chartTop, chartBottom);
-      context.rect(
-        Math.round(plotPoint.x - pointSize * 0.5),
-        Math.round(y - pointSize * 0.5),
-        Math.max(1, Math.round(pointSize)),
-        Math.max(1, Math.round(pointSize)),
-      );
-    }
-    context.fill();
-  }
-}
-
-function drawRawSamplePlot(
-  context: OffscreenCanvasRenderingContext2D,
-  canvas: OffscreenCanvas,
-  samples: Float32Array,
-  color: string,
-  pixelsPerSample: number,
-  sampleStartFrame: number,
-  visibleSampleSpan: number,
-  heightCssPx: number,
-  renderScale: number,
-): void {
-  const drawColumns = Math.max(1, canvas.width);
-  const deviceWidth = Math.max(1, canvas.width);
-  const deviceHeight = Math.max(1, canvas.height);
-  const chartTop = Math.round(WAVEFORM_TOP_PADDING_PX * renderScale);
-  const chartBottom = Math.max(chartTop + 1, Math.round((heightCssPx - WAVEFORM_BOTTOM_PADDING_PX) * renderScale));
-  const chartHeight = Math.max(1, chartBottom - chartTop);
-  const midY = chartTop + chartHeight * 0.5;
-  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
-  const maxSampleIndex = Math.max(0, samples.length - 1);
-  const firstSampleIndex = Math.max(0, Math.ceil(sampleStartFrame));
-  const lastSampleIndex = Math.min(maxSampleIndex, Math.floor(sampleStartFrame + visibleSampleSpan));
-
-  context.imageSmoothingEnabled = true;
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  context.clearRect(0, 0, deviceWidth, deviceHeight);
-  context.fillStyle = `rgba(255, 255, 255, ${CENTER_LINE_ALPHA})`;
-  context.fillRect(0, Math.round(midY), deviceWidth, Math.max(1, renderScale));
-  context.strokeStyle = color;
-  context.fillStyle = color;
-  context.lineWidth = Math.max(1, renderScale * SAMPLE_PLOT_LINE_WIDTH_SCALE);
-  context.lineJoin = 'round';
-  context.lineCap = 'round';
-  context.beginPath();
-  const startY = clamp(midY - getInterpolatedSample(samples, sampleStartFrame) * amplitudeHeight, chartTop, chartBottom);
-  context.moveTo(0, startY);
-
-  for (let sampleIndex = firstSampleIndex; sampleIndex <= lastSampleIndex; sampleIndex += 1) {
-    const x = getRenderableSampleX(sampleIndex, sampleStartFrame, visibleSampleSpan, drawColumns);
-    const sampleValue = clamp(samples[sampleIndex] ?? 0, -1, 1);
-    const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
-    context.lineTo(x, y);
-  }
-
-  const endX = Math.max(0, drawColumns - 1);
-  const endY = clamp(
-    midY - getInterpolatedSample(samples, sampleStartFrame + visibleSampleSpan) * amplitudeHeight,
-    chartTop,
-    chartBottom,
-  );
-  context.lineTo(endX, endY);
-  context.stroke();
-
-  if (pixelsPerSample >= SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE) {
-    if (pixelsPerSample / Math.max(1, renderScale) >= RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE) {
-      drawRawSampleMarkers(
-        context,
-        samples,
-        sampleStartFrame,
-        visibleSampleSpan,
-        drawColumns,
-        midY,
-        amplitudeHeight,
-        chartTop,
-        chartBottom,
-        renderScale,
-      );
-      return;
-    }
-
-    const pointSize = Math.max(1.5, renderScale * 1.1);
-    context.beginPath();
-    for (let sampleIndex = firstSampleIndex; sampleIndex <= lastSampleIndex; sampleIndex += 1) {
-      const x = getRenderableSampleX(sampleIndex, sampleStartFrame, visibleSampleSpan, drawColumns);
-      const sampleValue = clamp(samples[sampleIndex] ?? 0, -1, 1);
-      const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
-      context.rect(
-        Math.round(x - pointSize * 0.5),
-        Math.round(y - pointSize * 0.5),
-        Math.max(1, Math.round(pointSize)),
-        Math.max(1, Math.round(pointSize)),
-      );
-    }
-    context.fill();
-  }
-}
-
-function drawRawSampleMarkers(
-  context: OffscreenCanvasRenderingContext2D,
-  samples: Float32Array,
-  sampleStartFrame: number,
-  visibleSampleSpan: number,
-  drawColumns: number,
-  midY: number,
-  amplitudeHeight: number,
-  chartTop: number,
-  chartBottom: number,
-  renderScale: number,
-): void {
-  const maxSampleIndex = Math.max(0, samples.length - 1);
-  const firstSampleIndex = Math.max(0, Math.ceil(sampleStartFrame));
-  const lastSampleIndex = Math.min(maxSampleIndex, Math.floor(sampleStartFrame + visibleSampleSpan));
-  if (lastSampleIndex < firstSampleIndex) {
-    return;
-  }
-
-  const radius = Math.max(1, RAW_SAMPLE_MARKER_RADIUS_CSS_PX * renderScale);
-  context.save();
-  context.fillStyle = RAW_SAMPLE_MARKER_FILL;
-  context.beginPath();
-  for (let sampleIndex = firstSampleIndex; sampleIndex <= lastSampleIndex; sampleIndex += 1) {
-    const x = getRenderableSampleX(sampleIndex, sampleStartFrame, visibleSampleSpan, drawColumns);
-    const sampleValue = clamp(samples[sampleIndex] ?? 0, -1, 1);
-    const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
-    context.moveTo(x + radius, y);
-    context.arc(x, y, radius, 0, Math.PI * 2);
-  }
-  context.fill();
-  context.restore();
-}
-
-function resolveWaveformPlotMode(samplesPerPixel: number, hasSampleData: boolean): WaveformPlotMode {
-  if (!hasSampleData) {
-    return 'envelope';
-  }
-
-  if (state.viewport.plotMode === 'raw') {
-    if (samplesPerPixel <= WAVEFORM_RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL) {
-      return 'raw';
-    }
-    return samplesPerPixel <= SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL ? 'sample' : 'envelope';
-  }
-
-  if (state.viewport.plotMode === 'sample') {
-    if (samplesPerPixel <= WAVEFORM_RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL) {
-      return 'raw';
-    }
-    return samplesPerPixel <= SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL ? 'sample' : 'envelope';
-  }
-
-  if (samplesPerPixel <= WAVEFORM_RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL) {
-    return 'raw';
-  }
-
-  return samplesPerPixel <= SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL ? 'sample' : 'envelope';
-}
-
-function appendWaveformPlotPoint(points: Array<{ sampleValue: number; x: number }>, x: number, sampleValue: number): void {
-  const normalizedValue = clamp(sampleValue ?? 0, -1, 1);
-  const previousPoint = points[points.length - 1] ?? null;
-  if (previousPoint && Math.abs(previousPoint.x - x) <= 0.01) {
-    if (Math.abs(normalizedValue) >= Math.abs(previousPoint.sampleValue)) {
-      previousPoint.sampleValue = normalizedValue;
-    }
-    return;
-  }
-  points.push({ sampleValue: normalizedValue, x });
-}
-
-function getRenderableSampleX(samplePosition: number, sampleStartFrame: number, visibleSampleSpan: number, drawColumns: number): number {
-  const maxX = Math.max(0, drawColumns - 1);
-  if (maxX <= 0 || visibleSampleSpan <= 0) {
-    return 0;
-  }
-  return clamp(((samplePosition - sampleStartFrame) / visibleSampleSpan) * maxX, 0, maxX);
-}
-
-function getInterpolatedSample(samples: Float32Array, position: number): number {
-  const index = Math.floor(position);
-  const nextIndex = Math.min(samples.length - 1, index + 1);
-  const fraction = position - index;
-  const a = clamp(samples[index] ?? 0, -1, 1);
-  const b = clamp(samples[nextIndex] ?? 0, -1, 1);
-  return a + (b - a) * fraction;
-}
-
-function pickRepresentativeSamplePoint(samples: Float32Array, startPosition: number, endPosition: number): { sampleIndex: number; sampleValue: number } | null {
-  const maxSampleIndex = Math.max(0, samples.length - 1);
-  if (maxSampleIndex < 0) {
-    return null;
-  }
-
-  const safeStart = clamp(Math.floor(startPosition), 0, maxSampleIndex);
-  const safeEndExclusive = clamp(Math.max(safeStart + 1, Math.ceil(endPosition)), safeStart + 1, samples.length);
-  const targetCenter = clamp((startPosition + Math.max(startPosition, endPosition - 1)) * 0.5, 0, maxSampleIndex);
-  let minValue = 1;
-  let maxValue = -1;
-
-  for (let sampleIndex = safeStart; sampleIndex < safeEndExclusive; sampleIndex += 1) {
-    const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
-    minValue = Math.min(minValue, value);
-    maxValue = Math.max(maxValue, value);
-  }
-
-  const targetValue = Math.abs(maxValue - minValue) <= 1e-6
-    ? clamp(samples[Math.round(targetCenter)] ?? 0, -1, 1)
-    : clamp((minValue + maxValue) * 0.5, -1, 1);
-
-  let bestIndex = safeStart;
-  let bestValue = clamp(samples[safeStart] ?? 0, -1, 1);
-  let bestScore = Number.POSITIVE_INFINITY;
-  const rangeSpan = Math.max(1, safeEndExclusive - safeStart);
-
-  for (let sampleIndex = safeStart; sampleIndex < safeEndExclusive; sampleIndex += 1) {
-    const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
-    const score = Math.abs(value - targetValue) + (Math.abs(sampleIndex - targetCenter) / rangeSpan);
-    if (score < bestScore) {
-      bestScore = score;
-      bestIndex = sampleIndex;
-      bestValue = value;
-    }
-  }
-
-  return {
-    sampleIndex: bestIndex,
-    sampleValue: bestValue,
-  };
-}
-
-function getWaveformMarkerYRatio(sampleValue: number): number {
-  const heightCssPx = Math.max(1, state.waveformSurface.heightCssPx);
-  const chartTopPx = WAVEFORM_TOP_PADDING_PX;
-  const chartBottomPx = Math.max(chartTopPx + 1, heightCssPx - WAVEFORM_BOTTOM_PADDING_PX);
-  const chartHeightPx = Math.max(1, chartBottomPx - chartTopPx);
-  const midYPx = chartTopPx + chartHeightPx * 0.5;
-  const yPx = clamp(
-    midYPx - sampleValue * chartHeightPx * WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
-    chartTopPx,
-    chartBottomPx,
-  );
-  return clamp01(yPx / heightCssPx);
-}
-
-function formatSampleOrdinal(sampleNumber: number): string {
-  return Number.isFinite(sampleNumber) && sampleNumber > 0
-    ? Math.round(sampleNumber).toLocaleString()
-    : '0';
-}
-
-function formatSampleValue(sampleValue: number): string {
-  const normalized = Math.abs(sampleValue) < 0.00005 ? 0 : sampleValue;
-  return normalized.toFixed(6).replace(/(?:\.0+|(\.\d*?[1-9]))0+$/, '$1');
-}
-
-function formatMfccValue(value: number): string {
-  const normalized = Math.abs(value) < 0.00005 ? 0 : value;
-  return normalized.toFixed(4).replace(/(?:\.0+|(\.\d*?[1-9]))0+$/, '$1');
 }
 
 function framesToSeconds(frame: number): number {

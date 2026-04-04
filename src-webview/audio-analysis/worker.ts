@@ -1,7 +1,6 @@
 import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from '../waveCoreRuntime';
 import {
   TILE_COLUMN_COUNT,
-  quantizeCeil,
 } from '../sharedBuffers';
 import {
   buildConstantQFrequencies,
@@ -12,39 +11,40 @@ import {
 } from './chromaShared';
 import {
   getWindowValue,
-  normalizeSpectrogramWindowFunction,
-  type SpectrogramWindowFunction,
   WINDOW_FUNCTION_CODES,
 } from '../windowShared';
 import {
+  buildTileCacheKey,
+  createLayerReadyBody,
+  createRequestPlan,
+  isChromaAnalysisType,
+  isEquivalentPlan,
+  normalizeQualityPreset,
+  type AnalysisType,
+  type ColormapDistribution,
+  type FrequencyScale,
+  type LayerKind,
+  type QualityPreset,
+  type RenderRequestPlan,
+  type SpectrogramRequest,
+  type WindowFunction,
+} from './requestPlan';
+import {
   ANALYSIS_TYPE_CODES,
   COLORMAP_DISTRIBUTION_GAMMAS,
-  DEFAULT_MFCC_COEFFICIENT_COUNT,
-  DEFAULT_MFCC_MEL_BAND_COUNT,
-  DEFAULT_SCALOGRAM_HOP_SAMPLES,
   DEFAULT_SCALOGRAM_OMEGA0,
-  DEFAULT_SCALOGRAM_ROW_DENSITY,
   ENABLE_EXPERIMENTAL_WEBGPU_COMPOSITOR,
   ENABLE_EXPERIMENTAL_WEBGPU_SCALOGRAM_FFT,
   ENABLE_EXPERIMENTAL_WEBGPU_SPECTROGRAM_COMPUTE,
-  FFT_SIZE_OPTIONS,
   FREQUENCY_SCALE_CODES,
-  LIBROSA_DEFAULT_MEL_BAND_COUNT,
   LOW_FREQUENCY_ENHANCEMENT_MAX_FREQUENCY,
-  MAX_DECIBELS,
   MAX_FREQUENCY,
   MAX_SCALOGRAM_FFT_WINDOW_CACHE_ENTRIES,
   MAX_TILE_CACHE_BYTES,
   MAX_TILE_CACHE_ENTRIES,
-  MEL_BAND_COUNT_OPTIONS,
-  MFCC_COEFFICIENT_OPTIONS,
-  MIN_DECIBELS,
   MIN_FREQUENCY,
   MIXED_FREQUENCY_PIVOT_HZ,
   MIXED_FREQUENCY_PIVOT_RATIO,
-  OVERLAP_RATIO_OPTIONS,
-  QUALITY_PRESETS,
-  ROW_BUCKET_SIZE,
   SLANEY_MEL_FREQUENCY_MIN,
   SLANEY_MEL_FREQUENCY_STEP,
   SLANEY_MEL_LOG_REGION_START_HZ,
@@ -53,13 +53,7 @@ import {
   SCALOGRAM_COLUMN_CHUNK_SIZE,
   SCALOGRAM_FFT_MAX_INPUT_SAMPLES,
   SCALOGRAM_FFT_ROW_BATCH_SIZE,
-  SCALOGRAM_HOP_SAMPLES_OPTIONS,
-  SCALOGRAM_ROW_BLOCK_SIZE,
-  SCALOGRAM_ROW_DENSITY_OPTIONS,
-  SCALOGRAM_OMEGA_OPTIONS,
   SPECTROGRAM_COLUMN_CHUNK_SIZE,
-  SPECTROGRAM_DB_WINDOW_LIMITS,
-  VISIBLE_ROW_OVERSAMPLE,
   WEBGPU_LINEAR_WORKGROUP_SIZE,
   WEBGPU_OVERVIEW_TILE_SUBMIT_BATCH_SIZE,
   WEBGPU_SCALOGRAM_FFT_PARAM_ENTRY_COUNT,
@@ -98,12 +92,6 @@ import {
   WEBGPU_SPECTROGRAM_RENDER_SHADER,
 } from './shaderSpectrogram';
 
-type QualityPreset = 'balanced' | 'high' | 'max';
-type AnalysisType = 'chroma' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
-type ColormapDistribution = keyof typeof COLORMAP_DISTRIBUTION_GAMMAS;
-type FrequencyScale = 'linear' | 'log' | 'mixed';
-type WindowFunction = SpectrogramWindowFunction;
-type LayerKind = 'overview' | 'visible';
 type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
 type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
 type SurfaceResetReason = 'device-lost' | 'surface-invalid';
@@ -121,37 +109,6 @@ interface AudioSessionOptions {
   sampleRate?: number;
   samplesBuffer?: ArrayBuffer;
   sessionVersion?: number;
-}
-
-interface SpectrogramRequest {
-  analysisType?: AnalysisType;
-  colormapDistribution?: ColormapDistribution;
-  configVersion?: number;
-  displayEnd?: number;
-  displayStart?: number;
-  dpr?: number;
-  fftSize?: number;
-  frequencyScale?: FrequencyScale;
-  generation?: number;
-  maxDecibels?: number;
-  melBandCount?: number;
-  mfccCoefficientCount?: number;
-  mfccMelBandCount?: number;
-  minDecibels?: number;
-  overlapRatio?: number;
-  windowFunction?: WindowFunction;
-  scalogramHopSamples?: number;
-  scalogramMaxFrequency?: number;
-  scalogramMinFrequency?: number;
-  scalogramOmega0?: number;
-  scalogramRowDensity?: number;
-  pixelHeight?: number;
-  pixelWidth?: number;
-  requestEnd?: number;
-  requestKind?: LayerKind;
-  requestStart?: number;
-  viewEnd?: number;
-  viewStart?: number;
 }
 
 interface LayerState {
@@ -181,43 +138,6 @@ interface TileRecord {
   tileIndex: number;
   tileKey: string;
   tileStart: number;
-}
-
-interface RenderRequestPlan {
-  analysisType: AnalysisType;
-  colormapDistribution: ColormapDistribution;
-  configKey: string;
-  configVersion: number;
-  decimationFactor: number;
-  displayEnd: number;
-  displayStart: number;
-  dprBucket: number;
-  endTileIndex: number;
-  fftSize: number;
-  frequencyScale: FrequencyScale;
-  generation: number;
-  hopSamples: number;
-  hopSeconds: number;
-  maxDecibels: number;
-  maxFrequency: number;
-  melBandCount: number;
-  mfccCoefficientCount: number;
-  minDecibels: number;
-  minFrequency: number;
-  overlapRatio: number;
-  pixelHeight: number;
-  pixelWidth: number;
-  requestKind: LayerKind;
-  rowCount: number;
-  scalogramOmega0: number;
-  scalogramRowDensity: number;
-  startTileIndex: number;
-  targetColumns: number;
-  tileDuration: number;
-  viewEnd: number;
-  viewStart: number;
-  windowFunction: WindowFunction;
-  windowSeconds: number;
 }
 
 interface EnsurePlanTilesOptions {
@@ -572,7 +492,7 @@ function getPinnedTileKeys(): Set<string> {
     }
 
     for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
-      pinnedKeys.add(buildTileCacheKey(plan, tileIndex));
+      pinnedKeys.add(buildTileCacheKey(analysisState.quality, plan, tileIndex));
     }
   }
 
@@ -652,89 +572,6 @@ function getRuntime(): Promise<WaveCoreRuntime> {
   }
 
   return runtimePromise;
-}
-
-function normalizeQualityPreset(value: unknown): QualityPreset {
-  return value === 'balanced' || value === 'max' ? value : 'high';
-}
-
-function normalizeAnalysisType(value: unknown): AnalysisType {
-  return value === 'chroma'
-    || value === 'chroma_cqt'
-    || value === 'mel'
-    || value === 'mfcc'
-    || value === 'scalogram'
-    ? (value === 'chroma_cqt' ? 'chroma' : value)
-    : 'spectrogram';
-}
-
-function normalizeColormapDistribution(value: unknown): ColormapDistribution {
-  return value === 'contrast' || value === 'soft' ? value : 'balanced';
-}
-
-function getDefaultDbWindowForAnalysisType(analysisType: AnalysisType): {
-  maxDecibels: number;
-  minDecibels: number;
-} {
-  if (analysisType === 'mel') {
-    return { minDecibels: -92, maxDecibels: 0 };
-  }
-  if (analysisType === 'mfcc') {
-    return { minDecibels: -80, maxDecibels: 0 };
-  }
-  if (analysisType === 'scalogram') {
-    return { minDecibels: -72, maxDecibels: 0 };
-  }
-  return { minDecibels: MIN_DECIBELS, maxDecibels: MAX_DECIBELS };
-}
-
-function normalizeDbWindow(
-  minValue: unknown,
-  maxValue: unknown,
-  analysisType: AnalysisType,
-): {
-  maxDecibels: number;
-  minDecibels: number;
-} {
-  const defaults = getDefaultDbWindowForAnalysisType(analysisType);
-  let minDecibels = Number.isFinite(Number(minValue)) ? Math.round(Number(minValue)) : defaults.minDecibels;
-  let maxDecibels = Number.isFinite(Number(maxValue)) ? Math.round(Number(maxValue)) : defaults.maxDecibels;
-
-  minDecibels = clamp(
-    minDecibels,
-    SPECTROGRAM_DB_WINDOW_LIMITS.min,
-    SPECTROGRAM_DB_WINDOW_LIMITS.max - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
-  );
-  maxDecibels = clamp(
-    maxDecibels,
-    SPECTROGRAM_DB_WINDOW_LIMITS.min + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
-    SPECTROGRAM_DB_WINDOW_LIMITS.max,
-  );
-
-  if (maxDecibels < minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan) {
-    maxDecibels = Math.min(
-      SPECTROGRAM_DB_WINDOW_LIMITS.max,
-      minDecibels + SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
-    );
-    minDecibels = Math.min(
-      minDecibels,
-      maxDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.minimumSpan,
-    );
-  }
-
-  return { minDecibels, maxDecibels };
-}
-
-function normalizeFrequencyScale(value: unknown): FrequencyScale {
-  return value === 'linear' || value === 'mixed' ? value : 'log';
-}
-
-function getEffectiveFrequencyScale(analysisType: AnalysisType, value: unknown): FrequencyScale {
-  return analysisType === 'spectrogram' ? normalizeFrequencyScale(value) : 'log';
-}
-
-function isChromaAnalysisType(analysisType: AnalysisType): boolean {
-  return analysisType === 'chroma';
 }
 
 function getWebGpuGlobals() {
@@ -1581,6 +1418,15 @@ async function pumpOverviewLoop() {
 
       const runtime = await getRuntime();
       const plan = createRequestPlan({
+        duration: analysisState.duration,
+        maxFrequency: analysisState.maxFrequency,
+        minFrequency: analysisState.minFrequency,
+        pixelHeight: surfaceState.pixelHeight,
+        pixelWidth: surfaceState.pixelWidth,
+        quality: analysisState.quality,
+        runtimeVariant: analysisState.runtimeVariant,
+        sampleRate: analysisState.sampleRate,
+      }, {
         ...request,
         generation: 0,
         requestKind: 'overview',
@@ -1618,7 +1464,7 @@ async function pumpOverviewLoop() {
 
       self.postMessage({
         type: 'overviewReady',
-        body: createLayerReadyBody(plan),
+        body: createLayerReadyBody(analysisState.runtimeVariant, plan),
       });
     }
   } catch (error) {
@@ -1648,6 +1494,15 @@ async function pumpVisibleLoop() {
 
       updateCurrentDisplayRange(request);
       const plan = createRequestPlan({
+        duration: analysisState.duration,
+        maxFrequency: analysisState.maxFrequency,
+        minFrequency: analysisState.minFrequency,
+        pixelHeight: surfaceState.pixelHeight,
+        pixelWidth: surfaceState.pixelWidth,
+        quality: analysisState.quality,
+        runtimeVariant: analysisState.runtimeVariant,
+        sampleRate: analysisState.sampleRate,
+      }, {
         ...request,
         requestKind: 'visible',
         viewEnd: request.requestEnd,
@@ -1703,7 +1558,7 @@ async function pumpVisibleLoop() {
 
       self.postMessage({
         type: 'visibleReady',
-        body: createLayerReadyBody(plan),
+        body: createLayerReadyBody(analysisState.runtimeVariant, plan),
       });
     }
   } catch (error) {
@@ -1816,7 +1671,7 @@ async function ensurePlanTiles(
         return false;
       }
 
-      const cacheKey = buildTileCacheKey(plan, tileIndex);
+      const cacheKey = buildTileCacheKey(analysisState.quality, plan, tileIndex);
       const tileStart = tileIndex * plan.tileDuration;
       const tileEnd = Math.min(analysisState.duration, tileStart + plan.tileDuration);
       const existingTile = getTileRecord(cacheKey);
@@ -1985,7 +1840,9 @@ async function renderTile(
   tileEnd: number,
   options: RenderTileOptions = {},
 ): Promise<TileRecord | null> {
-  const cacheKey = typeof options.cacheKey === 'string' ? options.cacheKey : buildTileCacheKey(plan, tileIndex);
+  const cacheKey = typeof options.cacheKey === 'string'
+    ? options.cacheKey
+    : buildTileCacheKey(analysisState.quality, plan, tileIndex);
   const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : undefined;
   const onChunkReady = typeof options.onChunkReady === 'function' ? options.onChunkReady : undefined;
   const deferWebGpuReady = options.deferWebGpuReady === true;
@@ -4963,7 +4820,7 @@ function collectLayerWebGpuInstances(
   const instances: Array<{ bindGroup: any; destLeft: number; destRight: number; uvStart: number; uvEnd: number }> = [];
 
   for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
-    const cacheKey = buildTileCacheKey(plan, tileIndex);
+    const cacheKey = buildTileCacheKey(analysisState.quality, plan, tileIndex);
     const tile = getTileRecord(cacheKey);
 
     if (!tile || !ensureTileGpuResources(tile, webGpu) || !tile.gpuBindGroup) {
@@ -5066,7 +4923,7 @@ function paintLayer(
   context.imageSmoothingQuality = smoothingQuality;
 
   for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
-    const cacheKey = buildTileCacheKey(plan, tileIndex);
+    const cacheKey = buildTileCacheKey(analysisState.quality, plan, tileIndex);
     const tile = getTileRecord(cacheKey);
 
     if (!tile || !tile.canvas) {
@@ -5119,305 +4976,6 @@ function paintLayer(
       destinationHeight,
     );
   }
-}
-
-function createRequestPlan(request: SpectrogramRequest | null): RenderRequestPlan {
-  const preset = QUALITY_PRESETS[analysisState.quality];
-  const requestKind = request?.requestKind === 'overview' ? 'overview' : 'visible';
-  const generation = Number.isFinite(request?.generation) ? Number(request?.generation) : 0;
-  const configVersion = getRequestConfigVersion(request);
-  const requestedStart = Number.isFinite(request?.viewStart) ? Number(request?.viewStart) : 0;
-  const requestedEnd = Number.isFinite(request?.viewEnd) ? Number(request?.viewEnd) : analysisState.duration;
-  const viewStart = clamp(requestedStart, 0, analysisState.duration);
-  const viewEnd = clamp(
-    Math.max(viewStart + (1 / analysisState.sampleRate), requestedEnd),
-    viewStart + (1 / analysisState.sampleRate),
-    analysisState.duration,
-  );
-  const requestedDisplayStart = Number.isFinite(request?.displayStart) ? Number(request?.displayStart) : viewStart;
-  const displayStart = clamp(requestedDisplayStart, 0, analysisState.duration);
-  const requestedDisplayEnd = Number.isFinite(request?.displayEnd) ? Number(request?.displayEnd) : viewEnd;
-  const displayEnd = clamp(
-    Math.max(displayStart + (1 / analysisState.sampleRate), requestedDisplayEnd),
-    displayStart + (1 / analysisState.sampleRate),
-    analysisState.duration,
-  );
-  const pixelWidth = Math.max(1, Math.round(Number(request?.pixelWidth) || surfaceState.pixelWidth || 1));
-  const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1));
-  const dprBucket = Math.max(2, Math.round(Number(request?.dpr) || 2));
-  const analysisType = normalizeAnalysisType(request?.analysisType);
-  const isChroma = isChromaAnalysisType(analysisType);
-  const colormapDistribution = normalizeColormapDistribution(request?.colormapDistribution);
-  const dbWindow = normalizeDbWindow(request?.minDecibels, request?.maxDecibels, analysisType);
-  const frequencyScale = getEffectiveFrequencyScale(analysisType, request?.frequencyScale);
-  const windowFunction = normalizeSpectrogramWindowFunction(request?.windowFunction);
-  const fftSize = analysisType === 'scalogram' || analysisType === 'chroma' ? 0 : normalizeFftSize(request?.fftSize);
-  const overlapRatio = analysisType === 'scalogram' || analysisType === 'chroma' ? 0 : normalizeOverlapRatio(request?.overlapRatio);
-  const mfccCoefficientCount = normalizeMfccCoefficientCount(request?.mfccCoefficientCount);
-  const scalogramOmega0 = normalizeScalogramOmega0(request?.scalogramOmega0);
-  const scalogramRowDensity = normalizeScalogramRowDensity(request?.scalogramRowDensity);
-  const scalogramFrequencyRange = normalizeScalogramFrequencyRange(
-    request?.scalogramMinFrequency,
-    request?.scalogramMaxFrequency,
-  );
-  const melBandCount = analysisType === 'mfcc'
-    ? normalizeMfccMelBandCount(request?.mfccMelBandCount ?? request?.melBandCount)
-    : normalizeMelBandCount(request?.melBandCount);
-  const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
-  const rowOversample = requestKind === 'visible' && analysisType !== 'scalogram'
-    ? VISIBLE_ROW_OVERSAMPLE
-    : analysisType === 'scalogram'
-      ? scalogramRowDensity
-      : 1;
-  const rowCount = isChroma
-    ? CHROMA_BIN_COUNT
-    : analysisType === 'mel'
-    ? melBandCount
-    : analysisType === 'mfcc'
-      ? mfccCoefficientCount
-    : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
-  const targetColumns = Math.max(
-    TILE_COLUMN_COUNT,
-    quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
-  );
-  const hopSamples = analysisType === 'scalogram' || analysisType === 'chroma'
-    ? normalizeScalogramHopSamples(request?.scalogramHopSamples)
-    : Math.max(1, Math.round(fftSize * (1 - overlapRatio)));
-  const secondsPerColumn = hopSamples / analysisState.sampleRate;
-  const tileDuration = Math.max(secondsPerColumn * TILE_COLUMN_COUNT, 1 / analysisState.sampleRate);
-  const startTileIndex = Math.max(0, Math.floor(viewStart / tileDuration));
-  const endTileIndex = Math.max(
-    startTileIndex,
-    Math.floor(Math.max(viewStart, viewEnd - (secondsPerColumn * 0.5)) / tileDuration),
-  );
-  const windowSeconds = analysisType === 'scalogram' || analysisType === 'chroma' ? 0 : fftSize / analysisState.sampleRate;
-  const decimationFactor = analysisType === 'spectrogram'
-    ? Math.max(1, preset.lowFrequencyDecimationFactor || 1)
-    : 1;
-  const configKey = [
-    `type${analysisType}`,
-    `dist${colormapDistribution}`,
-    `db${dbWindow.minDecibels}:${dbWindow.maxDecibels}`,
-    `scale${frequencyScale}`,
-    `win${windowFunction}`,
-    `fft${fftSize}`,
-    `bands${analysisType === 'mel' || analysisType === 'mfcc' ? melBandCount : 0}`,
-    `coeff${analysisType === 'mfcc' ? mfccCoefficientCount : 0}`,
-    `min${analysisType === 'scalogram'
-      ? scalogramFrequencyRange.minFrequency
-      : isChroma
-        ? CQT_DEFAULT_FMIN
-        : analysisState.minFrequency}`,
-    `max${analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : analysisState.maxFrequency}`,
-    `omega${analysisType === 'scalogram' ? scalogramOmega0 : 0}`,
-    `density${analysisType === 'scalogram' ? scalogramRowDensity : 0}`,
-    `ov${Math.round(overlapRatio * 1000)}`,
-    `hop${hopSamples}`,
-    `rows${rowCount}`,
-  ].join('-');
-
-  return {
-    analysisType,
-    colormapDistribution,
-    decimationFactor,
-    configKey,
-    configVersion,
-    displayEnd,
-    displayStart,
-    dprBucket,
-    endTileIndex,
-    fftSize,
-    frequencyScale,
-    generation,
-    hopSamples,
-    hopSeconds: secondsPerColumn,
-    maxDecibels: dbWindow.maxDecibels,
-    maxFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : analysisState.maxFrequency,
-    melBandCount,
-    mfccCoefficientCount,
-    minDecibels: dbWindow.minDecibels,
-    minFrequency: analysisType === 'scalogram'
-      ? scalogramFrequencyRange.minFrequency
-      : isChroma
-        ? CQT_DEFAULT_FMIN
-        : analysisState.minFrequency,
-    overlapRatio,
-    pixelHeight,
-    pixelWidth,
-    requestKind,
-    rowCount,
-    windowFunction,
-    scalogramOmega0,
-    scalogramRowDensity,
-    startTileIndex,
-    targetColumns,
-    tileDuration,
-    viewEnd,
-    viewStart,
-    windowSeconds,
-  };
-}
-
-function buildTileCacheKey(plan: RenderRequestPlan, tileIndex: number): string {
-  return [
-    analysisState.quality,
-    plan.configKey,
-    `tile${tileIndex}`,
-    `dpr${plan.dprBucket}`,
-  ].join(':');
-}
-
-function createLayerReadyBody(plan: RenderRequestPlan) {
-  return {
-    analysisType: plan.analysisType,
-    colormapDistribution: plan.colormapDistribution,
-    configVersion: plan.configVersion,
-    decimationFactor: plan.decimationFactor,
-    displayEnd: plan.displayEnd,
-    displayStart: plan.displayStart,
-    fftSize: plan.fftSize,
-    frequencyScale: plan.frequencyScale,
-    generation: plan.generation,
-    hopSamples: plan.hopSamples,
-    hopSeconds: plan.hopSeconds,
-    maxDecibels: plan.maxDecibels,
-    maxFrequency: plan.maxFrequency,
-    melBandCount: plan.melBandCount,
-    mfccCoefficientCount: plan.mfccCoefficientCount,
-    minDecibels: plan.minDecibels,
-    minFrequency: plan.minFrequency,
-    overlapRatio: plan.overlapRatio,
-    pixelHeight: plan.pixelHeight,
-    pixelWidth: plan.pixelWidth,
-    requestKind: plan.requestKind,
-    scalogramHopSamples: plan.hopSamples,
-    scalogramOmega0: plan.scalogramOmega0,
-    scalogramRowDensity: plan.scalogramRowDensity,
-    runtimeVariant: analysisState.runtimeVariant,
-    targetColumns: plan.targetColumns,
-    targetRows: plan.rowCount,
-    viewEnd: plan.viewEnd,
-    viewStart: plan.viewStart,
-    windowFunction: plan.windowFunction,
-    windowSeconds: plan.windowSeconds,
-  };
-}
-
-function isEquivalentPlan(left: RenderRequestPlan | null, right: RenderRequestPlan | null): boolean {
-  if (!left || !right) {
-    return false;
-  }
-
-  return left.requestKind === right.requestKind
-    && left.configVersion === right.configVersion
-    && left.analysisType === right.analysisType
-    && left.colormapDistribution === right.colormapDistribution
-    && left.dprBucket === right.dprBucket
-    && left.pixelWidth === right.pixelWidth
-    && left.pixelHeight === right.pixelHeight
-    && left.rowCount === right.rowCount
-    && left.targetColumns === right.targetColumns
-    && left.fftSize === right.fftSize
-    && left.frequencyScale === right.frequencyScale
-    && left.minDecibels === right.minDecibels
-    && left.maxDecibels === right.maxDecibels
-    && left.melBandCount === right.melBandCount
-    && left.mfccCoefficientCount === right.mfccCoefficientCount
-    && left.minFrequency === right.minFrequency
-    && left.maxFrequency === right.maxFrequency
-    && Math.abs(left.scalogramOmega0 - right.scalogramOmega0) <= 1e-6
-    && Math.abs(left.scalogramRowDensity - right.scalogramRowDensity) <= 1e-6
-    && left.hopSamples === right.hopSamples
-    && left.windowFunction === right.windowFunction
-    && Math.abs(left.overlapRatio - right.overlapRatio) <= 1e-6
-    && Math.abs(left.viewStart - right.viewStart) <= 1e-6
-    && Math.abs(left.viewEnd - right.viewEnd) <= 1e-6;
-}
-
-function normalizeFftSize(value: unknown): number {
-  const numericValue = Number(value);
-  return FFT_SIZE_OPTIONS.includes(numericValue) ? numericValue : 4096;
-}
-
-function normalizeOverlapRatio(value: unknown): number {
-  const numericValue = Number(value);
-  return OVERLAP_RATIO_OPTIONS.includes(numericValue) ? numericValue : 0.75;
-}
-
-function normalizeMelBandCount(value: unknown): number {
-  const numericValue = Number(value);
-  return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
-    ? numericValue
-    : LIBROSA_DEFAULT_MEL_BAND_COUNT;
-}
-
-function normalizeScalogramOmega0(value: unknown): number {
-  const numericValue = Number(value);
-  return SCALOGRAM_OMEGA_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_SCALOGRAM_OMEGA0;
-}
-
-function normalizeScalogramRowDensity(value: unknown): number {
-  const numericValue = Number(value);
-  return SCALOGRAM_ROW_DENSITY_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_SCALOGRAM_ROW_DENSITY;
-}
-
-function normalizeScalogramHopSamples(value: unknown): number {
-  const numericValue = Number(value);
-  return SCALOGRAM_HOP_SAMPLES_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_SCALOGRAM_HOP_SAMPLES;
-}
-
-function normalizeScalogramFrequencyRange(minValue: unknown, maxValue: unknown): {
-  maxFrequency: number;
-  minFrequency: number;
-} {
-  const ceiling = Math.max(
-    MIN_FREQUENCY + 1,
-    Math.min(MAX_FREQUENCY, Math.round(analysisState.maxFrequency || MAX_FREQUENCY)),
-  );
-  let minFrequency = Number.isFinite(Number(minValue))
-    ? Math.round(Number(minValue))
-    : MIN_FREQUENCY;
-  let maxFrequency = Number.isFinite(Number(maxValue))
-    ? Math.round(Number(maxValue))
-    : ceiling;
-
-  minFrequency = clamp(
-    minFrequency,
-    MIN_FREQUENCY,
-    Math.max(MIN_FREQUENCY, ceiling - 1),
-  );
-  maxFrequency = clamp(
-    maxFrequency,
-    Math.min(ceiling, minFrequency + 1),
-    ceiling,
-  );
-
-  if (maxFrequency <= minFrequency) {
-    maxFrequency = Math.min(ceiling, minFrequency + 1);
-    minFrequency = Math.min(minFrequency, maxFrequency - 1);
-  }
-
-  return { minFrequency, maxFrequency };
-}
-
-function normalizeMfccCoefficientCount(value: unknown): number {
-  const numericValue = Number(value);
-  return MFCC_COEFFICIENT_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_MFCC_COEFFICIENT_COUNT;
-}
-
-function normalizeMfccMelBandCount(value: unknown): number {
-  const numericValue = Number(value);
-  return MEL_BAND_COUNT_OPTIONS.includes(numericValue)
-    ? numericValue
-    : DEFAULT_MFCC_MEL_BAND_COUNT;
 }
 
 function ensureSpectrogramOutputCapacity(module: WaveCoreModule, byteLength: number): void {
