@@ -1,24 +1,24 @@
-import { DISPLAY_MIN_DPR } from '../sharedBuffers';
-import { createAudioTransport, type AudioTransport, type PlaybackClockSnapshot, type PlaybackSession } from '../audioTransport';
-import { createAudioscopeElements } from './core/elements';
-import { clamp, formatAxisLabel, formatTime } from './core/format';
+import { DISPLAY_MIN_DPR } from './sharedBuffers';
+import { createAudioTransport, type AudioTransport, type PlaybackClockSnapshot, type PlaybackSession } from './transport/audioTransport';
+import { createAudioscopeElements } from './audioscope/core/elements';
+import { clamp, formatAxisLabel, formatTime } from './audioscope/core/format';
 import {
   createAudioscopeMediaController,
   createExternalToolStatusState,
   createLoudnessSummaryState,
   createMediaMetadataState,
   normalizeExternalToolStatus,
-} from './controllers/media';
+} from './audioscope/controllers/media';
 import {
   createPlaybackAnalysisData,
   createPlaybackAnalysisDataFromPlaybackSession,
   createPlaybackSessionFromPcmFallback,
-} from './controllers/playbackData';
+} from './audioscope/controllers/playbackData';
 import {
   createAudioscopePlaybackRateController,
   normalizePlaybackRateSelection,
-} from './controllers/playbackRate';
-import { createAudioscopeLoadController } from './controllers/load';
+} from './audioscope/controllers/playbackRate';
+import { createAudioscopeLoadController } from './audioscope/controllers/load';
 import type {
   AnalysisRenderBackend,
   AnalysisSurfaceResetReason,
@@ -33,8 +33,8 @@ import type {
   SurfaceKind,
   TransportCommand,
   ViewportUiState,
-} from '../audioEngineProtocol';
-import { normalizeSpectrogramWindowFunction } from '../windowShared';
+} from './audioEngineProtocol';
+import { normalizeSpectrogramWindowFunction } from './windowShared';
 
 const vscode = acquireVsCodeApi();
 const engineWorkerScriptUri = document.body.dataset.engineWorkerSrc || '';
@@ -693,7 +693,7 @@ function createSpectrogramAnalysisState(
     generation: 0,
     initialized: false,
     maxFrequency: Math.min(20000, sampleRate / 2),
-    minFrequency: 50,
+    minFrequency: 20,
     quality,
     renderBackend: '2d-wasm',
     runtimeVariant: null,

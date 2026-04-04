@@ -1,5 +1,5 @@
 // Shared analysis configuration and option constants.
-export const MIN_FREQUENCY = 50;
+export const MIN_FREQUENCY = 20;
 export const MAX_FREQUENCY = 20000;
 export const ROW_BUCKET_SIZE = 16;
 export const DEFAULT_MFCC_COEFFICIENT_COUNT = 20;

@@ -1,4 +1,4 @@
-import { createAudioTransport } from '../../audioTransport';
+import { createAudioTransport } from '../../transport/audioTransport';
 import {
   createMediaMetadataState,
 } from './media';

@@ -1,10 +1,104 @@
-import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from './waveCoreRuntime';
-import { resizeInteractiveWaveformSurface } from './interactiveWaveformRenderer';
+import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from '../waveCoreRuntime';
+import { resizeInteractiveWaveformSurface } from './renderer';
 import {
   WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
   WAVEFORM_BOTTOM_PADDING_PX as BOTTOM_PADDING,
   WAVEFORM_TOP_PADDING_PX as TOP_PADDING,
-} from './waveformGeometry';
+} from './geometry';
+
+type WaveformPlotMode = 'envelope' | 'raw' | 'sample';
+
+interface CanvasInitOptions {
+  color?: string;
+  height?: number;
+  offscreenCanvas?: OffscreenCanvas;
+  renderScale?: number;
+  width?: number;
+}
+
+interface AudioSessionOptions {
+  duration?: number;
+  sampleCount?: number;
+  sampleRate?: number;
+  samplesBuffer?: ArrayBuffer;
+  sessionVersion?: number;
+}
+
+interface RenderWaveformRequest {
+  color?: string;
+  generation?: number;
+  height?: number;
+  renderScale?: number;
+  viewEnd?: number;
+  viewStart?: number;
+  visibleSpan?: number;
+  width?: number;
+}
+
+interface WaveformPresentedBody {
+  columnCount: number;
+  generation: number;
+  height: number;
+  rawSamplePlotMode: boolean;
+  samplePlotMode: boolean;
+  viewEnd: number;
+  viewStart: number;
+  visibleSpan: number;
+  width: number;
+}
+
+interface RenderSurface {
+  canvas: OffscreenCanvas;
+  context: OffscreenCanvasRenderingContext2D;
+}
+
+interface PlotPoint {
+  sampleValue: number;
+  x: number;
+}
+
+interface RepresentativeSamplePoint {
+  sampleIndex: number;
+  sampleValue: number;
+}
+
+interface SurfaceState {
+  canvas: OffscreenCanvas | null;
+  color: string;
+  context: OffscreenCanvasRenderingContext2D | null;
+  height: number;
+  renderScale: number;
+  width: number;
+}
+
+interface AnalysisState {
+  attachedSessionVersion: number;
+  duration: number;
+  initialized: boolean;
+  plotMode: WaveformPlotMode;
+  representativeSampleValues: Float32Array | null;
+  representativeSampleValuesCapacity: number;
+  runtimeVariant: string;
+  sampleCount: number;
+  sampleRate: number;
+  waveformBuilt: boolean;
+  waveformData: unknown | null;
+  waveformPcmPointer: number;
+  waveformSlice: Float32Array | null;
+  waveformSliceCapacity: number;
+  waveformSliceMetaPointer: number;
+  waveformSlicePointer: number;
+}
+
+type WorkerMessage =
+  | { type: 'attachAudioSession'; body?: AudioSessionOptions }
+  | { type: 'bootstrapRuntime' }
+  | { type: 'buildWaveformPyramid' }
+  | { type: 'dispose' }
+  | { type: 'disposeSession' }
+  | { type: 'initCanvas'; body?: CanvasInitOptions }
+  | { type: 'renderWaveformView'; body?: RenderWaveformRequest }
+  | { type: 'resizeCanvas'; body?: CanvasInitOptions };
 
 const CENTER_LINE_ALPHA = 0.14;
 const SYMMETRIC_ENVELOPE_GAIN = 0.76;
@@ -20,13 +114,13 @@ const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
 const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
 const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
 const WAVEFORM_RUNTIME_VARIANT = 'waveform-worker-pending';
-let requestQueue = Promise.resolve();
+let requestQueue: Promise<void> = Promise.resolve();
 let renderLoopActive = false;
-let pendingRenderRequest = null;
+let pendingRenderRequest: RenderWaveformRequest | null = null;
 let latestRequestedGeneration = 0;
 let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 
-const surfaceState = {
+const surfaceState: SurfaceState = {
   canvas: null,
   context: null,
   width: 0,
@@ -35,10 +129,14 @@ const surfaceState = {
   color: '#8ccadd',
 };
 
-let analysisState = createEmptyAnalysisState();
+let analysisState: AnalysisState = createEmptyAnalysisState();
 
-self.onmessage = (event) => {
-  const message = event.data ?? {};
+self.onmessage = (event: MessageEvent<WorkerMessage | undefined>): void => {
+  const message = event.data;
+
+  if (!message) {
+    return;
+  }
 
   switch (message.type) {
     case 'bootstrapRuntime':
@@ -77,7 +175,7 @@ self.onmessage = (event) => {
     case 'renderWaveformView':
       pendingRenderRequest = message.body ?? null;
       latestRequestedGeneration = Number.isFinite(Number(message.body?.generation))
-        ? Number(message.body.generation)
+        ? Number(message.body?.generation)
         : latestRequestedGeneration;
       void pumpRenderLoop();
       return;
@@ -100,7 +198,7 @@ self.onmessage = (event) => {
   }
 };
 
-function createEmptyAnalysisState() {
+function createEmptyAnalysisState(): AnalysisState {
   return {
     initialized: false,
     waveformBuilt: false,
@@ -121,7 +219,7 @@ function createEmptyAnalysisState() {
   };
 }
 
-function enqueueRequest(task) {
+function enqueueRequest(task: () => void | Promise<void>): void {
   requestQueue = requestQueue
     .then(task)
     .catch((error) => {
@@ -129,7 +227,7 @@ function enqueueRequest(task) {
     });
 }
 
-function initializeCanvas(options) {
+function initializeCanvas(options: CanvasInitOptions | undefined): void {
   if (options?.offscreenCanvas) {
     surfaceState.canvas = options.offscreenCanvas;
   }
@@ -148,7 +246,7 @@ function initializeCanvas(options) {
   clearCanvas();
 }
 
-function resizeCanvas(options) {
+function resizeCanvas(options: CanvasInitOptions | undefined): void {
   const resizeSnapshot = captureDisplayedSurfaceSnapshot();
   surfaceState.width = Math.max(1, Math.round(Number(options?.width) || surfaceState.width || 1));
   surfaceState.height = Math.max(1, Math.round(Number(options?.height) || surfaceState.height || 1));
@@ -164,7 +262,12 @@ function resizeCanvas(options) {
   }
 }
 
-function resizeSurface(surface, width, height, renderScale) {
+function resizeSurface(
+  surface: OffscreenCanvas | null,
+  width: number,
+  height: number,
+  renderScale: number,
+): boolean {
   if (!surface) {
     return false;
   }
@@ -177,7 +280,7 @@ function resizeSurface(surface, width, height, renderScale) {
   );
 }
 
-function resizeDisplaySurface() {
+function resizeDisplaySurface(): boolean {
   if (!surfaceState.canvas) {
     return false;
   }
@@ -190,7 +293,7 @@ function resizeDisplaySurface() {
   );
 }
 
-function captureDisplayedSurfaceSnapshot() {
+function captureDisplayedSurfaceSnapshot(): OffscreenCanvas | null {
   if (!surfaceState.canvas || typeof OffscreenCanvas !== 'function') {
     return null;
   }
@@ -208,22 +311,16 @@ function captureDisplayedSurfaceSnapshot() {
   return snapshot;
 }
 
-function restoreDisplayedSurfaceSnapshot(snapshot) {
+function restoreDisplayedSurfaceSnapshot(snapshot: OffscreenCanvas | null): void {
   if (!snapshot) {
     return;
   }
 
-  const surfaces = [
-    surfaceState.canvas && surfaceState.context
-      ? { canvas: surfaceState.canvas, context: surfaceState.context }
-      : null,
-  ];
+  const surfaces: RenderSurface[] = surfaceState.canvas && surfaceState.context
+    ? [{ canvas: surfaceState.canvas, context: surfaceState.context }]
+    : [];
 
   for (const surface of surfaces) {
-    if (!surface) {
-      continue;
-    }
-
     surface.context.save();
     surface.context.setTransform(1, 0, 0, 1, 0, 0);
     surface.context.globalCompositeOperation = 'copy';
@@ -242,26 +339,20 @@ function restoreDisplayedSurfaceSnapshot(snapshot) {
   }
 }
 
-function clearCanvas() {
-  const surfaces = [
-    surfaceState.canvas && surfaceState.context
-      ? { canvas: surfaceState.canvas, context: surfaceState.context }
-      : null,
-  ];
+function clearCanvas(): void {
+  const surfaces: RenderSurface[] = surfaceState.canvas && surfaceState.context
+    ? [{ canvas: surfaceState.canvas, context: surfaceState.context }]
+    : [];
 
   for (const surface of surfaces) {
-    if (!surface) {
-      continue;
-    }
-
     surface.context.setTransform(1, 0, 0, 1, 0, 0);
     surface.context.clearRect(0, 0, surface.canvas.width, surface.canvas.height);
   }
 }
 
-function attachAudioSession(runtime, options) {
+function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptions | undefined): void {
   const module = runtime.module;
-  const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options.sessionVersion) : 0;
+  const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options?.sessionVersion) : 0;
   const sampleRate = Number(options?.sampleRate);
   const duration = Number(options?.duration);
   const sampleCount = Number(options?.sampleCount);
@@ -317,7 +408,7 @@ function attachAudioSession(runtime, options) {
   });
 }
 
-function buildWaveformPyramid(runtime) {
+function buildWaveformPyramid(runtime: WaveCoreRuntime): void {
   assertInitialized();
 
   if (analysisState.waveformBuilt) {
@@ -369,7 +460,7 @@ async function pumpRenderLoop() {
   }
 }
 
-async function renderWaveform(request) {
+async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
   const viewStart = clamp(Number(request?.viewStart) || 0, 0, analysisState.duration);
   const viewEnd = clamp(
     Number(request?.viewEnd) || analysisState.duration,
@@ -406,7 +497,7 @@ async function renderWaveform(request) {
   surfaceState.color = color;
   resizeDisplaySurface();
 
-  let slice = null;
+  let slice: Float32Array | null = null;
   if (!rawSamplePlotMode && !samplePlotMode) {
     slice = ensureWaveformSliceCapacity(module, columnCount * 2);
 
@@ -425,7 +516,7 @@ async function renderWaveform(request) {
     return;
   }
 
-  const renderSurface = surfaceState.canvas && surfaceState.context
+  const renderSurface: RenderSurface | null = surfaceState.canvas && surfaceState.context
     ? {
       canvas: surfaceState.canvas,
       context: surfaceState.context,
@@ -507,24 +598,31 @@ async function renderWaveform(request) {
   });
 }
 
-function postWaveformPresented(body) {
+function postWaveformPresented(body: WaveformPresentedBody): void {
   self.postMessage({
     type: 'waveformPresented',
     body,
   });
 }
 
-function drawColumnsCount(renderSurface, columnCount) {
+function drawColumnsCount(renderSurface: RenderSurface | null, columnCount: number): number {
   const canvas = renderSurface?.canvas ?? surfaceState.canvas;
   const deviceWidth = canvas ? Math.max(1, canvas.width) : columnCount;
   return Math.min(columnCount, deviceWidth);
 }
 
-function drawFrame(renderSurface, slice, columnCount, color, samplePlotMode, pixelsPerSample) {
-  const context = renderSurface?.context;
-  const canvas = renderSurface?.canvas;
+function drawFrame(
+  renderSurface: RenderSurface,
+  slice: Float32Array | null,
+  columnCount: number,
+  color: string,
+  samplePlotMode: boolean,
+  pixelsPerSample: number,
+): void {
+  const context = renderSurface.context;
+  const canvas = renderSurface.canvas;
 
-  if (!context || !canvas) {
+  if (!slice) {
     return;
   }
 
@@ -561,10 +659,20 @@ function drawFrame(renderSurface, slice, columnCount, color, samplePlotMode, pix
   }
 }
 
-function drawSamplePlot(renderSurface, slice, drawColumns, color, midY, amplitudeHeight, chartTop, chartBottom, pixelsPerSample) {
-  const context = renderSurface?.context;
+function drawSamplePlot(
+  renderSurface: RenderSurface,
+  slice: Float32Array,
+  drawColumns: number,
+  color: string,
+  midY: number,
+  amplitudeHeight: number,
+  chartTop: number,
+  chartBottom: number,
+  pixelsPerSample: number,
+): void {
+  const context = renderSurface.context;
 
-  if (!context || drawColumns <= 0) {
+  if (drawColumns <= 0) {
     return;
   }
 
@@ -605,7 +713,7 @@ function drawSamplePlot(renderSurface, slice, drawColumns, color, midY, amplitud
   }
 }
 
-function resolveWaveformPlotMode(samplesPerPixel, hasSampleData) {
+function resolveWaveformPlotMode(samplesPerPixel: number, hasSampleData: boolean): WaveformPlotMode {
   if (!hasSampleData) {
     return 'envelope';
   }
@@ -633,7 +741,12 @@ function resolveWaveformPlotMode(samplesPerPixel, hasSampleData) {
   return samplesPerPixel <= SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL ? 'sample' : 'envelope';
 }
 
-function getRenderableSampleX(samplePosition, sampleStartPosition, visibleSampleSpan, drawColumns) {
+function getRenderableSampleX(
+  samplePosition: number,
+  sampleStartPosition: number,
+  visibleSampleSpan: number,
+  drawColumns: number,
+): number {
   const maxX = Math.max(0, drawColumns - 1);
 
   if (maxX <= 0 || visibleSampleSpan <= 0) {
@@ -643,7 +756,7 @@ function getRenderableSampleX(samplePosition, sampleStartPosition, visibleSample
   return clamp(((samplePosition - sampleStartPosition) / visibleSampleSpan) * maxX, 0, maxX);
 }
 
-function getSampleBucketSize(visibleSampleCount, drawColumns) {
+function getSampleBucketSize(visibleSampleCount: number, drawColumns: number): number {
   if (!(visibleSampleCount > 0) || !(drawColumns > 0)) {
     return 1;
   }
@@ -651,9 +764,9 @@ function getSampleBucketSize(visibleSampleCount, drawColumns) {
   return Math.max(1, Math.round(visibleSampleCount / drawColumns));
 }
 
-function appendWaveformPlotPoint(points, x, sampleValue) {
+function appendWaveformPlotPoint(points: PlotPoint[], x: number, sampleValue: number): void {
   const normalizedValue = clamp(sampleValue ?? 0, -1, 1);
-  const previousPoint = points[points.length - 1] ?? null;
+  const previousPoint: PlotPoint | null = points[points.length - 1] ?? null;
 
   if (previousPoint && Math.abs(previousPoint.x - x) <= 0.01) {
     if (Math.abs(normalizedValue) >= Math.abs(previousPoint.sampleValue)) {
@@ -668,12 +781,20 @@ function appendWaveformPlotPoint(points, x, sampleValue) {
   });
 }
 
-function drawRepresentativeSamplePlot(renderSurface, samples, color, pixelsPerSample, sampleStartPosition, visibleSampleCount, visibleSampleSpan) {
-  const context = renderSurface?.context;
-  const canvas = renderSurface?.canvas;
-  const drawColumns = drawColumnsCount(renderSurface, Math.max(1, canvas?.width ?? 1));
+function drawRepresentativeSamplePlot(
+  renderSurface: RenderSurface,
+  samples: Float32Array,
+  color: string,
+  pixelsPerSample: number,
+  sampleStartPosition: number,
+  visibleSampleCount: number,
+  visibleSampleSpan: number,
+): void {
+  const context = renderSurface.context;
+  const canvas = renderSurface.canvas;
+  const drawColumns = drawColumnsCount(renderSurface, Math.max(1, canvas.width));
 
-  if (!context || !canvas || drawColumns <= 0 || samples.length === 0) {
+  if (drawColumns <= 0 || samples.length === 0) {
     return;
   }
 
@@ -698,7 +819,7 @@ function drawRepresentativeSamplePlot(renderSurface, samples, color, pixelsPerSa
   context.beginPath();
   const maxX = Math.max(0, drawColumns - 1);
   const bucketSize = getSampleBucketSize(visibleSampleCount, drawColumns);
-  const plotPoints = [];
+  const plotPoints: PlotPoint[] = [];
   const bucketStartIndex = Math.floor(sampleStartPosition / bucketSize);
   const bucketEndIndex = Math.ceil((sampleStartPosition + visibleSampleCount) / bucketSize);
 
@@ -759,12 +880,19 @@ function drawRepresentativeSamplePlot(renderSurface, samples, color, pixelsPerSa
   }
 }
 
-function drawRawSamplePlot(renderSurface, samples, color, pixelsPerSample, sampleStartPosition, visibleSampleSpan) {
-  const context = renderSurface?.context;
-  const canvas = renderSurface?.canvas;
-  const drawColumns = drawColumnsCount(renderSurface, Math.max(1, canvas?.width ?? 1));
+function drawRawSamplePlot(
+  renderSurface: RenderSurface,
+  samples: Float32Array,
+  color: string,
+  pixelsPerSample: number,
+  sampleStartPosition: number,
+  visibleSampleSpan: number,
+): void {
+  const context = renderSurface.context;
+  const canvas = renderSurface.canvas;
+  const drawColumns = drawColumnsCount(renderSurface, Math.max(1, canvas.width));
 
-  if (!context || !canvas || drawColumns <= 0 || samples.length === 0) {
+  if (drawColumns <= 0 || samples.length === 0) {
     return;
   }
 
@@ -846,25 +974,25 @@ function drawRawSamplePlot(renderSurface, samples, color, pixelsPerSample, sampl
   }
 }
 
-function shouldDrawRawSampleMarkers(pixelsPerSample) {
+function shouldDrawRawSampleMarkers(pixelsPerSample: number): boolean {
   return getCssPixelsPerSample(pixelsPerSample) >= RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE;
 }
 
-function getCssPixelsPerSample(pixelsPerSample) {
+function getCssPixelsPerSample(pixelsPerSample: number): number {
   return pixelsPerSample / Math.max(1, surfaceState.renderScale);
 }
 
 function drawRawSampleMarkers(
-  context,
-  samples,
-  sampleStartPosition,
-  visibleSampleSpan,
-  drawColumns,
-  midY,
-  amplitudeHeight,
-  chartTop,
-  chartBottom,
-) {
+  context: OffscreenCanvasRenderingContext2D,
+  samples: Float32Array,
+  sampleStartPosition: number,
+  visibleSampleSpan: number,
+  drawColumns: number,
+  midY: number,
+  amplitudeHeight: number,
+  chartTop: number,
+  chartBottom: number,
+): void {
   const maxSampleIndex = Math.max(0, samples.length - 1);
   const firstSampleIndex = Math.max(0, Math.ceil(sampleStartPosition));
   const lastSampleIndex = Math.min(maxSampleIndex, Math.floor(sampleStartPosition + visibleSampleSpan));
@@ -890,7 +1018,7 @@ function drawRawSampleMarkers(
   context.restore();
 }
 
-function getRepresentativeSampleValue(slice, columnIndex) {
+function getRepresentativeSampleValue(slice: Float32Array, columnIndex: number): number {
   const sourceIndex = columnIndex * 2;
   const minValue = slice[sourceIndex] ?? 0;
   const maxValue = slice[sourceIndex + 1] ?? 0;
@@ -902,7 +1030,7 @@ function getRepresentativeSampleValue(slice, columnIndex) {
   return clamp((minValue + maxValue) * 0.5, -1, 1);
 }
 
-function getInterpolatedSample(samples, position) {
+function getInterpolatedSample(samples: Float32Array, position: number): number {
   const index = Math.floor(position);
   const nextIndex = Math.min(samples.length - 1, index + 1);
   const fraction = position - index;
@@ -912,7 +1040,11 @@ function getInterpolatedSample(samples, position) {
   return a + (b - a) * fraction;
 }
 
-function pickRepresentativeSamplePoint(samples, startPosition, endPosition) {
+function pickRepresentativeSamplePoint(
+  samples: Float32Array,
+  startPosition: number,
+  endPosition: number,
+): RepresentativeSamplePoint | null {
   const maxSampleIndex = Math.max(0, samples.length - 1);
 
   if (maxSampleIndex < 0) {
@@ -957,7 +1089,7 @@ function pickRepresentativeSamplePoint(samples, startPosition, endPosition) {
   };
 }
 
-function ensureWaveformSliceCapacity(module, floatCount) {
+function ensureWaveformSliceCapacity(module: WaveCoreModule, floatCount: number): Float32Array {
   if (
     analysisState.waveformSliceCapacity >= floatCount
     && analysisState.waveformSlicePointer
@@ -983,21 +1115,21 @@ function ensureWaveformSliceCapacity(module, floatCount) {
   return analysisState.waveformSlice;
 }
 
-function hasRenderableWaveformData(waveformData) {
+function hasRenderableWaveformData(_waveformData: unknown): boolean {
   return Boolean(analysisState.waveformPcmPointer && analysisState.sampleCount > 0);
 }
 
-function hasRenderableSurface() {
+function hasRenderableSurface(): boolean {
   return Boolean(surfaceState.canvas && surfaceState.context);
 }
 
-function isRenderReady() {
+function isRenderReady(): boolean {
   return hasRenderableSurface()
     && analysisState.initialized
     && hasRenderableWaveformData(analysisState.waveformData);
 }
 
-function hasSampleWaveformData(waveformData) {
+function hasSampleWaveformData(waveformData: { samples?: unknown } | null | undefined): boolean {
   return waveformData?.samples instanceof Float32Array && waveformData.samples.length > 0;
 }
 
@@ -1034,7 +1166,7 @@ function disposeSession(runtime: WaveCoreRuntime) {
   analysisState = createEmptyAnalysisState();
 }
 
-function getRuntime() {
+function getRuntime(): Promise<WaveCoreRuntime> {
   if (!runtimePromise) {
     runtimePromise = loadWaveCoreRuntime();
   }
@@ -1052,7 +1184,7 @@ function assertInitialized() {
   }
 }
 
-function postError(error) {
+function postError(error: unknown): void {
   const text = error instanceof Error ? error.message : String(error);
 
   self.postMessage({
@@ -1061,6 +1193,6 @@ function postError(error) {
   });
 }
 
-function clamp(value, min, max) {
+function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }

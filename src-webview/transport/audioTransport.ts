@@ -1,5 +1,5 @@
 import { AUDIO_TRANSPORT_PROCESSOR_NAME } from './audioTransportShared';
-import SignalsmithStretch from './vendor/SignalsmithStretch.mjs';
+import SignalsmithStretch from '../vendor/SignalsmithStretch.mjs';
 
 const DEFAULT_SAMPLE_RATE = 48000;
 const DEFAULT_PLAYBACK_RATE = 1;

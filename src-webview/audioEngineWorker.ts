@@ -28,7 +28,7 @@ import type {
   ViewportUiState,
   WaveformPlotMode,
 } from './audioEngineProtocol';
-import { resizeInteractiveWaveformSurface } from './interactiveWaveformRenderer';
+import { resizeInteractiveWaveformSurface } from './interactive-waveform/renderer';
 import {
   TILE_COLUMN_COUNT,
   quantizeCeil,
@@ -45,13 +45,13 @@ import {
   WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
   WAVEFORM_BOTTOM_PADDING_PX as WAVEFORM_BOTTOM_PADDING_PX,
   WAVEFORM_TOP_PADDING_PX as WAVEFORM_TOP_PADDING_PX,
-} from './waveformGeometry';
+} from './interactive-waveform/geometry';
 import {
   CHROMA_BIN_COUNT,
   CQT_DEFAULT_FMIN,
   getChromaBinAtPosition,
   getChromaLabel,
-} from './chromaShared';
+} from './audio-analysis/chromaShared';
 
 const CENTER_LINE_ALPHA = 0.14;
 const DISPLAY_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 24;
@@ -59,7 +59,7 @@ const DISPLAY_RAW_SAMPLE_PLOT_MAX_SAMPLES_PER_PIXEL = 1;
 const LOOP_HANDLE_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
 const MAX_FREQUENCY = 20000;
-const MIN_FREQUENCY = 50;
+const MIN_FREQUENCY = 30;
 const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
 const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
 const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
@@ -133,7 +133,7 @@ const QUALITY_PRESETS = {
 
 const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
 const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
-const SPECTROGRAM_TICKS = [20000, 16000, 12000, 8000, 4000, 2000, 1000, 400, 100, 50];
+const SPECTROGRAM_TICKS = [20000, 16000, 12000, 8000, 4000, 2000, 1000, 400, 100, 50, 30];
 const SPECTROGRAM_DB_WINDOW_LIMITS = {
   max: 12,
   min: -120,

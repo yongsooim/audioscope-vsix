@@ -2,7 +2,7 @@ import {
   WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
   WAVEFORM_BOTTOM_PADDING_PX as BOTTOM_PADDING,
   WAVEFORM_TOP_PADDING_PX as TOP_PADDING,
-} from './waveformGeometry';
+} from './geometry';
 
 const MIN_LEVEL_BLOCK_SIZE = 16;
 const LEVEL_SCALE_FACTOR = 4;
@@ -18,6 +18,24 @@ interface WaveformLevel {
   blockSize: number;
   maxPeaks: Float32Array;
   minPeaks: Float32Array;
+}
+
+interface WaveformRange {
+  max: number;
+  min: number;
+}
+
+interface RenderWaveformLineOptions {
+  alpha: number;
+  amplitudeHeight: number;
+  color: string;
+  ctx: OffscreenCanvasRenderingContext2D;
+  midY: number;
+  sampleCount: number;
+  samples: Float32Array;
+  startSample: number;
+  visibleSamples: number;
+  width: number;
 }
 
 export interface InteractiveWaveformData {
@@ -39,7 +57,7 @@ export function buildInteractiveWaveformData(
   let previousLevel: WaveformLevel | null = null;
 
   for (const blockSize of getInteractiveWaveformBlockSizes(samples.length)) {
-    const level = previousLevel && blockSize === previousLevel.blockSize * LEVEL_SCALE_FACTOR
+    const level: WaveformLevel = previousLevel && blockSize === previousLevel.blockSize * LEVEL_SCALE_FACTOR
       ? buildPeakLevelFromPrevious(previousLevel)
       : buildInteractiveWaveformLevel(samples, blockSize);
     levels.push(level);
@@ -282,7 +300,7 @@ export function renderInteractiveWaveform(
   ctx.globalAlpha = 1;
 }
 
-function buildPeakLevel(samples, blockSize) {
+function buildPeakLevel(samples: Float32Array, blockSize: number): WaveformLevel {
   const blockCount = Math.ceil(samples.length / blockSize);
   const minPeaks = new Float32Array(blockCount);
   const maxPeaks = new Float32Array(blockCount);
@@ -312,7 +330,7 @@ function buildPeakLevel(samples, blockSize) {
   return { blockSize, minPeaks, maxPeaks };
 }
 
-function buildPeakLevelFromPrevious(previousLevel) {
+function buildPeakLevelFromPrevious(previousLevel: WaveformLevel): WaveformLevel {
   const blockCount = Math.ceil(previousLevel.maxPeaks.length / LEVEL_SCALE_FACTOR);
   const minPeaks = new Float32Array(blockCount);
   const maxPeaks = new Float32Array(blockCount);
@@ -347,7 +365,7 @@ function buildPeakLevelFromPrevious(previousLevel) {
   };
 }
 
-function getLevelRange(level, startSample, endSample) {
+function getLevelRange(level: WaveformLevel, startSample: number, endSample: number): WaveformRange {
   const startBlock = Math.max(0, Math.floor(startSample / level.blockSize));
   const endBlock = Math.min(level.maxPeaks.length, Math.ceil(endSample / level.blockSize));
 
@@ -374,7 +392,7 @@ function getLevelRange(level, startSample, endSample) {
   return { min, max };
 }
 
-function getSampleRange(samples, startSample, endSample) {
+function getSampleRange(samples: Float32Array, startSample: number, endSample: number): WaveformRange {
   const safeStart = Math.max(0, startSample);
   const safeEnd = Math.min(samples.length, endSample);
 
@@ -400,8 +418,8 @@ function getSampleRange(samples, startSample, endSample) {
   return { min, max };
 }
 
-function pickLevel(levels, samplesPerPixel) {
-  let selected = null;
+function pickLevel(levels: WaveformLevel[], samplesPerPixel: number): WaveformLevel | null {
+  let selected: WaveformLevel | null = null;
 
   for (const level of levels) {
     if (level.blockSize <= samplesPerPixel * 1.5) {
@@ -426,7 +444,7 @@ function renderWaveformLine({
   samples,
   color,
   alpha,
-}) {
+}: RenderWaveformLineOptions): void {
   const maxSampleIndex = Math.max(0, sampleCount - 1);
 
   ctx.save();
@@ -454,7 +472,7 @@ function renderWaveformLine({
   ctx.restore();
 }
 
-function getInterpolatedSample(samples, position) {
+function getInterpolatedSample(samples: Float32Array, position: number): number {
   const index = Math.floor(position);
   const nextIndex = Math.min(samples.length - 1, index + 1);
   const fraction = position - index;
@@ -464,8 +482,8 @@ function getInterpolatedSample(samples, position) {
   return a + (b - a) * fraction;
 }
 
-function getWaveformDataSampleCount(waveformData) {
-  if (!waveformData || typeof waveformData !== 'object') {
+function getWaveformDataSampleCount(waveformData: InteractiveWaveformData | null): number {
+  if (!waveformData) {
     return 0;
   }
 
@@ -478,19 +496,19 @@ function getWaveformDataSampleCount(waveformData) {
   return waveformData.samples instanceof Float32Array ? waveformData.samples.length : 0;
 }
 
-function getWaveformDataSamples(waveformData) {
+function getWaveformDataSamples(waveformData: InteractiveWaveformData | null): Float32Array | null {
   return waveformData?.samples instanceof Float32Array ? waveformData.samples : null;
 }
 
-function lerp(start, end, amount) {
+function lerp(start: number, end: number, amount: number): number {
   return start + (end - start) * amount;
 }
 
-function smoothStep(edge0, edge1, value) {
+function smoothStep(edge0: number, edge1: number, value: number): number {
   const t = clamp((value - edge0) / Math.max(1e-6, edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
 }
 
-function clamp(value, min, max) {
+function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }

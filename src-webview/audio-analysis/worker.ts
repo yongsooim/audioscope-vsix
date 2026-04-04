@@ -1,8 +1,8 @@
-import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from './waveCoreRuntime';
+import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from '../waveCoreRuntime';
 import {
   TILE_COLUMN_COUNT,
   quantizeCeil,
-} from './sharedBuffers';
+} from '../sharedBuffers';
 import {
   buildConstantQFrequencies,
   buildCqtChromaAssignments,
@@ -15,7 +15,7 @@ import {
   normalizeSpectrogramWindowFunction,
   type SpectrogramWindowFunction,
   WINDOW_FUNCTION_CODES,
-} from './windowShared';
+} from '../windowShared';
 import {
   ANALYSIS_TYPE_CODES,
   COLORMAP_DISTRIBUTION_GAMMAS,
@@ -67,26 +67,36 @@ import {
   WEBGPU_STFT_SCRATCH_SLOT_COUNT,
   WEBGPU_TILE_TEXTURE_FORMAT,
   WEBGPU_VISIBLE_TILE_SUBMIT_BATCH_SIZE,
-} from './audio-analysis/constants';
+} from './constants';
 import {
   WEBGPU_BACKGROUND_SHADER,
+  WEBGPU_PALETTE_SHADER_HELPERS,
+  WEBGPU_TILE_SHADER,
+} from './shaderCommon';
+import {
   WEBGPU_CQT_CHROMA_RENDER_SHADER,
   WEBGPU_CQT_VALUES_SHADER,
+} from './shaderChroma';
+import {
   WEBGPU_MEL_ANALYSIS_FUNCTIONS,
   WEBGPU_MEL_ANALYSIS_SHADER_HELPERS,
   WEBGPU_MEL_RENDER_SHADER,
+} from './shaderMel';
+import {
   WEBGPU_MFCC_MEL_VALUES_SHADER,
   WEBGPU_MFCC_RENDER_SHADER,
-  WEBGPU_PALETTE_SHADER_HELPERS,
+} from './shaderMfcc';
+import {
   WEBGPU_SCALOGRAM_FFT_MULTIPLY_SHADER,
   WEBGPU_SCALOGRAM_FFT_RENDER_SHADER,
   WEBGPU_SCALOGRAM_FFT_SHADER,
   WEBGPU_SCALOGRAM_RENDER_SHADER,
+} from './shaderScalogram';
+import {
   WEBGPU_SPECTROGRAM_FFT_SHADER,
   WEBGPU_SPECTROGRAM_INPUT_SHADER,
   WEBGPU_SPECTROGRAM_RENDER_SHADER,
-  WEBGPU_TILE_SHADER,
-} from './audio-analysis/shaders';
+} from './shaderSpectrogram';
 
 type QualityPreset = 'balanced' | 'high' | 'max';
 type AnalysisType = 'chroma' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';

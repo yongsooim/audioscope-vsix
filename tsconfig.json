@@ -1,11 +1,16 @@
 {
   "compilerOptions": {
     "module": "commonjs",
+    "moduleResolution": "node",
     "target": "ES2024",
     "lib": [
       "ES2024",
       "DOM"
     ],
+    "types": [
+      "node"
+    ],
+    "ignoreDeprecations": "6.0",
     "outDir": "out",
     "rootDir": "src",
     "sourceMap": true,

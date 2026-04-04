@@ -1,4 +1,4 @@
-import type { PlaybackSession } from '../../audioTransport';
+import type { PlaybackSession } from '../../transport/audioTransport';
 
 export function createPlaybackAnalysisData(audioBuffer: AudioBuffer): { monoSamples: Float32Array; playbackSession: PlaybackSession } {
   const channelCount = Math.max(1, audioBuffer.numberOfChannels);
