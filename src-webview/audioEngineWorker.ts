@@ -403,6 +403,11 @@ self.onmessage = (event: MessageEvent<EngineMainToWorkerMessage>) => {
   }
 
   switch (message.type) {
+    case 'bootstrapRuntime':
+      enqueueRequest(async () => {
+        await getRuntime();
+      });
+      return;
     case 'InitSurfaces':
       handleInitSurfaces(message);
       return;

@@ -689,6 +689,7 @@ async function ensureEngineWorker(loadToken: number): Promise<Worker | null> {
     }
     setFatalStatus(`Audio engine worker failed: ${event.message || 'Unknown worker error.'}`);
   });
+  worker.postMessage({ type: 'bootstrapRuntime' });
   postInitSurfaces();
   return worker;
 }
@@ -2138,19 +2139,12 @@ async function initializePlaybackFromPreparedData(
     playbackSession.sourceSampleRate,
   );
 
-  await Promise.all([
-    state.waveformSurfaceReadyPromise,
-    state.spectrogramSurfaceReadyPromise,
-  ]);
+  await state.waveformSurfaceReadyPromise;
 
-  const [engineWorker, analysisWorker] = await Promise.all([
-    ensureEngineWorker(loadToken),
-    ensureAnalysisWorker(loadToken),
-  ]);
+  const engineWorker = await ensureEngineWorker(loadToken);
   if (
     !audioTransport
     || !engineWorker
-    || !analysisWorker
     || loadToken !== state.loadToken
     || state.audioTransport !== audioTransport
   ) {
@@ -2172,22 +2166,37 @@ async function initializePlaybackFromPreparedData(
     },
   }, [engineMono.buffer]);
 
-  await state.analysisRuntimeReadyPromise;
-  if (loadToken !== state.loadToken) {
-    return;
-  }
+  const analysisSessionPromise = (async () => {
+    await state.spectrogramSurfaceReadyPromise;
+    const analysisWorker = await ensureAnalysisWorker(loadToken);
+    if (
+      !analysisWorker
+      || loadToken !== state.loadToken
+      || state.audioTransport !== audioTransport
+    ) {
+      return;
+    }
 
-  analysisWorker.postMessage({
-    type: 'attachAudioSession',
-    body: {
-      duration: playbackSession.durationSeconds,
-      quality: normalizeSpectrogramQuality(payload?.spectrogramQuality),
-      sampleCount: monoSamples.length,
-      sampleRate: playbackSession.sourceSampleRate,
-      samplesBuffer: monoSamples.buffer,
-      sessionVersion: state.engineSessionRevision,
-    },
-  }, [monoSamples.buffer]);
+    await state.analysisRuntimeReadyPromise;
+    if (
+      loadToken !== state.loadToken
+      || state.audioTransport !== audioTransport
+    ) {
+      return;
+    }
+
+    analysisWorker.postMessage({
+      type: 'attachAudioSession',
+      body: {
+        duration: playbackSession.durationSeconds,
+        quality: normalizeSpectrogramQuality(payload?.spectrogramQuality),
+        sampleCount: monoSamples.length,
+        sampleRate: playbackSession.sourceSampleRate,
+        samplesBuffer: monoSamples.buffer,
+        sessionVersion: state.engineSessionRevision,
+      },
+    }, [monoSamples.buffer]);
+  })();
 
   await audioTransport.load({
     playbackSession,
@@ -2204,8 +2213,9 @@ async function initializePlaybackFromPreparedData(
   renderWaveformUi();
   syncTransport();
   refreshSpectrogramAnalysisConfig({ persist: false });
-  scheduleSpectrogramRender({ force: true });
   setAnalysisStatus('Playback ready');
+
+  void analysisSessionPromise;
 }
 
 const {

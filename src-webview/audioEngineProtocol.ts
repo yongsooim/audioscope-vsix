@@ -138,6 +138,10 @@ export interface LoadAnalysisSessionMessage {
   type: 'LoadAnalysisSession';
 }
 
+export interface EngineBootstrapRuntimeMessage {
+  type: 'bootstrapRuntime';
+}
+
 export interface PlaybackClockTickMessage {
   body: PlaybackClockState;
   type: 'PlaybackClockTick';
@@ -257,6 +261,7 @@ export interface RequestSampleInfoMessage {
 }
 
 export type EngineMainToWorkerMessage =
+  | EngineBootstrapRuntimeMessage
   | InitSurfacesMessage
   | LoadAnalysisSessionMessage
   | PlaybackClockTickMessage
