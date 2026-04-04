@@ -1047,6 +1047,18 @@ function renderTransportOverview(uiState: ViewportUiState | null): void {
   elements.timelineCurrentMarker.style.left = `${currentPercent.toFixed(6)}%`;
 }
 
+function renderPlaybackIndicators(uiState: ViewportUiState | null): void {
+  const cursorVisible = uiState?.cursorVisible === true;
+  const cursorPercent = uiState?.cursorPercent ?? 0;
+  elements.waveformProgress.style.width = `${cursorPercent}%`;
+  elements.waveformCursor.style.left = `${cursorPercent}%`;
+  elements.waveformCursor.style.display = cursorVisible ? 'block' : 'none';
+  elements.spectrogramProgress.style.width = `${cursorPercent}%`;
+  elements.spectrogramCursor.style.left = `${cursorPercent}%`;
+  elements.spectrogramCursor.style.display = cursorVisible ? 'block' : 'none';
+  renderTransportOverview(uiState);
+}
+
 function renderWaveformUi(): void {
   const uiState = state.engineUiState;
   elements.waveZoomReset.textContent = 'Reset';
@@ -1063,17 +1075,7 @@ function renderWaveformUi(): void {
   elements.waveClearLoop.disabled = !(selection?.committed);
   renderWaveformAxis();
   renderSelectionAndLoop(uiState);
-
-  const cursorVisible = uiState?.cursorVisible === true;
-  const cursorPercent = uiState?.cursorPercent ?? 0;
-  elements.waveformProgress.style.width = `${cursorPercent}%`;
-  elements.waveformCursor.style.left = `${cursorPercent}%`;
-  elements.waveformCursor.style.display = cursorVisible ? 'block' : 'none';
-  elements.spectrogramProgress.style.width = `${cursorPercent}%`;
-  elements.spectrogramCursor.style.left = `${cursorPercent}%`;
-  elements.spectrogramCursor.style.display = cursorVisible ? 'block' : 'none';
-
-  renderTransportOverview(uiState);
+  renderPlaybackIndicators(uiState);
 }
 
 function renderSpectrogramScale(): void {
@@ -2066,6 +2068,9 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
 
 function handleEngineWorkerMessage(message: EngineWorkerToMainMessage): void {
   switch (message.type) {
+    case 'PlaybackProgress':
+      applyPlaybackProgress(message.body);
+      return;
     case 'ViewportUiState':
       applyViewportUiState(message.body);
       return;
@@ -2078,6 +2083,26 @@ function handleEngineWorkerMessage(message: EngineWorkerToMainMessage): void {
     default:
       return;
   }
+}
+
+function applyPlaybackProgress(body: {
+  cursorPercent: number;
+  cursorVisible: boolean;
+  overviewCurrentPercent: number;
+  overviewCurrentVisible: boolean;
+  playback: ViewportUiState['playback'];
+}): void {
+  const uiState = state.engineUiState;
+  if (!uiState) {
+    return;
+  }
+
+  uiState.cursorPercent = body.cursorPercent;
+  uiState.cursorVisible = body.cursorVisible;
+  uiState.overview.currentPercent = body.overviewCurrentPercent;
+  uiState.overview.currentVisible = body.overviewCurrentVisible;
+  uiState.playback = body.playback;
+  renderPlaybackIndicators(uiState);
 }
 
 async function decodeAudioData(arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {

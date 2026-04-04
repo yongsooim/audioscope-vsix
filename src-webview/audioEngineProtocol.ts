@@ -269,6 +269,17 @@ export interface ViewportUiStateMessage {
   type: 'ViewportUiState';
 }
 
+export interface PlaybackProgressMessage {
+  body: {
+    cursorPercent: number;
+    cursorVisible: boolean;
+    overviewCurrentPercent: number;
+    overviewCurrentVisible: boolean;
+    playback: PlaybackClockState;
+  };
+  type: 'PlaybackProgress';
+}
+
 export interface WaveformSurfaceReadyMessage {
   body: {
     presentedEndFrame: number;
@@ -301,6 +312,7 @@ export interface EngineErrorMessage {
 
 export type EngineWorkerToMainMessage =
   | EngineErrorMessage
+  | PlaybackProgressMessage
   | SampleInfoMessage
   | SpectrogramSurfaceReadyMessage
   | ViewportUiStateMessage

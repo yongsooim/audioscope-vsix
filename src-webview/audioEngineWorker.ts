@@ -666,6 +666,7 @@ function scheduleWaveformPyramidBuild(sessionRevision: number): void {
 }
 
 function handlePlaybackClockTick(clock: PlaybackClockState): void {
+  const previousLoopRangeFrames = state.loopRangeFrames;
   state.playbackClock = {
     currentFrameFloat: clamp(Number(clock.currentFrameFloat) || 0, 0, Math.max(0, state.session.durationFrames)),
     durationFrames: Math.max(0, Math.round(Number(clock.durationFrames) || state.session.durationFrames || 0)),
@@ -680,8 +681,13 @@ function handlePlaybackClockTick(clock: PlaybackClockState): void {
     state.playbackClock.loopEndFrame,
     state.playbackClock.durationFrames,
   );
-  applyFollowSolver();
-  emitUiState();
+  const followRangeChanged = applyFollowSolver();
+  if (followRangeChanged || !areRangeFramesEqual(previousLoopRangeFrames, state.loopRangeFrames)) {
+    emitUiState();
+    return;
+  }
+
+  emitPlaybackProgress();
 }
 
 function handleViewportIntent(message: SetViewportIntentMessage): void {
@@ -1196,10 +1202,9 @@ function normalizeOptionalRange(
   return safeEnd > safeStart ? { startFrame: safeStart, endFrame: safeEnd } : null;
 }
 
-function applyFollowSolver(): void {
+function applyFollowSolver(): boolean {
   if (!state.viewport.followEnabled || isInteractionActive()) {
-    clampViewportToDuration();
-    return;
+    return clampViewportToDuration();
   }
 
   const currentRange = getTargetRange();
@@ -1214,6 +1219,7 @@ function applyFollowSolver(): void {
   if (changed) {
     scheduleRender();
   }
+  return changed;
 }
 
 function isInteractionActive(): boolean {
@@ -1227,9 +1233,9 @@ function createFullRange(): RangeFrames {
   };
 }
 
-function clampViewportToDuration(): void {
+function clampViewportToDuration(): boolean {
   const currentRange = getTargetRange();
-  setTargetRange(currentRange.startFrame, currentRange.endFrame);
+  return setTargetRange(currentRange.startFrame, currentRange.endFrame);
 }
 
 function setTargetRange(startFrame: number, endFrame: number): boolean {
@@ -2649,6 +2655,39 @@ function emitUiState(): void {
   postMessage({
     type: 'ViewportUiState',
     body: uiState,
+  });
+}
+
+function emitPlaybackProgress(): void {
+  const range = getPresentedRangeForInteraction();
+  const playbackFrame = getClampedPlaybackFrame();
+  const spanFrames = Math.max(0, range.endFrame - range.startFrame);
+  const followCursorLocked = state.viewport.followEnabled
+    && !isInteractionActive()
+    && range.startFrame > 0
+    && range.endFrame < state.session.durationFrames;
+  const cursorPercent = spanFrames > 0
+    ? followCursorLocked
+      ? WAVEFORM_FOLLOW_RATIO * 100
+      : clamp(((playbackFrame - range.startFrame) / spanFrames) * 100, 0, 100)
+    : 0;
+  const cursorVisible = spanFrames > 0
+    && (
+      followCursorLocked
+      || (playbackFrame >= range.startFrame && playbackFrame <= range.endFrame)
+    );
+
+  postMessage({
+    type: 'PlaybackProgress',
+    body: {
+      cursorPercent,
+      cursorVisible,
+      overviewCurrentPercent: state.session.durationFrames > 0
+        ? clamp((playbackFrame / state.session.durationFrames) * 100, 0, 100)
+        : 0,
+      overviewCurrentVisible: state.session.durationFrames > 0,
+      playback: state.playbackClock,
+    },
   });
 }
 

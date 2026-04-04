@@ -279,6 +279,7 @@ interface WebGpuScalogramComputeState {
   fftFailureCount: number;
   fftFastPathDisabled: boolean;
   fftParamBuffer: any;
+  fftParamEntryCapacity: number;
   fftParamStride: number;
   fftPipeline: any;
   fftRenderBindGroupLayout: any;
@@ -814,6 +815,7 @@ function destroyWebGpuScalogramComputeState(computeState: WebGpuScalogramCompute
   computeState.pcmBuffer = null;
   computeState.pcmSampleCount = 0;
   computeState.fftParamBuffer = null;
+  computeState.fftParamEntryCapacity = 0;
 }
 
 function destroyWebGpuCqtComputeState(computeState: WebGpuCqtComputeState | null): void {
@@ -3129,6 +3131,36 @@ function ensureWebGpuScalogramFftScratchBuffers(
   }
 }
 
+function ensureWebGpuScalogramFftParamBufferCapacity(
+  requiredEntryCount: number,
+  webGpu: WebGpuCompositorState,
+  computeState: WebGpuScalogramComputeState,
+): boolean {
+  const globals = getWebGpuGlobals();
+  if (!globals) {
+    return false;
+  }
+
+  if (computeState.fftParamBuffer && computeState.fftParamEntryCapacity >= requiredEntryCount) {
+    return true;
+  }
+
+  if (computeState.fftParamBuffer && typeof computeState.fftParamBuffer.destroy === 'function') {
+    computeState.fftParamBuffer.destroy();
+  }
+
+  const nextEntryCapacity = Math.max(
+    WEBGPU_SCALOGRAM_FFT_PARAM_ENTRY_COUNT,
+    nextPowerOfTwo(requiredEntryCount),
+  );
+  computeState.fftParamBuffer = webGpu.device.createBuffer({
+    size: computeState.fftParamStride * nextEntryCapacity,
+    usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.UNIFORM,
+  });
+  computeState.fftParamEntryCapacity = nextEntryCapacity;
+  return true;
+}
+
 function createScalogramFftInputData(
   fftSize: number,
   inputEndSample: number,
@@ -3842,6 +3874,7 @@ function initializeWebGpuScalogramCompute(webGpu: WebGpuCompositorState): WebGpu
         }),
       }),
       fftParamBuffer,
+      fftParamEntryCapacity: WEBGPU_SCALOGRAM_FFT_PARAM_ENTRY_COUNT,
       fftParamStride,
       fftPipeline: webGpu.device.createComputePipeline({
         compute: {
@@ -4437,8 +4470,58 @@ async function renderScalogramTileWithFftWebGpu(
   try {
     const stageCount = getFftStageCount(fftWindow.fftSize);
     const tileSpan = Math.max((1 / analysisState.sampleRate), tileEnd - tileStart);
+    const totalBatchCount = Math.ceil(plan.rowCount / SCALOGRAM_FFT_ROW_BATCH_SIZE);
+    const batchParamEntryCount = stageCount + 2;
+    if (!ensureWebGpuScalogramFftParamBufferCapacity(totalBatchCount * batchParamEntryCount, webGpu, computeState)) {
+      recordScalogramFftPathFailure(computeState);
+      return false;
+    }
 
-    for (let rowStart = 0; rowStart < plan.rowCount; rowStart += SCALOGRAM_FFT_ROW_BATCH_SIZE) {
+    const multiplyBindGroup = webGpu.device.createBindGroup({
+      layout: computeState.fftMultiplyBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 16 } },
+        { binding: 1, resource: { buffer: fftWindowResource.spectrumBuffer } },
+        { binding: 2, resource: { buffer: fftResource.spectrumBuffer } },
+        { binding: 3, resource: { buffer: computeState.fftBatchSourceBuffer } },
+      ],
+    });
+    const inverseBindGroups: any[] = [];
+    let inverseSourceBuffer = computeState.fftBatchSourceBuffer;
+    let inverseTargetBuffer = computeState.fftBatchPingBuffer;
+    for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+      inverseBindGroups.push(webGpu.device.createBindGroup({
+        layout: computeState.fftBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 16 } },
+          { binding: 1, resource: { buffer: inverseSourceBuffer } },
+          { binding: 2, resource: { buffer: inverseTargetBuffer } },
+        ],
+      }));
+
+      const nextSourceBuffer = inverseTargetBuffer;
+      if (nextSourceBuffer === computeState.fftBatchPingBuffer) {
+        inverseTargetBuffer = computeState.fftBatchPongBuffer;
+      } else if (nextSourceBuffer === computeState.fftBatchPongBuffer) {
+        inverseTargetBuffer = computeState.fftBatchSourceBuffer;
+      } else {
+        inverseTargetBuffer = computeState.fftBatchPingBuffer;
+      }
+      inverseSourceBuffer = nextSourceBuffer;
+    }
+    const renderBindGroup = webGpu.device.createBindGroup({
+      layout: computeState.fftRenderBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 64 } },
+        { binding: 1, resource: { buffer: inverseSourceBuffer } },
+        { binding: 2, resource: { buffer: fftResource.rowBuffer } },
+        { binding: 3, resource: tileRecord.gpuTextureView },
+      ],
+    });
+    const batchEncoder = webGpu.device.createCommandEncoder();
+    const batchPass = batchEncoder.beginComputePass();
+
+    for (let batchIndex = 0, rowStart = 0; rowStart < plan.rowCount; rowStart += SCALOGRAM_FFT_ROW_BATCH_SIZE, batchIndex += 1) {
       const batchCount = Math.min(SCALOGRAM_FFT_ROW_BATCH_SIZE, plan.rowCount - rowStart);
       const [multiplyDispatchX, multiplyDispatchY] = getLinearComputeDispatchSize(
         fftWindow.fftSize * batchCount,
@@ -4452,7 +4535,8 @@ async function renderScalogramTileWithFftWebGpu(
         tileRecord.columnCount * batchCount,
         webGpu.device,
       );
-      const multiplyParamOffset = 0;
+      const batchParamBaseOffset = computeState.fftParamStride * batchParamEntryCount * batchIndex;
+      const multiplyParamOffset = batchParamBaseOffset;
       writeBufferAtOffset(
         computeState.fftParamBuffer,
         multiplyParamOffset,
@@ -4465,7 +4549,7 @@ async function renderScalogramTileWithFftWebGpu(
       );
 
       for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
-        const paramOffset = computeState.fftParamStride * (1 + stageIndex);
+        const paramOffset = batchParamBaseOffset + (computeState.fftParamStride * (1 + stageIndex));
         writeBufferAtOffset(
           computeState.fftParamBuffer,
           paramOffset,
@@ -4473,7 +4557,7 @@ async function renderScalogramTileWithFftWebGpu(
         );
       }
 
-      const renderParamOffset = computeState.fftParamStride * (1 + stageCount);
+      const renderParamOffset = batchParamBaseOffset + (computeState.fftParamStride * (1 + stageCount));
       writeBufferAtOffset(
         computeState.fftParamBuffer,
         renderParamOffset,
@@ -4488,66 +4572,22 @@ async function renderScalogramTileWithFftWebGpu(
           tileStart,
         }),
       );
-
-      const batchEncoder = webGpu.device.createCommandEncoder();
-      const batchPass = batchEncoder.beginComputePass();
-
-      const multiplyBindGroup = webGpu.device.createBindGroup({
-        layout: computeState.fftMultiplyBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 16 } },
-          { binding: 1, resource: { buffer: fftWindowResource.spectrumBuffer } },
-          { binding: 2, resource: { buffer: fftResource.spectrumBuffer } },
-          { binding: 3, resource: { buffer: computeState.fftBatchSourceBuffer } },
-        ],
-      });
       batchPass.setPipeline(computeState.fftMultiplyPipeline);
       batchPass.setBindGroup(0, multiplyBindGroup, [multiplyParamOffset]);
       batchPass.dispatchWorkgroups(multiplyDispatchX, multiplyDispatchY);
 
       batchPass.setPipeline(computeState.fftPipeline);
-      let inverseSourceBuffer = computeState.fftBatchSourceBuffer;
-      let inverseTargetBuffer = computeState.fftBatchPingBuffer;
-
       for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
-        const paramOffset = computeState.fftParamStride * (1 + stageIndex);
-        const bindGroup = webGpu.device.createBindGroup({
-          layout: computeState.fftBindGroupLayout,
-          entries: [
-            { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 16 } },
-            { binding: 1, resource: { buffer: inverseSourceBuffer } },
-            { binding: 2, resource: { buffer: inverseTargetBuffer } },
-          ],
-        });
-        batchPass.setBindGroup(0, bindGroup, [paramOffset]);
+        const paramOffset = batchParamBaseOffset + (computeState.fftParamStride * (1 + stageIndex));
+        batchPass.setBindGroup(0, inverseBindGroups[stageIndex], [paramOffset]);
         batchPass.dispatchWorkgroups(inverseDispatchX, inverseDispatchY);
-
-        const nextSourceBuffer = inverseTargetBuffer;
-        if (nextSourceBuffer === computeState.fftBatchPingBuffer) {
-          inverseTargetBuffer = computeState.fftBatchPongBuffer;
-        } else if (nextSourceBuffer === computeState.fftBatchPongBuffer) {
-          inverseTargetBuffer = computeState.fftBatchSourceBuffer;
-        } else {
-          inverseTargetBuffer = computeState.fftBatchPingBuffer;
-        }
-        inverseSourceBuffer = nextSourceBuffer;
       }
-
-      const renderBindGroup = webGpu.device.createBindGroup({
-        layout: computeState.fftRenderBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: computeState.fftParamBuffer, size: 64 } },
-          { binding: 1, resource: { buffer: inverseSourceBuffer } },
-          { binding: 2, resource: { buffer: fftResource.rowBuffer } },
-          { binding: 3, resource: tileRecord.gpuTextureView },
-        ],
-      });
       batchPass.setPipeline(computeState.fftRenderPipeline);
       batchPass.setBindGroup(0, renderBindGroup, [renderParamOffset]);
       batchPass.dispatchWorkgroups(renderDispatchX, renderDispatchY);
-      batchPass.end();
-      webGpu.device.queue.submit([batchEncoder.finish()]);
     }
+    batchPass.end();
+    webGpu.device.queue.submit([batchEncoder.finish()]);
 
     tileRecord.gpuDirty = false;
     tileRecord.renderedColumns = tileRecord.columnCount;
