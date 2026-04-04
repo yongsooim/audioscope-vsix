@@ -5,87 +5,91 @@
 </p>
 
 <p align="center">
-  <strong>Inspect audio files in VS Code with synchronized waveform, spectrogram, playback, and loudness views.</strong>
+  <strong>VS Code audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review.</strong>
 </p>
 
 <p align="center">
   <img src="./images/audioscope-full.png" alt="audioscope waveform and spectrogram screenshot">
 </p>
 
-## What it does
-
-`audioscope` is a read-only custom editor for audio inspection inside VS Code.
-
-- Open common audio formats in a dedicated editor
-- Inspect waveform + spectrogram in a split view
-- Seek, zoom, loop, follow playback, and control speed
-- Review metadata and loudness summary (LUFS/LRA/Peak/True Peak)
-- Use embedded FFmpeg WASM tools (no system ffmpeg required at runtime)
-
-## Quick start
+## Quick Start
 
 1. Install the extension.
 2. Open a supported audio file.
 3. If needed, run **`audioscope: Open Active Audio File in audioscope`**.
 
-> [!NOTE]
-> VS Code `Media Preview` can still take precedence for some extensions on first open (`.mp3`, `.wav`, `.ogg`, `.oga`).
+## What it does
 
-## Supported formats
+`audioscope` is a read-only custom editor for audio files inside VS Code.
+
+- Open supported audio files in a dedicated audio editor
+- Inspect synchronized waveform and spectrogram views
+- Switch between spectrogram, mel-spectrogram, MFCC, scalogram, and chroma analysis
+- Seek with the timeline or `-5s` / `+5s` buttons
+- Control playback speed from `0.5x` to `2x`
+- Zoom the waveform, follow playback, and set loop ranges by dragging
+- Review metadata such as codec, container, duration, sample rate, bitrate, channels, tags, and chapters
+- View loudness summary values including integrated LUFS, LRA, sample peak, and true peak
+- Use bundled FFmpeg and ffprobe WASM tools, so no system ffmpeg install is required at runtime
+
+> [!NOTE]
+> VS Code `Media Preview` can still take precedence for some extensions on first open, especially `.mp3`, `.wav`, and `.ogg` files.
+
+## Supported Formats
 
 `.wav`, `.wave`, `.mp3`, `.ogg`, `.oga`, `.flac`, `.m4a`, `.aac`, `.opus`, `.aif`, `.aiff`
+
+## Features
+
+### Waveform and transport
+
+- Synchronized waveform viewer
+- Timeline scrubber and overview strip
+- Play / pause controls
+- Seek backward and forward by 5 seconds
+- Playback speed control
+- Follow playback mode
+- Loop selection and loop handles
+- Waveform zoom controls
+
+### Spectrogram and analysis
+
+- Spectrogram visualization
+- Audio analysis uses WebGPU when available, with WASM fallback for unsupported environments
+- Mel-spectrogram analysis
+- MFCC analysis
+- Scalogram analysis
+- Chroma analysis
+- FFT size controls
+- Overlap ratio controls
+- Window function selection
+- Frequency scale controls
+- Colormap distribution controls
+- Decibel range controls
+- Mel band count controls
+- MFCC coefficient controls
+- Scalogram frequency range controls
+- Scalogram omega0 and row density controls
+
+### Metadata and loudness
+
+- Audio metadata summary
+- Codec name and long name
+- Container / format information
+- Duration, size, bitrate, sample rate, and channel layout
+- Tags and chapter data
+- Loudness analysis with LUFS, LRA, Peak, and True Peak
+- FFmpeg / ffprobe tool status and fallback guidance
 
 ## Settings
 
 - `audioscope.spectrogramQuality`: `balanced | high | max`
 - `audioscope.spectrogramDefaults`: persisted defaults for analysis controls
-- `audioscope.openSampleOnStartupInDevelopment`: open bundled sample on dev startup
+- `audioscope.openSampleOnStartupInDevelopment`: open the bundled sample on startup in development mode
 
-## Project structure (feature-oriented)
+## Keywords
 
-```text
-src/
-  extension.ts                         # VS Code activation entry
-  audioscopeEditor.ts                  # custom editor orchestration
-  audioscope-editor/
-    constants.ts                       # shared option/default constants
-    document.ts                        # CustomDocument model
-    editorTarget.ts                    # "can open?" and active resource resolution
-    payloadClone.ts                    # safe ArrayBuffer cloning helpers
-    spectrogramDefaults.ts             # config normalization/validation
-    webviewHtml.ts                     # webview HTML template
-  externalAudioTools.ts                # ffprobe/ffmpeg WASM host bridge
-  mediaHostCache.ts                    # host-side caching layer
-
-src-webview/
-  app.ts                               # webview bootstrap + state wiring
-  audioscope/controllers/*             # feature controllers (transport/load/media/...)
-  audioscope/math/*                    # analysis math helpers
-```
-
-## Runtime flow (code-path order)
-
-1. `activate()` registers the custom editor provider (`extension.ts`).
-2. `AudioscopeEditorProvider.resolveCustomEditor()` initializes webview, CSP, and handlers.
-3. Webview sends `ready` → extension sends `loadAudio` payload.
-4. Webview requests optional data (`requestMediaMetadata`, `requestDecodeFallback`, `requestLoudnessSummary`).
-5. Extension resolves requests using cache + embedded media tools, then posts response messages.
-6. User changes spectrogram defaults → extension validates and persists config.
-
-## Development
-
-```bash
-bun install
-git submodule update --init --recursive
-bun run compile
-```
-
-Build output:
-
-- `out/` extension host JavaScript
-- `dist/webview/` webview bundles
-- `dist/wasm/` analysis WASM binaries
-- `dist/embedded-tools/` embedded ffmpeg/ffprobe/browser decode tools
+audio inspector, waveform, spectrogram, mel, mfcc, scalogram, chroma, playback, loop, metadata, loudness, LUFS, integrated LUFS, EBU R 128, LRA, mp3, wav, flac, m4a, ogg, aac, opus, aiff, aif
 
 ## License
 
