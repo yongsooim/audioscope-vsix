@@ -6,11 +6,11 @@
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yongsooim/wave-scope-vsix.git"
+    "url": "https://github.com/yongsooim/audioscope-vsix.git"
   },
-  "homepage": "https://github.com/yongsooim/wave-scope-vsix#readme",
+  "homepage": "https://github.com/yongsooim/audioscope-vsix#readme",
   "bugs": {
-    "url": "https://github.com/yongsooim/wave-scope-vsix/issues"
+    "url": "https://github.com/yongsooim/audioscope-vsix/issues"
   },
   "license": "MIT",
   "icon": "images/icon.png",
