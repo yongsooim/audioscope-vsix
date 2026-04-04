@@ -65,6 +65,57 @@ fn getLevelRange(level: *const core.WaveLevel, start_sample: i32, end_sample: i3
     return .{ .min = -peak, .max = peak };
 }
 
+fn getSamplePeak(start_sample: i32, end_sample: i32) f32 {
+    return peakFromRange(getSampleRange(start_sample, end_sample));
+}
+
+fn getLevelPeak(level: *const core.WaveLevel, start_sample: i32, end_sample: i32) f32 {
+    const start_block = core.maxI32(0, @divTrunc(start_sample, level.block_size));
+    const end_block = core.minI32(level.block_count, core.ceilDivI32(end_sample, level.block_size));
+    if (end_block <= start_block) {
+        return 0.0;
+    }
+
+    var peak: f32 = 0.0;
+    var block_index = start_block;
+    while (block_index < end_block) : (block_index += 1) {
+        peak = core.maxF32(peak, level.abs_peaks[@as(usize, @intCast(block_index))]);
+    }
+
+    return peak;
+}
+
+const ColumnSampleRange = struct {
+    end_sample: i32,
+    start_sample: i32,
+};
+
+fn computeColumnSampleRange(requested_start_sample: f64, requested_sample_span: f64, column_index: i32, column_count: i32) ColumnSampleRange {
+    const raw_start_sample = @as(i32, @intFromFloat(@floor(
+        requested_start_sample + (
+            (@as(f64, @floatFromInt(column_index)) * requested_sample_span)
+                / @as(f64, @floatFromInt(column_count))
+        ),
+    )));
+    const raw_end_sample = @as(i32, @intFromFloat(@ceil(
+        requested_start_sample + (
+            (@as(f64, @floatFromInt(column_index + 1)) * requested_sample_span)
+                / @as(f64, @floatFromInt(column_count))
+        ),
+    )));
+    const start_sample = core.clampi32(raw_start_sample, 0, core.maxI32(0, core.g_session.sample_count - 1));
+    const end_sample = core.clampi32(
+        core.maxI32(start_sample + 1, raw_end_sample),
+        start_sample + 1,
+        core.g_session.sample_count,
+    );
+
+    return .{
+        .end_sample = end_sample,
+        .start_sample = start_sample,
+    };
+}
+
 const StableLevelSlicePlan = struct {
     actual_end_sample: f64,
     actual_end_block: i32,
@@ -277,6 +328,65 @@ pub export fn wave_build_waveform_pyramid() i32 {
     return level_count;
 }
 
+pub export fn wave_extract_waveform_peaks(view_start: f64, view_end: f64, column_count: i32, output_ptr: usize, meta_output_ptr: usize) i32 {
+    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or !core.isFiniteF64(view_start) or !core.isFiniteF64(view_end) or view_end <= view_start or !core.isFiniteF32(core.g_session.duration) or core.g_session.duration <= 0.0 or !core.isFiniteF32(core.g_session.sample_rate) or core.g_session.sample_rate <= 0.0) {
+        return 0;
+    }
+
+    const output: [*]f32 = @ptrFromInt(output_ptr);
+    const duration_f64 = @as(f64, core.g_session.duration);
+    const sample_rate_f64 = @as(f64, core.g_session.sample_rate);
+    const max_start = maxF64(0.0, duration_f64 - (1.0 / sample_rate_f64));
+    const clamped_start = core.clampf64(view_start, 0.0, max_start);
+    const clamped_end = core.clampf64(view_end, clamped_start + (1.0 / sample_rate_f64), duration_f64);
+    const requested_start_sample = clampSamplePosition(clamped_start * sample_rate_f64);
+    const requested_end_sample = clampSamplePosition(clamped_end * sample_rate_f64);
+    const requested_sample_span = maxF64(1.0, requested_end_sample - requested_start_sample);
+    const samples_per_pixel = requested_sample_span / @as(f64, @floatFromInt(column_count));
+    const selected_level = pickWaveformLevel(samples_per_pixel, requested_end_sample);
+
+    writeWaveformSliceMeta(
+        meta_output_ptr,
+        samplePositionToSeconds(requested_start_sample),
+        samplePositionToSeconds(requested_end_sample),
+    );
+
+    if (selected_level) |level| {
+        var column_index: i32 = 0;
+        while (column_index < column_count) : (column_index += 1) {
+            const sample_range = computeColumnSampleRange(
+                requested_start_sample,
+                requested_sample_span,
+                column_index,
+                column_count,
+            );
+            output[@as(usize, @intCast(column_index))] = getLevelPeak(
+                level,
+                sample_range.start_sample,
+                sample_range.end_sample,
+            );
+        }
+
+        return 1;
+    }
+
+    var column_index: i32 = 0;
+    while (column_index < column_count) : (column_index += 1) {
+        const sample_range = computeColumnSampleRange(
+            requested_start_sample,
+            requested_sample_span,
+            column_index,
+            column_count,
+        );
+        output[@as(usize, @intCast(column_index))] = getSamplePeak(
+            sample_range.start_sample,
+            sample_range.end_sample,
+        );
+    }
+
+    return 1;
+}
+
 pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column_count: i32, output_ptr: usize, meta_output_ptr: usize) i32 {
     if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or !core.isFiniteF64(view_start) or !core.isFiniteF64(view_end) or view_end <= view_start or !core.isFiniteF32(core.g_session.duration) or core.g_session.duration <= 0.0 or !core.isFiniteF32(core.g_session.sample_rate) or core.g_session.sample_rate <= 0.0) {
         return 0;
@@ -303,25 +413,13 @@ pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column
     if (selected_level) |level| {
         var column_index: i32 = 0;
         while (column_index < column_count) : (column_index += 1) {
-            const column_start_sample = @as(i32, @intFromFloat(@floor(
-                requested_start_sample + (
-                    (@as(f64, @floatFromInt(column_index)) * requested_sample_span)
-                        / @as(f64, @floatFromInt(column_count))
-                ),
-            )));
-            const column_end_sample = @as(i32, @intFromFloat(@ceil(
-                requested_start_sample + (
-                    (@as(f64, @floatFromInt(column_index + 1)) * requested_sample_span)
-                        / @as(f64, @floatFromInt(column_count))
-                ),
-            )));
-            const safe_start_sample = core.clampi32(column_start_sample, 0, core.maxI32(0, core.g_session.sample_count - 1));
-            const safe_end_sample = core.clampi32(
-                core.maxI32(safe_start_sample + 1, column_end_sample),
-                safe_start_sample + 1,
-                core.g_session.sample_count,
+            const sample_range = computeColumnSampleRange(
+                requested_start_sample,
+                requested_sample_span,
+                column_index,
+                column_count,
             );
-            const result = getLevelRange(level, safe_start_sample, safe_end_sample);
+            const result = getLevelRange(level, sample_range.start_sample, sample_range.end_sample);
 
             output[@as(usize, @intCast(column_index * 2))] = result.min;
             output[@as(usize, @intCast((column_index * 2) + 1))] = result.max;
@@ -332,25 +430,13 @@ pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column
 
     var column_index: i32 = 0;
     while (column_index < column_count) : (column_index += 1) {
-        const raw_start_sample = @as(i32, @intFromFloat(@floor(
-            requested_start_sample + (
-                (@as(f64, @floatFromInt(column_index)) * requested_sample_span)
-                    / @as(f64, @floatFromInt(column_count))
-            ),
-        )));
-        const raw_end_sample = @as(i32, @intFromFloat(@ceil(
-            requested_start_sample + (
-                (@as(f64, @floatFromInt(column_index + 1)) * requested_sample_span)
-                    / @as(f64, @floatFromInt(column_count))
-            ),
-        )));
-        const column_start_sample = core.clampi32(raw_start_sample, 0, core.maxI32(0, core.g_session.sample_count - 1));
-        const column_end_sample = core.clampi32(
-            core.maxI32(column_start_sample + 1, raw_end_sample),
-            column_start_sample + 1,
-            core.g_session.sample_count,
+        const sample_range = computeColumnSampleRange(
+            requested_start_sample,
+            requested_sample_span,
+            column_index,
+            column_count,
         );
-        const result = getSampleRange(column_start_sample, column_end_sample);
+        const result = getSampleRange(sample_range.start_sample, sample_range.end_sample);
 
         output[@as(usize, @intCast(column_index * 2))] = result.min;
         output[@as(usize, @intCast((column_index * 2) + 1))] = result.max;
