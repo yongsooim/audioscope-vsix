@@ -417,6 +417,22 @@ body {
   min-width: max-content;
 }
 
+.wave-toolbar-actions,
+.wave-toolbar-pill,
+.wave-tool-button,
+.wave-follow-toggle,
+.wave-follow-toggle-button,
+.wave-follow-toggle-text,
+.transport-button,
+.play-toggle,
+.transport-rate,
+.transport-rate-label,
+.transport-rate-button {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
 .wave-toolbar-group {
   display: inline-flex;
   align-items: center;
