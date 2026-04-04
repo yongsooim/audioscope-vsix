@@ -26,6 +26,8 @@
   --overview-track-border: rgba(103, 129, 178, 0.22);
   --overview-thumb-start: #4f8cff;
   --overview-thumb-end: #2f6df3;
+  --loop-accent: rgba(255, 223, 154, 0.8);
+  --loop-accent-glow: rgba(251, 191, 36, 0.32);
   --selection-fill: rgba(96, 165, 250, 0.14);
   --selection-border: rgba(191, 219, 254, 0.28);
   --cursor: rgba(191, 219, 254, 0.92);
@@ -375,7 +377,7 @@ body {
 .wave-toolbar-group-loop #wave-loop-label {
   flex: 1 1 120px;
   min-width: 0;
-  color: rgba(110, 168, 255, 0.96);
+  color: var(--loop-accent);
   width: 120px;
   max-width: none;
   overflow: hidden;
@@ -696,8 +698,8 @@ body {
   width: 2px;
   transform: translateX(-50%);
   border-radius: 999px;
-  background: rgba(255, 223, 154, 0.8);
-  box-shadow: 0 0 2px rgba(251, 191, 36, 0.32);
+  background: var(--loop-accent);
+  box-shadow: 0 0 2px var(--loop-accent-glow);
 }
 
 .spectrogram-loop-handle {
