@@ -78,6 +78,7 @@ const DEFAULT_SPECTROGRAM_COLORMAP_DISTRIBUTION: SpectrogramColormapDistribution
 const DEFAULT_MEL_BAND_COUNT = 256;
 const DEFAULT_MFCC_COEFFICIENT_COUNT = 20;
 const DEFAULT_MFCC_MEL_BAND_COUNT = 128;
+const SPECTROGRAM_CONFIG_APPLY_DELAY_MS = 16;
 const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
   balanced: 2048,
   high: 1024,
@@ -262,6 +263,8 @@ const state = {
     minDecibels: -80,
     overlapRatio: 0.75,
   },
+  spectrogramConfigApplyTimer: null as number | null,
+  spectrogramConfigPersistPending: false,
   spectrogramFrame: 0,
   spectrogramDefaultsPersistTimer: null as number | null,
   spectrogramMetaOpen: false,
@@ -672,6 +675,11 @@ function disposeAnalysisWorker(): void {
   window.cancelAnimationFrame(state.spectrogramFrame);
   state.spectrogramFrame = 0;
   state.spectrogramRenderForcePending = false;
+  if (state.spectrogramConfigApplyTimer) {
+    window.clearTimeout(state.spectrogramConfigApplyTimer);
+    state.spectrogramConfigApplyTimer = null;
+  }
+  state.spectrogramConfigPersistPending = false;
 
   if (state.analysisWorkerBootstrapUrl) {
     URL.revokeObjectURL(state.analysisWorkerBootstrapUrl);
@@ -857,6 +865,11 @@ function destroySession(): void {
     window.clearTimeout(state.spectrogramDefaultsPersistTimer);
     state.spectrogramDefaultsPersistTimer = null;
   }
+  if (state.spectrogramConfigApplyTimer) {
+    window.clearTimeout(state.spectrogramConfigApplyTimer);
+    state.spectrogramConfigApplyTimer = null;
+  }
+  state.spectrogramConfigPersistPending = false;
   window.cancelAnimationFrame(state.playbackFrame);
   state.playbackFrame = 0;
   window.cancelAnimationFrame(state.spectrogramFrame);
@@ -1392,6 +1405,11 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramScalogramHopSelect.disabled = !supportsHopControl;
   elements.spectrogramMinDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMaxDbSlider.disabled = !supportsDbWindow;
+  renderSpectrogramDbWindowUi(dbWindow);
+  setSpectrogramMetaOpen(state.spectrogramMetaOpen);
+}
+
+function renderSpectrogramDbWindowUi(dbWindow: { maxDecibels: number; minDecibels: number }): void {
   elements.spectrogramMinDbSlider.value = String(dbWindow.minDecibels);
   elements.spectrogramMaxDbSlider.value = String(dbWindow.maxDecibels);
   const rangeStartPercent = ((dbWindow.minDecibels - SPECTROGRAM_DB_WINDOW_LIMITS.min)
@@ -1401,7 +1419,6 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramDbRangeGroup.style.setProperty('--range-start', `${rangeStartPercent.toFixed(3)}%`);
   elements.spectrogramDbRangeGroup.style.setProperty('--range-end', `${rangeEndPercent.toFixed(3)}%`);
   elements.spectrogramDbRangeValue.textContent = `Min ${dbWindow.minDecibels} / Max ${dbWindow.maxDecibels} dB`;
-  setSpectrogramMetaOpen(state.spectrogramMetaOpen);
 }
 
 function setSpectrogramMetaOpen(open: boolean): void {
@@ -1540,6 +1557,38 @@ function schedulePersistSpectrogramDefaults(): void {
   }, 160);
 }
 
+function cancelActiveSpectrogramRender(): void {
+  if (!state.analysisWorker || !state.analysis) {
+    return;
+  }
+
+  const generation = state.analysis.generation;
+  if (generation <= 0) {
+    return;
+  }
+
+  state.analysisWorker.postMessage({
+    type: 'cancelGeneration',
+    body: { generation },
+  });
+}
+
+function scheduleSpectrogramConfigRefresh({ persist = true } = {}): void {
+  state.spectrogramConfigPersistPending = state.spectrogramConfigPersistPending || persist;
+  cancelActiveSpectrogramRender();
+
+  if (state.spectrogramConfigApplyTimer) {
+    return;
+  }
+
+  state.spectrogramConfigApplyTimer = window.setTimeout(() => {
+    const shouldPersist = state.spectrogramConfigPersistPending;
+    state.spectrogramConfigApplyTimer = null;
+    state.spectrogramConfigPersistPending = false;
+    refreshSpectrogramAnalysisConfig({ persist: shouldPersist });
+  }, SPECTROGRAM_CONFIG_APPLY_DELAY_MS);
+}
+
 function getSpectrogramRenderPixelHeight(): number {
   const screenHeight = Number(window.screen?.height);
   const fallbackHeight = Math.max(
@@ -1554,6 +1603,12 @@ function getSpectrogramRenderPixelHeight(): number {
 }
 
 function refreshSpectrogramAnalysisConfig({ persist = true } = {}): void {
+  if (state.spectrogramConfigApplyTimer) {
+    window.clearTimeout(state.spectrogramConfigApplyTimer);
+    state.spectrogramConfigApplyTimer = null;
+  }
+  const shouldPersist = persist || state.spectrogramConfigPersistPending;
+  state.spectrogramConfigPersistPending = false;
   const renderConfig = getEffectiveSpectrogramRenderConfig();
 
   if (state.engineWorker) {
@@ -1570,7 +1625,7 @@ function refreshSpectrogramAnalysisConfig({ persist = true } = {}): void {
 
   renderSpectrogramMeta();
   scheduleSpectrogramRender({ force: true });
-  if (persist) {
+  if (shouldPersist) {
     schedulePersistSpectrogramDefaults();
   }
 }
@@ -2769,7 +2824,7 @@ function attachUiEvents(): void {
       elements.spectrogramScalogramOmegaSlider.value,
     );
     elements.spectrogramScalogramOmegaValue.textContent = String(state.spectrogramConfig.scalogramOmega0);
-    refreshSpectrogramAnalysisConfig();
+    scheduleSpectrogramConfigRefresh();
     scheduleKeyboardSurfaceFocus();
   });
   elements.spectrogramScalogramHopSelect.addEventListener('change', () => {
@@ -2795,24 +2850,26 @@ function attachUiEvents(): void {
     event.preventDefault();
   });
   elements.spectrogramMinDbSlider.addEventListener('input', () => {
-    const window = normalizeSpectrogramDbWindow(
+    const dbWindow = normalizeSpectrogramDbWindow(
       elements.spectrogramMinDbSlider.value,
       state.spectrogramConfig.maxDecibels,
       normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType),
     );
-    state.spectrogramConfig.minDecibels = window.minDecibels;
-    state.spectrogramConfig.maxDecibels = window.maxDecibels;
-    refreshSpectrogramAnalysisConfig();
+    state.spectrogramConfig.minDecibels = dbWindow.minDecibels;
+    state.spectrogramConfig.maxDecibels = dbWindow.maxDecibels;
+    renderSpectrogramDbWindowUi(dbWindow);
+    scheduleSpectrogramConfigRefresh();
   });
   elements.spectrogramMaxDbSlider.addEventListener('input', () => {
-    const window = normalizeSpectrogramDbWindow(
+    const dbWindow = normalizeSpectrogramDbWindow(
       state.spectrogramConfig.minDecibels,
       elements.spectrogramMaxDbSlider.value,
       normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType),
     );
-    state.spectrogramConfig.minDecibels = window.minDecibels;
-    state.spectrogramConfig.maxDecibels = window.maxDecibels;
-    refreshSpectrogramAnalysisConfig();
+    state.spectrogramConfig.minDecibels = dbWindow.minDecibels;
+    state.spectrogramConfig.maxDecibels = dbWindow.maxDecibels;
+    renderSpectrogramDbWindowUi(dbWindow);
+    scheduleSpectrogramConfigRefresh();
   });
   elements.spectrogramMetaToggle.addEventListener('click', () => {
     setSpectrogramMetaOpen(!state.spectrogramMetaOpen);
