@@ -56,13 +56,16 @@ fn getLevelRange(level: *const core.WaveLevel, start_sample: i32, end_sample: i3
         return .{ .min = 1.0, .max = -1.0 };
     }
 
-    var peak: f32 = 0.0;
+    var min_value: f32 = 1.0;
+    var max_value: f32 = -1.0;
     var block_index = start_block;
     while (block_index < end_block) : (block_index += 1) {
-        peak = core.maxF32(peak, level.abs_peaks[@as(usize, @intCast(block_index))]);
+        const block_usize = @as(usize, @intCast(block_index));
+        min_value = core.minF32(min_value, level.min_peaks[block_usize]);
+        max_value = core.maxF32(max_value, level.max_peaks[block_usize]);
     }
 
-    return .{ .min = -peak, .max = peak };
+    return .{ .min = min_value, .max = max_value };
 }
 
 fn getSamplePeak(start_sample: i32, end_sample: i32) f32 {
@@ -70,50 +73,48 @@ fn getSamplePeak(start_sample: i32, end_sample: i32) f32 {
 }
 
 fn getLevelPeak(level: *const core.WaveLevel, start_sample: i32, end_sample: i32) f32 {
-    const start_block = core.maxI32(0, @divTrunc(start_sample, level.block_size));
-    const end_block = core.minI32(level.block_count, core.ceilDivI32(end_sample, level.block_size));
-    if (end_block <= start_block) {
-        return 0.0;
-    }
-
-    var peak: f32 = 0.0;
-    var block_index = start_block;
-    while (block_index < end_block) : (block_index += 1) {
-        peak = core.maxF32(peak, level.abs_peaks[@as(usize, @intCast(block_index))]);
-    }
-
-    return peak;
+    return peakFromRange(getLevelRange(level, start_sample, end_sample));
 }
 
-const ColumnSampleRange = struct {
-    end_sample: i32,
-    start_sample: i32,
-};
+fn fillWaveformColumns(
+    output: [*]f32,
+    column_count: i32,
+    requested_start_sample: f64,
+    requested_end_sample: f64,
+    selected_level: ?*const core.WaveLevel,
+) void {
+    const requested_sample_span = maxF64(1.0, requested_end_sample - requested_start_sample);
+    const sample_step = requested_sample_span / @as(f64, @floatFromInt(column_count));
+    const max_start_sample = core.maxI32(0, core.g_session.sample_count - 1);
+    var column_start_position = requested_start_sample;
+    var next_boundary = requested_start_sample + sample_step;
+    var column_index: i32 = 0;
+    var output_index: usize = 0;
 
-fn computeColumnSampleRange(requested_start_sample: f64, requested_sample_span: f64, column_index: i32, column_count: i32) ColumnSampleRange {
-    const raw_start_sample = @as(i32, @intFromFloat(@floor(
-        requested_start_sample + (
-            (@as(f64, @floatFromInt(column_index)) * requested_sample_span)
-                / @as(f64, @floatFromInt(column_count))
-        ),
-    )));
-    const raw_end_sample = @as(i32, @intFromFloat(@ceil(
-        requested_start_sample + (
-            (@as(f64, @floatFromInt(column_index + 1)) * requested_sample_span)
-                / @as(f64, @floatFromInt(column_count))
-        ),
-    )));
-    const start_sample = core.clampi32(raw_start_sample, 0, core.maxI32(0, core.g_session.sample_count - 1));
-    const end_sample = core.clampi32(
-        core.maxI32(start_sample + 1, raw_end_sample),
-        start_sample + 1,
-        core.g_session.sample_count,
-    );
+    while (column_index < column_count) : (column_index += 1) {
+        const column_end_position = if (column_index + 1 >= column_count)
+            requested_end_sample
+        else
+            next_boundary;
+        const raw_start_sample = @as(i32, @intFromFloat(@floor(column_start_position)));
+        const raw_end_sample = @as(i32, @intFromFloat(@ceil(column_end_position)));
+        const start_sample = core.clampi32(raw_start_sample, 0, max_start_sample);
+        const end_sample = core.clampi32(
+            core.maxI32(start_sample + 1, raw_end_sample),
+            start_sample + 1,
+            core.g_session.sample_count,
+        );
+        const result = if (selected_level) |level|
+            getLevelRange(level, start_sample, end_sample)
+        else
+            getSampleRange(start_sample, end_sample);
 
-    return .{
-        .end_sample = end_sample,
-        .start_sample = start_sample,
-    };
+        output[output_index] = result.min;
+        output[output_index + 1] = result.max;
+        output_index += 2;
+        column_start_position = column_end_position;
+        next_boundary += sample_step;
+    }
 }
 
 const StableLevelSlicePlan = struct {
@@ -225,11 +226,16 @@ fn prepareWaveformLevels() i32 {
         const block_count = core.ceilDivI32(core.g_session.sample_count, block_size);
         level.block_size = block_size;
         level.block_count = block_count;
-        level.abs_peaks = core.allocator.alloc(f32, @as(usize, @intCast(block_count))) catch {
+        level.max_peaks = core.allocator.alloc(f32, @as(usize, @intCast(block_count))) catch {
             session.freeWaveLevels();
             return 0;
         };
-        @memset(level.abs_peaks, 0);
+        level.min_peaks = core.allocator.alloc(f32, @as(usize, @intCast(block_count))) catch {
+            session.freeWaveLevels();
+            return 0;
+        };
+        @memset(level.max_peaks, -1.0);
+        @memset(level.min_peaks, 1.0);
         block_size *= core.level_scale_factor;
     }
 
@@ -250,17 +256,18 @@ fn buildWaveformPyramidBlock(level_index: i32, block_index: i32) void {
         const parent_level = &core.g_session.levels[@as(usize, @intCast(level_index - 1))];
         const start = block_index * core.level_scale_factor;
         const end = core.minI32(parent_level.block_count, start + core.level_scale_factor);
-        var peak: f32 = 0.0;
+        var min_value: f32 = 1.0;
+        var max_value: f32 = -1.0;
         var parent_index = start;
 
         while (parent_index < end) : (parent_index += 1) {
-            peak = core.maxF32(
-                peak,
-                parent_level.abs_peaks[@as(usize, @intCast(parent_index))],
-            );
+            const parent_usize = @as(usize, @intCast(parent_index));
+            min_value = core.minF32(min_value, parent_level.min_peaks[parent_usize]);
+            max_value = core.maxF32(max_value, parent_level.max_peaks[parent_usize]);
         }
 
-        level.abs_peaks[block_usize] = peak;
+        level.min_peaks[block_usize] = min_value;
+        level.max_peaks[block_usize] = max_value;
         return;
     }
 
@@ -270,7 +277,8 @@ fn buildWaveformPyramidBlock(level_index: i32, block_index: i32) void {
         core.g_session.samples[@as(usize, @intCast(start))..@as(usize, @intCast(end))],
         false,
     );
-    level.abs_peaks[block_usize] = peakFromRange(result);
+    level.min_peaks[block_usize] = result.min;
+    level.max_peaks[block_usize] = result.max;
 }
 
 pub export fn wave_begin_waveform_pyramid_build() i32 {
@@ -351,39 +359,7 @@ pub export fn wave_extract_waveform_peaks(view_start: f64, view_end: f64, column
         samplePositionToSeconds(requested_end_sample),
     );
 
-    if (selected_level) |level| {
-        var column_index: i32 = 0;
-        while (column_index < column_count) : (column_index += 1) {
-            const sample_range = computeColumnSampleRange(
-                requested_start_sample,
-                requested_sample_span,
-                column_index,
-                column_count,
-            );
-            output[@as(usize, @intCast(column_index))] = getLevelPeak(
-                level,
-                sample_range.start_sample,
-                sample_range.end_sample,
-            );
-        }
-
-        return 1;
-    }
-
-    var column_index: i32 = 0;
-    while (column_index < column_count) : (column_index += 1) {
-        const sample_range = computeColumnSampleRange(
-            requested_start_sample,
-            requested_sample_span,
-            column_index,
-            column_count,
-        );
-        output[@as(usize, @intCast(column_index))] = getSamplePeak(
-            sample_range.start_sample,
-            sample_range.end_sample,
-        );
-    }
-
+    fillWaveformColumns(output, column_count, requested_start_sample, requested_end_sample, selected_level);
     return 1;
 }
 
@@ -410,37 +386,6 @@ pub export fn wave_extract_waveform_slice(view_start: f64, view_end: f64, column
         samplePositionToSeconds(requested_end_sample),
     );
 
-    if (selected_level) |level| {
-        var column_index: i32 = 0;
-        while (column_index < column_count) : (column_index += 1) {
-            const sample_range = computeColumnSampleRange(
-                requested_start_sample,
-                requested_sample_span,
-                column_index,
-                column_count,
-            );
-            const result = getLevelRange(level, sample_range.start_sample, sample_range.end_sample);
-
-            output[@as(usize, @intCast(column_index * 2))] = result.min;
-            output[@as(usize, @intCast((column_index * 2) + 1))] = result.max;
-        }
-
-        return 1;
-    }
-
-    var column_index: i32 = 0;
-    while (column_index < column_count) : (column_index += 1) {
-        const sample_range = computeColumnSampleRange(
-            requested_start_sample,
-            requested_sample_span,
-            column_index,
-            column_count,
-        );
-        const result = getSampleRange(sample_range.start_sample, sample_range.end_sample);
-
-        output[@as(usize, @intCast(column_index * 2))] = result.min;
-        output[@as(usize, @intCast((column_index * 2) + 1))] = result.max;
-    }
-
+    fillWaveformColumns(output, column_count, requested_start_sample, requested_end_sample, selected_level);
     return 1;
 }

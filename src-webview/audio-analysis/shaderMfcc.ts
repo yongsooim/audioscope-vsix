@@ -38,7 +38,7 @@ fn computeMfccMelValues(@builtin(global_invocation_id) globalId: vec3<u32>) {
   }
 
   let melPower = max(computeMelPower(columnIndex, rowIndex, fftSize), 1e-20);
-  melDbValues[(columnIndex * melBandCount) + rowIndex] = 10.0 * (log(melPower) * LOG10_E);
+  melDbValues[(columnIndex * melBandCount) + rowIndex] = log(melPower) * DB_LOG_SCALE;
 }
 `;
 

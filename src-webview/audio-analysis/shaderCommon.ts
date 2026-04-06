@@ -97,7 +97,7 @@ fn tileFs(input: VertexOutput) -> @location(0) vec4<f32> {
 
 export const WEBGPU_PALETTE_SHADER_HELPERS = /* wgsl */`
 const LOG10_E: f32 = 0.4342944819032518;
-const MAX_DB: f32 = 0.0;
+const DB_LOG_SCALE: f32 = 10.0 * LOG10_E;
 const ANALYSIS_TYPE_SPECTROGRAM: u32 = 0u;
 const ANALYSIS_TYPE_MEL: u32 = 1u;
 const ANALYSIS_TYPE_SCALOGRAM: u32 = 2u;
@@ -133,9 +133,10 @@ fn normalizePowerForAnalysis(
   minDb: f32,
   maxDb: f32,
 ) -> f32 {
-  let decibels = 10.0 * (log(max(power + 1e-14, 1e-20)) * LOG10_E);
+  let decibels = log(max(power + 1e-14, 1e-20)) * DB_LOG_SCALE;
   let clampedMaxDb = max(minDb + 1.0, maxDb);
-  let normalized = clamp((decibels - minDb) / (clampedMaxDb - minDb), 0.0, 1.0);
+  let inverseDbSpan = 1.0 / (clampedMaxDb - minDb);
+  let normalized = clamp((decibels - minDb) * inverseDbSpan, 0.0, 1.0);
   let gamma = max(0.2, displayGammaForAnalysisType(analysisType) * distributionGamma);
   return pow(normalized, gamma);
 }

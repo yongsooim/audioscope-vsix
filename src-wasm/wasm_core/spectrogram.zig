@@ -606,6 +606,19 @@ fn normalizeChromaValueForDisplay(value: f32, distribution_gamma: f32) f32 {
     return std.math.pow(f32, normalized, core.clampf32(distribution_gamma, 0.2, 2.5));
 }
 
+fn powerToDecibels(power: f32) f32 {
+    return 10.0 * core.approxLog10Positive(power + 1e-14);
+}
+
+fn writeAnalysisSampleOutput(output_ptr: usize, value_db: f32, frequency_start: f32, frequency_end: f32) void {
+    if (output_ptr == 0) return;
+
+    const output: [*]f32 = @ptrFromInt(output_ptr);
+    output[0] = value_db;
+    output[1] = frequency_start;
+    output[2] = frequency_end;
+}
+
 fn computeScalogramKernelPower(center_sample: i32, kernel: *const core.ScalogramRowKernel) f32 {
     if (kernel.offsets.len == 0) return 0.0;
 
@@ -1091,6 +1104,160 @@ pub export fn wave_sample_mfcc_value_at_frame(
         fft_size,
         core.g_session.sample_rate,
     );
+}
+
+pub export fn wave_sample_analysis_value_at_frame(
+    center_sample: i32,
+    row_index: i32,
+    row_count: i32,
+    mel_band_count: i32,
+    fft_size: i32,
+    decimation_factor: i32,
+    min_frequency: f32,
+    max_frequency: f32,
+    analysis_type_value: i32,
+    frequency_scale_value: i32,
+    scalogram_omega0: f32,
+    window_function_value: i32,
+    output_ptr: usize,
+) i32 {
+    if (output_ptr == 0 or core.g_session.samples.len == 0 or row_count <= 0 or row_index < 0 or row_index >= row_count) {
+        return 0;
+    }
+
+    const analysis_type = core.decodeAnalysisType(analysis_type_value);
+    const frequency_scale = core.decodeFrequencyScale(frequency_scale_value);
+    const window_function = core.decodeWindowFunction(window_function_value);
+    const safe_center_sample = core.clampi32(center_sample, 0, core.g_session.sample_count - 1);
+
+    switch (analysis_type) {
+        .mfcc => return 0,
+        .mel, .spectrogram => {
+            if (fft_size <= 0 or decimation_factor <= 0 or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
+                return 0;
+            }
+
+            const safe_min_frequency = core.clampf32(min_frequency, core.g_session.min_frequency, core.g_session.max_frequency);
+            const safe_max_frequency = core.clampf32(max_frequency, safe_min_frequency, core.g_session.max_frequency);
+            if (safe_max_frequency <= safe_min_frequency) {
+                return 0;
+            }
+
+            const resource = getFftResource(fft_size, window_function) orelse return 0;
+            const layout = getBandLayoutResource(
+                analysis_type,
+                frequency_scale,
+                fft_size,
+                decimation_factor,
+                row_count,
+                mel_band_count,
+                safe_min_frequency,
+                safe_max_frequency,
+            ) orelse return 0;
+
+            const input = resource.input.?;
+            const output_buffer = resource.output.?;
+            const work_buffer = resource.work.?;
+            const setup = resource.setup.?;
+
+            writeWindowedInput(resource, safe_center_sample);
+            core.pffft_transform_ordered(setup, input.ptr, output_buffer.ptr, work_buffer.ptr, .forward);
+            writePowerSpectrum(resource, resource.power_spectrum);
+
+            if (layout.use_low_frequency_enhancement) {
+                writeDecimatedInput(resource, safe_center_sample, decimation_factor);
+                core.pffft_transform_ordered(setup, input.ptr, output_buffer.ptr, work_buffer.ptr, .forward);
+                writePowerSpectrum(resource, resource.low_power_spectrum);
+            }
+
+            if (analysis_type == .mel) {
+                const band = layout.mel_bands[@as(usize, @intCast(row_index))];
+                const power = mel_analysis.computeMelBandPower(
+                    resource.power_spectrum,
+                    band,
+                    fft_size,
+                    core.g_session.sample_rate,
+                );
+                writeAnalysisSampleOutput(output_ptr, powerToDecibels(power), band.start_frequency, band.end_frequency);
+                return 1;
+            }
+
+            const base_range = layout.band_ranges[@as(usize, @intCast(row_index))];
+            const use_low_band = layout.use_low_frequency_enhancement and base_range.end_frequency <= layout.low_frequency_maximum;
+            const active_range = if (use_low_band)
+                layout.enhanced_band_ranges[@as(usize, @intCast(row_index))]
+            else
+                base_range;
+            const active_power = if (use_low_band) resource.low_power_spectrum else resource.power_spectrum;
+            const power = computeBandMeanPower(active_power, active_range);
+            writeAnalysisSampleOutput(output_ptr, powerToDecibels(power), active_range.start_frequency, active_range.end_frequency);
+            return 1;
+        },
+        .scalogram => {
+            if (!core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or !core.isFiniteF32(scalogram_omega0)) {
+                return 0;
+            }
+
+            const safe_min_frequency = core.clampf32(min_frequency, core.g_session.min_frequency, core.g_session.max_frequency);
+            const safe_max_frequency = core.clampf32(max_frequency, safe_min_frequency, core.g_session.max_frequency);
+            if (safe_max_frequency <= safe_min_frequency) {
+                return 0;
+            }
+
+            const safe_omega0 = core.maxF32(1.0, scalogram_omega0);
+            const resource = getScalogramResource(row_count, safe_min_frequency, safe_max_frequency, safe_omega0) orelse return 0;
+            const kernel = &resource.bank.rows[@as(usize, @intCast(row_index))];
+            const center_frequency = kernel.frequency;
+            const previous_frequency = if (row_index > 0)
+                resource.bank.rows[@as(usize, @intCast(row_index - 1))].frequency
+            else
+                safe_min_frequency;
+            const next_frequency = if (row_index + 1 < row_count)
+                resource.bank.rows[@as(usize, @intCast(row_index + 1))].frequency
+            else
+                safe_max_frequency;
+            const range_start = if (row_index > 0)
+                @sqrt(previous_frequency * center_frequency)
+            else
+                safe_min_frequency;
+            const range_end = if (row_index + 1 < row_count)
+                @sqrt(center_frequency * next_frequency)
+            else
+                safe_max_frequency;
+            const power = computeScalogramKernelPower(safe_center_sample, kernel);
+            writeAnalysisSampleOutput(output_ptr, powerToDecibels(power), range_start, range_end);
+            return 1;
+        },
+        .chroma => {
+            const safe_max_frequency = core.maxF32(core.cqt_default_fmin * 1.01, core.g_session.max_frequency);
+            const cqt_resource = getConstantQResource(safe_max_frequency, core.cqt_default_bins_per_octave, window_function) orelse return 0;
+            const layout = getChromaLayoutResource(
+                .chroma,
+                0,
+                core.cqt_default_fmin,
+                safe_max_frequency,
+                cqt_resource.bin_count,
+                cqt_resource.bins_per_octave,
+            ) orelse return 0;
+
+            var chroma_power: f32 = 0.0;
+            const row_start = layout.row_offsets[@as(usize, @intCast(row_index))];
+            const row_end = layout.row_offsets[@as(usize, @intCast(row_index + 1))];
+            var cursor = row_start;
+            while (cursor < row_end) : (cursor += 1) {
+                const active_index = @as(usize, @intCast(cursor));
+                const source_index = @as(usize, @intCast(layout.bin_indices[active_index]));
+                if (source_index >= cqt_resource.bank.rows.len) continue;
+                chroma_power += computeScalogramKernelPower(
+                    safe_center_sample,
+                    &cqt_resource.bank.rows[source_index],
+                ) * layout.weights[active_index];
+            }
+
+            writeAnalysisSampleOutput(output_ptr, powerToDecibels(chroma_power), std.math.nan(f32), std.math.nan(f32));
+            return 1;
+        },
+    }
 }
 
 pub export fn wave_render_spectrogram_tile_rgba(

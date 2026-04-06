@@ -31,16 +31,13 @@ fn prepareSpectrogramInput(
 
   let columnIndex = linearIndex / fftSize;
   let sampleOffset = linearIndex % fftSize;
-  var centerRatio = 0.5;
-  if (columnCount > 1u) {
-    centerRatio = (f32(columnIndex) + 0.5) / f32(columnCount);
-  }
-
-  let centerTime = params.timing.x + (centerRatio * params.timing.y);
+  let columnStep = params.timing.y / f32(max(columnCount, 1u));
+  let centerTime = params.timing.x + ((f32(columnIndex) + 0.5) * columnStep);
   let centerSample = i32(round(centerTime * params.timing.z));
   let fftSizeI32 = i32(fftSize);
   let sampleOffsetI32 = i32(sampleOffset);
   let decimationFactorI32 = i32(decimationFactor);
+  let decimationFactorF32 = f32(decimationFactor);
   var sample = 0.0;
 
   if (decimationFactor == 1u) {
@@ -50,6 +47,7 @@ fn prepareSpectrogramInput(
     }
   } else {
     let windowStart = centerSample - ((fftSizeI32 * decimationFactorI32) / 2);
+    var sourceIndex = windowStart + (sampleOffsetI32 * decimationFactorI32);
     var sum = 0.0;
     var tap = 0i;
 
@@ -58,14 +56,14 @@ fn prepareSpectrogramInput(
         break;
       }
 
-      let sourceIndex = windowStart + (sampleOffsetI32 * decimationFactorI32) + tap;
       if (sourceIndex >= 0 && u32(sourceIndex) < sampleCount) {
         sum += pcmSamples[u32(sourceIndex)];
       }
+      sourceIndex += 1i;
       tap += 1i;
     }
 
-    sample = sum / f32(decimationFactor);
+    sample = sum / decimationFactorF32;
   }
 
   let window = windowCoefficients[sampleOffset];
@@ -176,34 +174,43 @@ fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) 
 
   let rowBand = rowBands[rowIndex];
   let useEnhancedBand = useLowFrequencyEnhancement && rowBand.useEnhanced != 0u;
-  let startBin = select(rowBand.baseStartBin, rowBand.enhancedStartBin, useEnhancedBand);
-  let endBin = select(rowBand.baseEndBin, rowBand.enhancedEndBin, useEnhancedBand);
   let spectrumBaseIndex = columnIndex * fftSize;
-  let bandSize = max(1u, endBin - startBin);
+  let powerScale = params.timing.w;
   var weightedEnergy = 0.0;
   var totalWeight = 0.0;
+  let startBin = select(rowBand.baseStartBin, rowBand.enhancedStartBin, useEnhancedBand);
+  let endBin = select(rowBand.baseEndBin, rowBand.enhancedEndBin, useEnhancedBand);
+  let bandSize = max(1u, endBin - startBin);
+  let inverseBandSize = 1.0 / f32(bandSize);
+  var centeredPositionTwice = 1.0 - f32(bandSize);
   var bin = startBin;
 
-  loop {
-    if (bin >= endBin) {
-      break;
-    }
+  if (useEnhancedBand) {
+    loop {
+      if (bin >= endBin) {
+        break;
+      }
 
-    var position = 0.5;
-    if (bandSize > 1u) {
-      position = (f32(bin - startBin) + 0.5) / f32(bandSize);
+      let weight = 1.0 - (0.3 * abs(centeredPositionTwice * inverseBandSize));
+      let spectrum = enhancedSpectrum[spectrumBaseIndex + bin];
+      weightedEnergy += dot(spectrum, spectrum) * (weight * powerScale);
+      totalWeight += weight;
+      centeredPositionTwice += 2.0;
+      bin += 1u;
     }
-    let taper = 1.0 - abs((position * 2.0) - 1.0);
-    let weight = 0.7 + (taper * 0.3);
-    let spectrum = select(
-      baseSpectrum[spectrumBaseIndex + bin],
-      enhancedSpectrum[spectrumBaseIndex + bin],
-      useEnhancedBand,
-    );
-    let power = dot(spectrum, spectrum) * params.timing.w;
-    weightedEnergy += power * weight;
-    totalWeight += weight;
-    bin += 1u;
+  } else {
+    loop {
+      if (bin >= endBin) {
+        break;
+      }
+
+      let weight = 1.0 - (0.3 * abs(centeredPositionTwice * inverseBandSize));
+      let spectrum = baseSpectrum[spectrumBaseIndex + bin];
+      weightedEnergy += dot(spectrum, spectrum) * (weight * powerScale);
+      totalWeight += weight;
+      centeredPositionTwice += 2.0;
+      bin += 1u;
+    }
   }
 
   let meanPower = weightedEnergy / max(totalWeight, 1e-8);

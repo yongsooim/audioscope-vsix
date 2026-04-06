@@ -345,6 +345,7 @@ export function createRequestPlan(
 export function buildTileCacheKey(quality: QualityPreset, plan: RenderRequestPlan, tileIndex: number): string {
   return [
     quality,
+    `cfg${plan.configVersion}`,
     plan.configKey,
     `tile${tileIndex}`,
     `dpr${plan.dprBucket}`,

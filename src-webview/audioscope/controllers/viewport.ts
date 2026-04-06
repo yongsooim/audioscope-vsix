@@ -10,6 +10,7 @@ interface ViewportControllerState {
   observedWaveformViewportHeight: number;
   observedWaveformViewportWidth: number;
   viewportSplitRatio: number;
+  waveformWorker: Worker | null;
 }
 
 interface AudioscopeViewportControllerDeps {
@@ -20,6 +21,7 @@ interface AudioscopeViewportControllerDeps {
   refreshHoveredSampleInfos: () => void;
   getSpectrogramCanvasTargetSize: () => { pixelHeight: number; pixelWidth: number };
   getWaveformViewportSize: () => { height: number; width: number };
+  requestWaveformRender: () => void;
   scheduleSpectrogramRender: (options?: { force?: boolean }) => void;
   sendViewportIntent: (body: SetViewportIntentMessage['body']) => void;
   splitterFallbackSizePx: number;
@@ -36,6 +38,7 @@ export function createAudioscopeViewportController({
   refreshHoveredSampleInfos,
   getSpectrogramCanvasTargetSize,
   getWaveformViewportSize,
+  requestWaveformRender,
   scheduleSpectrogramRender,
   sendViewportIntent,
   splitterFallbackSizePx,
@@ -174,6 +177,18 @@ export function createAudioscopeViewportController({
           },
         });
         scheduleSpectrogramRender({ force: true });
+      }
+
+      if (state.waveformWorker) {
+        state.waveformWorker.postMessage({
+          type: 'resizeCanvas',
+          body: {
+            height: waveformSize.height,
+            renderScale: displayPixelRatio,
+            width: waveformSize.width,
+          },
+        });
+        requestWaveformRender();
       }
 
       refreshHoveredSampleInfos();

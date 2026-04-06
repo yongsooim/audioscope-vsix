@@ -10,7 +10,8 @@ import {
 export type AudioscopeWorkerBootstrapStateKey =
   | 'analysisWorkerBootstrapUrl'
   | 'decodeWorkerBootstrapUrl'
-  | 'engineWorkerBootstrapUrl';
+  | 'engineWorkerBootstrapUrl'
+  | 'waveformWorkerBootstrapUrl';
 
 interface AudioscopeLoadControllerDeps {
   audioTransportProcessorScriptUri?: string;
@@ -26,9 +27,9 @@ interface AudioscopeLoadControllerDeps {
   embeddedMediaToolsGuidance: string;
   initializeDecodedPlayback: (loadToken: number, payload: any, decodedAudio: AudioBuffer) => Promise<void>;
   initializePlaybackFromPreparedData: (loadToken: number, payload: any, preparedPlaybackData: any) => Promise<void>;
-  initializeSpectrogramSurface: (loadToken: number) => Promise<void>;
   initializeWaveformSurface: (loadToken: number) => Promise<void>;
   normalizeExternalToolStatus: (status: unknown, guidance?: string) => any;
+  resetSpectrogramCanvasElement: () => void;
   renderMediaMetadata: () => void;
   renderSpectrogramScale: () => void;
   renderWaveformUi: () => void;
@@ -58,9 +59,9 @@ export function createAudioscopeLoadController({
   embeddedMediaToolsGuidance,
   initializeDecodedPlayback,
   initializePlaybackFromPreparedData,
-  initializeSpectrogramSurface,
   initializeWaveformSurface,
   normalizeExternalToolStatus,
+  resetSpectrogramCanvasElement,
   renderMediaMetadata,
   renderSpectrogramScale,
   renderWaveformUi,
@@ -75,6 +76,30 @@ export function createAudioscopeLoadController({
   syncTransport,
   vscode,
 }: AudioscopeLoadControllerDeps) {
+  function shouldPreferEmbeddedDecode(payload) {
+    const fileExtension = typeof payload?.fileExtension === 'string'
+      ? payload.fileExtension.trim().toLowerCase()
+      : '';
+
+    if (!fileExtension) {
+      return false;
+    }
+
+    if (!decodeWorkerScriptUri || !decodeBrowserModuleScriptUri || !decodeBrowserModuleWasmUri) {
+      return false;
+    }
+
+    return (
+      fileExtension === 'aac'
+      || fileExtension === 'flac'
+      || fileExtension === 'm4a'
+      || fileExtension === 'mp3'
+      || fileExtension === 'oga'
+      || fileExtension === 'ogg'
+      || fileExtension === 'opus'
+    );
+  }
+
   function requestMediaMetadata(loadToken, payload) {
     if (loadToken !== state.loadToken) {
       return;
@@ -526,6 +551,45 @@ export function createAudioscopeLoadController({
       : null;
   }
 
+  async function initializeFromDecodeFallback(loadToken, payload, fallback) {
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    setAnalysisSourceKind('ffmpeg-fallback');
+    state.playbackSourceKind = 'ffmpeg-fallback';
+    renderMediaMetadata();
+
+    if (fallback.kind === 'pcm') {
+      const playbackSession = createPlaybackSessionFromPcmFallback(fallback);
+      await initializePlaybackFromPreparedData(
+        loadToken,
+        payload,
+        createPlaybackAnalysisDataFromPlaybackSession(playbackSession),
+      );
+      return;
+    }
+
+    setAnalysisStatus('Decoding audio…');
+    const decodedAudio = await decodeAudioData(fallback.audioBuffer);
+
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+
+    await initializeDecodedPlayback(loadToken, payload, decodedAudio);
+  }
+
+  function startDeferredAuxiliaryLoads(loadToken, payload = state.activeFile) {
+    if (loadToken !== state.loadToken || state.deferredAuxiliaryLoadsLoadToken === loadToken) {
+      return;
+    }
+
+    state.deferredAuxiliaryLoadsLoadToken = loadToken;
+    requestMediaMetadata(loadToken, payload);
+    requestLoudnessSummary(loadToken, payload);
+  }
+
   async function loadDecodedAudioSource(loadToken, payload) {
     const controller = new AbortController();
     state.sourceFetchController = controller;
@@ -557,9 +621,40 @@ export function createAudioscopeLoadController({
       state.playbackSourceKind = sourceKind;
       renderMediaMetadata();
 
+      if (shouldPreferEmbeddedDecode(payload)) {
+        try {
+          setAnalysisStatus('Decoding audio with embedded ffmpeg…');
+          const fallback = await requestDecodeFallback(
+            loadToken,
+            payload,
+            'preferred-embedded-decode',
+            audioData.slice(0),
+          );
+
+          if (loadToken !== state.loadToken) {
+            return;
+          }
+
+          await initializeFromDecodeFallback(loadToken, payload, fallback);
+          if (loadToken !== state.loadToken || controller.signal.aborted) {
+            return;
+          }
+
+          clearDecodeFallbackCache();
+          return;
+        } catch {
+          if (loadToken !== state.loadToken) {
+            return;
+          }
+        }
+      }
+
       setAnalysisStatus('Decoding audio…');
 
       let decodedAudio;
+      const browserDecodeFallbackBytes = state.externalTools.canDecodeFallback
+        ? audioData.slice(0)
+        : audioData;
 
       try {
         decodedAudio = await decodeAudioData(audioData);
@@ -569,7 +664,12 @@ export function createAudioscopeLoadController({
         }
 
         setAnalysisStatus('Requesting ffmpeg decode…');
-        const fallback = await requestDecodeFallback(loadToken, payload, 'analysis-decode-error', audioData);
+        const fallback = await requestDecodeFallback(
+          loadToken,
+          payload,
+          'analysis-decode-error',
+          browserDecodeFallbackBytes,
+        );
 
         if (loadToken !== state.loadToken) {
           return;
@@ -579,24 +679,12 @@ export function createAudioscopeLoadController({
         setAnalysisSourceKind(sourceKind);
         state.playbackSourceKind = sourceKind;
         renderMediaMetadata();
-
-        if (fallback.kind === 'pcm') {
-          const playbackSession = createPlaybackSessionFromPcmFallback(fallback);
-          await initializePlaybackFromPreparedData(
-            loadToken,
-            payload,
-            createPlaybackAnalysisDataFromPlaybackSession(playbackSession),
-          );
-          if (loadToken !== state.loadToken) {
-            return;
-          }
-          clearDecodeFallbackCache();
+        await initializeFromDecodeFallback(loadToken, payload, fallback);
+        if (loadToken !== state.loadToken) {
           return;
         }
-
-        audioData = fallback.audioBuffer;
-        setAnalysisStatus('Decoding audio…');
-        decodedAudio = await decodeAudioData(audioData);
+        clearDecodeFallbackCache();
+        return;
       }
 
       if (loadToken !== state.loadToken) {
@@ -634,31 +722,7 @@ export function createAudioscopeLoadController({
           state.playbackSourceKind = 'ffmpeg-fallback';
           renderMediaMetadata();
 
-          if (fallback.kind === 'pcm') {
-            const playbackSession = createPlaybackSessionFromPcmFallback(fallback);
-            await initializePlaybackFromPreparedData(
-              loadToken,
-              payload,
-              createPlaybackAnalysisDataFromPlaybackSession(playbackSession),
-            );
-            if (loadToken !== state.loadToken) {
-              return;
-            }
-            clearDecodeFallbackCache();
-            return;
-          }
-
-          setAnalysisStatus('Decoding audio…');
-          const decodedAudio = await decodeAudioData(fallback.audioBuffer);
-
-          if (loadToken !== state.loadToken) {
-            return;
-          }
-
-          state.playbackSourceKind = 'ffmpeg-fallback';
-          setAnalysisSourceKind('ffmpeg-fallback');
-          renderMediaMetadata();
-          await initializeDecodedPlayback(loadToken, payload, decodedAudio);
+          await initializeFromDecodeFallback(loadToken, payload, fallback);
           if (loadToken !== state.loadToken) {
             return;
           }
@@ -707,17 +771,17 @@ export function createAudioscopeLoadController({
     setAnalysisStatus('Preparing playback…');
     state.audioTransport = createPlaybackTransport(loadToken);
     state.playbackSession = null;
+    state.deferredAuxiliaryLoadsLoadToken = 0;
     state.waveformViewport.targetRange = { start: 0, end: 0 };
     state.waveformViewport.presentedRange = { start: 0, end: 0 };
 
     state.waveformSurfaceReadyPromise = initializeWaveformSurface(loadToken);
-    state.spectrogramSurfaceReadyPromise = initializeSpectrogramSurface(loadToken);
+    resetSpectrogramCanvasElement();
+    state.spectrogramSurfaceReadyPromise = null;
     prewarmDecodeWorker(loadToken);
     syncTransport();
     renderWaveformUi();
     renderSpectrogramScale();
-    requestMediaMetadata(loadToken, payload);
-    requestLoudnessSummary(loadToken, payload);
     await loadDecodedAudioSource(loadToken, payload);
   }
 
@@ -730,5 +794,6 @@ export function createAudioscopeLoadController({
     prewarmDecodeWorker,
     rejectDecodeFallbackRequest,
     requestDecodeFallback,
+    startDeferredAuxiliaryLoads,
   };
 }
