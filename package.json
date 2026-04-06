@@ -2,7 +2,7 @@
   "name": "audioscope",
   "displayName": "audioscope",
   "description": "Audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
@@ -17,7 +17,6 @@
   "keywords": [
     "audio inspector",
     "audio analysis",
-    "audio editor",
     "waveform",
     "spectrogram",
     "mel",
