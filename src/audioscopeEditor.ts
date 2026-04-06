@@ -12,12 +12,11 @@ import {
   getCachedDecodeFallback,
   getCachedLoudnessSummary,
   getCachedMediaMetadata,
-  getCachedSourceAudioBytes,
 } from './mediaHostCache';
 import { DEFAULT_SPECTROGRAM_DEFAULTS } from './audioscope-editor/constants';
 import { AudioscopeDocument } from './audioscope-editor/document';
 import { canOpenInAudioscope, getActiveResource } from './audioscope-editor/editorTarget';
-import { cloneArrayBuffer, cloneDecodeFallbackPayload } from './audioscope-editor/payloadClone';
+import { cloneDecodeFallbackPayload } from './audioscope-editor/payloadClone';
 import { normalizeSpectrogramDefaults } from './audioscope-editor/spectrogramDefaults';
 import { getAudioscopeWebviewHtml } from './audioscope-editor/webviewHtml';
 
@@ -230,19 +229,12 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
 
   private async buildPayload(document: AudioscopeDocument, webview: vscode.Webview): Promise<AudioscopePayload> {
     let fileSize: number | null = null;
-    let audioBytes: ArrayBuffer | null = null;
 
     try {
       const stat = await vscode.workspace.fs.stat(document.uri);
       fileSize = stat.size;
     } catch {
       fileSize = null;
-    }
-
-    try {
-      audioBytes = await getCachedSourceAudioBytes(document.uri);
-    } catch {
-      audioBytes = null;
     }
 
     const spectrogramQuality = vscode.workspace
@@ -254,7 +246,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     const externalTools = createInitialExternalToolStatus(document.uri);
 
     return {
-      audioBytes: audioBytes ? cloneArrayBuffer(audioBytes) : null,
+      audioBytes: null,
       documentUri: document.uri.toString(),
       externalTools,
       fileExtension: path.posix.extname(document.uri.path).replace(/^\./, '').toLowerCase(),

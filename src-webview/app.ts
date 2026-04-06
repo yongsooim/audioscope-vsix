@@ -40,11 +40,17 @@ import type {
   TransportCommand,
   ViewportUiState,
 } from './audioEngineProtocol';
+import {
+  WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
+  WAVEFORM_BOTTOM_PADDING_PX,
+  WAVEFORM_TOP_PADDING_PX,
+} from './interactive-waveform/geometry';
 import { normalizeSpectrogramWindowFunction } from './windowShared';
 
 const vscode = acquireVsCodeApi();
 const engineWorkerScriptUri = document.body.dataset.engineWorkerSrc || '';
 const analysisWorkerScriptUri = document.body.dataset.analysisWorkerSrc || '';
+const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc || '';
 const decodeBrowserModuleScriptUri = document.body.dataset.decodeModuleSrc;
 const decodeBrowserModuleWasmUri = document.body.dataset.decodeModuleWasmSrc;
 const decodeWorkerScriptUri = document.body.dataset.decodeWorkerSrc;
@@ -95,6 +101,14 @@ const SPECTROGRAM_DB_WINDOW_LIMITS = {
 } as const;
 
 const elements = createAudioscopeElements();
+applyWaveformGeometryCssVariables();
+
+function applyWaveformGeometryCssVariables(): void {
+  elements.waveformViewport.style.setProperty('--waveform-top-padding-px', `${WAVEFORM_TOP_PADDING_PX}px`);
+  elements.waveformViewport.style.setProperty('--waveform-bottom-padding-px', `${WAVEFORM_BOTTOM_PADDING_PX}px`);
+  elements.waveformViewport.style.setProperty('--waveform-amplitude-height-ratio', String(WAVEFORM_AMPLITUDE_HEIGHT_RATIO));
+  elements.waveformViewport.dataset.waveformGeometryReady = 'true';
+}
 
 function createInitialWaveformViewportState() {
   return {
@@ -195,6 +209,41 @@ type AnalysisWorkerToMainMessage =
       type: 'error';
     };
 
+type WaveformWorkerToMainMessage =
+  | {
+      body: {
+        runtimeVariant?: string | null;
+      };
+      type: 'runtimeReady';
+    }
+  | {
+      body: {
+        duration?: number;
+        runtimeVariant?: string | null;
+        sampleCount?: number;
+        sampleRate?: number;
+      };
+      type: 'analysisInitialized';
+    }
+  | {
+      body: Record<string, unknown>;
+      type: 'waveformPyramidReady';
+    }
+  | {
+      body: {
+        generation?: number;
+        viewEnd?: number;
+        viewStart?: number;
+      };
+      type: 'waveformPresented';
+    }
+  | {
+      body: {
+        message?: string;
+      };
+      type: 'error';
+    };
+
 const state = {
   activeFile: null,
   analysis: null as SpectrogramAnalysisState | null,
@@ -203,6 +252,7 @@ const state = {
   analysisWorker: null as Worker | null,
   analysisWorkerBootstrapUrl: null as string | null,
   audioTransport: null as AudioTransport | null,
+  decodeAudioContext: null as AudioContext | null,
   decodeFallbackError: null,
   decodeFallbackLoadToken: 0,
   decodeFallbackPromise: null,
@@ -217,11 +267,14 @@ const state = {
   decodeWorkerBootstrapUrl: null as string | null,
   decodeWorkerPrewarmed: false,
   decodeWorkerReady: false,
+  deferredAuxiliaryLoadsLoadToken: 0,
   engineSessionRevision: 0,
   engineUiState: null as ViewportUiState | null,
   engineSurfacesPosted: false,
   engineWorker: null as Worker | null,
   engineWorkerBootstrapUrl: null as string | null,
+  waveformWorker: null as Worker | null,
+  waveformWorkerBootstrapUrl: null as string | null,
   externalTools: createExternalToolStatusState(EMBEDDED_MEDIA_TOOLS_GUIDANCE),
   followPlayback: false,
   hoverRequestIds: {
@@ -242,6 +295,8 @@ const state = {
   observedSpectrogramPixelWidth: 0,
   observedWaveformViewportHeight: 0,
   observedWaveformViewportWidth: 0,
+  analysisOverviewRefreshPending: false,
+  initialWaveformReadyLoadToken: 0,
   lastSyncedSpectrogramDisplay: null as {
     end: number;
     pixelHeight: number;
@@ -258,6 +313,12 @@ const state = {
   playbackSourceKind: 'native',
   playbackTransportError: null as string | null,
   playbackTransportKind: 'unavailable',
+  pendingAnalysisSession: null as {
+    loadToken: number;
+    monoSamples: Float32Array;
+    playbackSession: PlaybackSession;
+    quality: 'balanced' | 'high' | 'max';
+  } | null,
   rejectDecodeFallback: null,
   resolveAnalysisRuntimeReady: null as (() => void) | null,
   resolveDecodeFallback: null,
@@ -294,6 +355,7 @@ const state = {
   viewportResizeDrag: null as { pointerId: number } | null,
   viewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
   waveformCanvas: null as HTMLCanvasElement | null,
+  waveformRenderGeneration: 0,
   waveformSurfaceReadyPromise: null as Promise<void> | null,
   waveformViewport: createInitialWaveformViewportState(),
 };
@@ -340,6 +402,7 @@ const {
 const {
   destroySession,
   disposeAnalysisWorker,
+  disposeWaveformWorker,
 } = createAudioscopeLifecycleController({
   createInitialWaveformViewportState,
   elements,
@@ -382,6 +445,7 @@ const {
   refreshHoveredSampleInfos,
   getSpectrogramCanvasTargetSize,
   getWaveformViewportSize,
+  requestWaveformRender,
   scheduleSpectrogramRender,
   sendViewportIntent,
   splitterFallbackSizePx: VIEWPORT_SPLITTER_FALLBACK_SIZE_PX,
@@ -719,6 +783,31 @@ async function ensureEngineWorker(loadToken: number): Promise<Worker | null> {
   return worker;
 }
 
+async function ensureWaveformWorker(loadToken: number): Promise<Worker | null> {
+  if (state.waveformWorker) {
+    return state.waveformWorker;
+  }
+
+  if (!waveformWorkerScriptUri || loadToken !== state.loadToken) {
+    return null;
+  }
+
+  const worker = createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl');
+  state.waveformWorker = worker;
+  worker.addEventListener('message', (event: MessageEvent<WaveformWorkerToMainMessage>) => {
+    handleWaveformWorkerMessage(state.loadToken, event.data);
+  });
+  worker.addEventListener('error', (event) => {
+    if (state.loadToken <= 0) {
+      return;
+    }
+    disposeWaveformWorker();
+    setFatalStatus(`Waveform worker failed: ${event.message || 'Unknown worker error.'}`);
+  });
+  worker.postMessage({ type: 'bootstrapRuntime' });
+  return worker;
+}
+
 async function ensureAnalysisWorker(loadToken: number): Promise<Worker | null> {
   if (state.analysisWorker) {
     return state.analysisWorker;
@@ -748,12 +837,10 @@ async function ensureAnalysisWorker(loadToken: number): Promise<Worker | null> {
 }
 
 function postInitSurfaces(): void {
-  if (state.engineSurfacesPosted || !state.engineWorker || !state.waveformCanvas) {
+  if (state.engineSurfacesPosted || !state.engineWorker) {
     return;
   }
 
-  const waveformCanvas = state.waveformCanvas;
-  const waveformOffscreenCanvas = waveformCanvas.transferControlToOffscreen();
   const waveformSize = getWaveformViewportSize();
   const spectrogramSize = getSpectrogramCanvasTargetSize();
   state.engineSurfacesPosted = true;
@@ -764,11 +851,22 @@ function postInitSurfaces(): void {
       spectrogramPixelHeight: spectrogramSize.pixelHeight,
       spectrogramPixelWidth: spectrogramSize.pixelWidth,
       waveformHeightCssPx: waveformSize.height,
-      waveformOffscreenCanvas,
       waveformRenderScale: DISPLAY_PIXEL_RATIO,
       waveformWidthCssPx: waveformSize.width,
     },
-  }, [waveformOffscreenCanvas]);
+  });
+}
+
+function resetSpectrogramCanvasElement(): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.id = 'spectrogram';
+  canvas.className = 'spectrogram-canvas';
+  canvas.setAttribute('aria-label', 'Spectrogram');
+  elements.spectrogram.replaceWith(canvas);
+  elements.spectrogram = canvas;
+  state.spectrogramCanvas = canvas;
+  state.spectrogramSurfaceReadyPromise = null;
+  return canvas;
 }
 
 async function initializeWaveformSurface(loadToken: number): Promise<void> {
@@ -782,6 +880,27 @@ async function initializeWaveformSurface(loadToken: number): Promise<void> {
   state.waveformCanvas = canvas;
   state.engineSurfacesPosted = false;
 
+  const waveformWorker = await ensureWaveformWorker(loadToken);
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  if (!waveformWorker || typeof canvas.transferControlToOffscreen !== 'function') {
+    throw new Error('Waveform worker runtime is unavailable.');
+  }
+
+  const waveformSize = getWaveformViewportSize();
+  const offscreenCanvas = canvas.transferControlToOffscreen();
+  waveformWorker.postMessage({
+    type: 'initCanvas',
+    body: {
+      height: waveformSize.height,
+      offscreenCanvas,
+      renderScale: DISPLAY_PIXEL_RATIO,
+      width: waveformSize.width,
+    },
+  }, [offscreenCanvas]);
+
   await ensureEngineWorker(loadToken);
   if (loadToken !== state.loadToken) {
     return;
@@ -790,13 +909,7 @@ async function initializeWaveformSurface(loadToken: number): Promise<void> {
 }
 
 async function initializeSpectrogramSurface(loadToken: number): Promise<void> {
-  const canvas = document.createElement('canvas');
-  canvas.id = 'spectrogram';
-  canvas.className = 'spectrogram-canvas';
-  canvas.setAttribute('aria-label', 'Spectrogram');
-  elements.spectrogram.replaceWith(canvas);
-  elements.spectrogram = canvas;
-  state.spectrogramCanvas = canvas;
+  const canvas = state.spectrogramCanvas ?? resetSpectrogramCanvasElement();
   state.spectrogramSurfaceReadyPromise = Promise.resolve();
 
   const worker = await ensureAnalysisWorker(loadToken);
@@ -893,6 +1006,7 @@ function applyViewportUiState(uiState: ViewportUiState): void {
   }
 
   renderWaveformUi();
+  requestWaveformRender(uiState);
   renderSpectrogramScale();
   if (nextPresentedRange && !areTimeRangesEqual(previousPresentedRange, nextPresentedRange)) {
     syncPresentedSpectrogramRange(nextPresentedRange);
@@ -1455,6 +1569,7 @@ function refreshSpectrogramAnalysisConfig({ persist = true } = {}): void {
   if (state.analysis) {
     state.analysis.configVersion += 1;
     state.analysis.activeVisibleRequest = null;
+    state.analysisOverviewRefreshPending = true;
   }
 
   renderSpectrogramMeta();
@@ -1636,6 +1751,36 @@ function syncPresentedSpectrogramRange(displayRange: TimeRange | null): void {
   syncSpectrogramDisplayRange(displayRange, pixelWidth, pixelHeight);
 }
 
+function requestSpectrogramOverviewRender(renderConfig = getEffectiveSpectrogramRenderConfig()): void {
+  if (!state.analysisWorker || !state.analysis?.initialized) {
+    return;
+  }
+
+  state.analysisWorker.postMessage({
+    type: 'renderOverview',
+    body: {
+      analysisType: renderConfig.analysisType,
+      colormapDistribution: renderConfig.colormapDistribution,
+      configVersion: state.analysis.configVersion,
+      dpr: DISPLAY_PIXEL_RATIO,
+      fftSize: renderConfig.fftSize,
+      frequencyScale: renderConfig.frequencyScale,
+      maxDecibels: renderConfig.maxDecibels,
+      melBandCount: renderConfig.melBandCount,
+      mfccCoefficientCount: renderConfig.mfccCoefficientCount,
+      mfccMelBandCount: renderConfig.mfccMelBandCount,
+      minDecibels: renderConfig.minDecibels,
+      overlapRatio: renderConfig.overlapRatio,
+      scalogramHopSamples: renderConfig.scalogramHopSamples,
+      scalogramMaxFrequency: renderConfig.scalogramMaxFrequency,
+      scalogramMinFrequency: renderConfig.scalogramMinFrequency,
+      scalogramOmega0: renderConfig.scalogramOmega0,
+      scalogramRowDensity: renderConfig.scalogramRowDensity,
+      windowFunction: renderConfig.windowFunction,
+    },
+  });
+}
+
 function scheduleSpectrogramRender({ force = false } = {}): void {
   state.spectrogramRenderForcePending = state.spectrogramRenderForcePending || force;
   if (state.spectrogramFrame) {
@@ -1734,6 +1879,11 @@ function syncSpectrogramView({ force = false } = {}): void {
       requestStart: requestRange.start,
     },
   });
+
+  if (state.analysisOverviewRefreshPending) {
+    state.analysisOverviewRefreshPending = false;
+    requestSpectrogramOverviewRender(renderConfig);
+  }
 }
 
 function hideSurfaceHoverTooltip(tooltipElement: HTMLElement): void {
@@ -2053,6 +2203,7 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
   if (message?.type === 'analysisInitialized') {
     state.lastSyncedSpectrogramDisplay = null;
     state.analysis.initialized = true;
+    state.analysisOverviewRefreshPending = true;
     state.analysis.fallbackReason = typeof message.body?.fallbackReason === 'string'
       ? message.body.fallbackReason
       : null;
@@ -2135,6 +2286,50 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
   }
 }
 
+function handleWaveformSurfaceReady(): void {
+  const loadToken = state.loadToken;
+
+  if (loadToken <= 0 || state.initialWaveformReadyLoadToken === loadToken) {
+    return;
+  }
+
+  state.initialWaveformReadyLoadToken = loadToken;
+  startDeferredAuxiliaryLoads(loadToken, state.activeFile);
+  void startDeferredAnalysisSession(loadToken)
+    .catch((error) => {
+      if (loadToken !== state.loadToken) {
+        return;
+      }
+
+      setAnalysisStatus(`Spectrogram failed: ${error instanceof Error ? error.message : String(error)}`, true);
+    });
+}
+
+function handleWaveformWorkerMessage(loadToken: number, message: WaveformWorkerToMainMessage): void {
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  switch (message.type) {
+    case 'runtimeReady':
+      return;
+    case 'analysisInitialized':
+      handleWaveformSurfaceReady();
+      return;
+    case 'waveformPyramidReady':
+      requestWaveformRender();
+      return;
+    case 'waveformPresented':
+      handleWaveformSurfaceReady();
+      return;
+    case 'error':
+      setFatalStatus(`Waveform failed: ${message.body?.message || 'Unknown worker error.'}`);
+      return;
+    default:
+      return;
+  }
+}
+
 function handleEngineWorkerMessage(message: EngineWorkerToMainMessage): void {
   switch (message.type) {
     case 'PlaybackProgress':
@@ -2152,6 +2347,34 @@ function handleEngineWorkerMessage(message: EngineWorkerToMainMessage): void {
     default:
       return;
   }
+}
+
+function requestWaveformRender(uiState: ViewportUiState | null = state.engineUiState): void {
+  if (!state.waveformWorker || !uiState) {
+    return;
+  }
+
+  const sampleRate = uiState.playback.sampleRate || getSampleRate();
+  if (!(sampleRate > 0)) {
+    return;
+  }
+
+  const waveformSize = getWaveformViewportSize();
+  const viewStart = uiState.viewport.targetStartFrame / sampleRate;
+  const viewEnd = uiState.viewport.targetEndFrame / sampleRate;
+  state.waveformRenderGeneration += 1;
+  state.waveformWorker.postMessage({
+    type: 'renderWaveformView',
+    body: {
+      generation: state.waveformRenderGeneration,
+      height: waveformSize.height,
+      renderScale: DISPLAY_PIXEL_RATIO,
+      viewEnd,
+      viewStart,
+      visibleSpan: Math.max(0, viewEnd - viewStart),
+      width: waveformSize.width,
+    },
+  });
 }
 
 function applyPlaybackProgress(body: {
@@ -2192,12 +2415,54 @@ async function decodeAudioData(arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {
   if (!AudioContextConstructor) {
     throw new Error('Web Audio API is unavailable in this webview.');
   }
-  const context = new AudioContextConstructor();
-  try {
-    return await context.decodeAudioData(arrayBuffer.slice(0));
-  } finally {
-    await context.close().catch(() => {});
+
+  if (!state.decodeAudioContext || state.decodeAudioContext.state === 'closed') {
+    state.decodeAudioContext = new AudioContextConstructor();
   }
+
+  return await state.decodeAudioContext.decodeAudioData(arrayBuffer);
+}
+
+async function startDeferredAnalysisSession(loadToken: number): Promise<void> {
+  const pending = state.pendingAnalysisSession;
+
+  if (!pending || pending.loadToken !== loadToken || loadToken !== state.loadToken) {
+    return;
+  }
+
+  state.pendingAnalysisSession = null;
+  state.spectrogramSurfaceReadyPromise = initializeSpectrogramSurface(loadToken);
+  await state.spectrogramSurfaceReadyPromise;
+
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  const analysisWorker = await ensureAnalysisWorker(loadToken);
+  if (!analysisWorker || loadToken !== state.loadToken) {
+    return;
+  }
+
+  const runtimeReadyPromise = state.analysisRuntimeReadyPromise;
+  if (runtimeReadyPromise) {
+    await runtimeReadyPromise;
+  }
+
+  if (loadToken !== state.loadToken) {
+    return;
+  }
+
+  analysisWorker.postMessage({
+    type: 'attachAudioSession',
+    body: {
+      duration: pending.playbackSession.durationSeconds,
+      quality: pending.quality,
+      sampleCount: pending.monoSamples.length,
+      sampleRate: pending.playbackSession.sourceSampleRate,
+      samplesBuffer: pending.monoSamples.buffer,
+      sessionVersion: state.engineSessionRevision,
+    },
+  }, [pending.monoSamples.buffer]);
 }
 
 async function initializeDecodedPlayback(loadToken: number, payload: any, decodedAudio: AudioBuffer): Promise<void> {
@@ -2223,9 +2488,11 @@ async function initializePlaybackFromPreparedData(
   await state.waveformSurfaceReadyPromise;
 
   const engineWorker = await ensureEngineWorker(loadToken);
+  const waveformWorker = await ensureWaveformWorker(loadToken);
   if (
     !audioTransport
     || !engineWorker
+    || !waveformWorker
     || loadToken !== state.loadToken
     || state.audioTransport !== audioTransport
   ) {
@@ -2234,6 +2501,7 @@ async function initializePlaybackFromPreparedData(
 
   state.engineSessionRevision += 1;
   const engineMono = monoSamples.slice();
+  const waveformMono = monoSamples.slice();
   engineWorker.postMessage({
     type: 'LoadAnalysisSession',
     body: {
@@ -2246,38 +2514,24 @@ async function initializePlaybackFromPreparedData(
       sessionRevision: state.engineSessionRevision,
     },
   }, [engineMono.buffer]);
+  waveformWorker.postMessage({
+    type: 'attachAudioSession',
+    body: {
+      duration: playbackSession.durationSeconds,
+      sampleCount: waveformMono.length,
+      sampleRate: playbackSession.sourceSampleRate,
+      samplesBuffer: waveformMono.buffer,
+      sessionVersion: state.engineSessionRevision,
+    },
+  }, [waveformMono.buffer]);
+  waveformWorker.postMessage({ type: 'buildWaveformPyramid' });
 
-  const analysisSessionPromise = (async () => {
-    await state.spectrogramSurfaceReadyPromise;
-    const analysisWorker = await ensureAnalysisWorker(loadToken);
-    if (
-      !analysisWorker
-      || loadToken !== state.loadToken
-      || state.audioTransport !== audioTransport
-    ) {
-      return;
-    }
-
-    await state.analysisRuntimeReadyPromise;
-    if (
-      loadToken !== state.loadToken
-      || state.audioTransport !== audioTransport
-    ) {
-      return;
-    }
-
-    analysisWorker.postMessage({
-      type: 'attachAudioSession',
-      body: {
-        duration: playbackSession.durationSeconds,
-        quality: normalizeSpectrogramQuality(payload?.spectrogramQuality),
-        sampleCount: monoSamples.length,
-        sampleRate: playbackSession.sourceSampleRate,
-        samplesBuffer: monoSamples.buffer,
-        sessionVersion: state.engineSessionRevision,
-      },
-    }, [monoSamples.buffer]);
-  })();
+  state.pendingAnalysisSession = {
+    loadToken,
+    monoSamples,
+    playbackSession,
+    quality: normalizeSpectrogramQuality(payload?.spectrogramQuality),
+  };
 
   await audioTransport.load({
     playbackSession,
@@ -2296,13 +2550,23 @@ async function initializePlaybackFromPreparedData(
   refreshSpectrogramAnalysisConfig({ persist: false });
   setAnalysisStatus('Playback ready');
 
-  void analysisSessionPromise;
+  if (state.initialWaveformReadyLoadToken === loadToken) {
+    void startDeferredAnalysisSession(loadToken)
+      .catch((error) => {
+        if (loadToken !== state.loadToken) {
+          return;
+        }
+
+        setAnalysisStatus(`Spectrogram failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      });
+  }
 }
 
 const {
   acceptDecodeFallbackResult,
   loadAudioFile,
   rejectDecodeFallbackRequest,
+  startDeferredAuxiliaryLoads,
 } = createAudioscopeLoadController({
   audioTransportProcessorScriptUri,
   createModuleWorker,
@@ -2317,9 +2581,9 @@ const {
   embeddedMediaToolsGuidance: EMBEDDED_MEDIA_TOOLS_GUIDANCE,
   initializeDecodedPlayback,
   initializePlaybackFromPreparedData,
-  initializeSpectrogramSurface,
   initializeWaveformSurface,
   normalizeExternalToolStatus,
+  resetSpectrogramCanvasElement,
   renderMediaMetadata,
   renderSpectrogramScale,
   renderWaveformUi,

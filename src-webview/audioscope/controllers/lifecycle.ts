@@ -4,24 +4,30 @@ import type { AudioscopeElements } from '../core/elements';
 
 interface LifecycleState {
   analysis: unknown | null;
+  analysisOverviewRefreshPending: boolean;
   analysisRuntimeReadyPromise: Promise<void> | null;
   analysisWorker: Worker | null;
   analysisWorkerBootstrapUrl: string | null;
   audioTransport: AudioTransport | null;
+  deferredAuxiliaryLoadsLoadToken: number;
   engineSurfacesPosted: boolean;
   engineUiState: ViewportUiState | null;
   engineWorker: Worker | null;
   engineWorkerBootstrapUrl: string | null;
+  waveformWorker: Worker | null;
+  waveformWorkerBootstrapUrl: string | null;
   followPlayback: boolean;
   hoverState: {
     spectrogram: unknown | null;
     waveform: unknown | null;
   };
+  initialWaveformReadyLoadToken: number;
   lastAppliedTransportCommandSerial: number;
   lastSyncedSpectrogramDisplay: unknown | null;
   loopHandleDrag: unknown | null;
   playbackFrame: number;
   playbackSession: PlaybackSession | null;
+  pendingAnalysisSession: unknown | null;
   resolveAnalysisRuntimeReady: (() => void) | null;
   selectionDrag: unknown | null;
   spectrogramCanvas: HTMLCanvasElement | null;
@@ -31,7 +37,9 @@ interface LifecycleState {
   spectrogramFrame: number;
   spectrogramRenderForcePending: boolean;
   spectrogramSurfaceResetPromise: Promise<void> | null;
+  spectrogramSurfaceReadyPromise: Promise<void> | null;
   waveformCanvas: HTMLCanvasElement | null;
+  waveformSurfaceReadyPromise: Promise<void> | null;
   waveformViewport: unknown;
 }
 
@@ -68,6 +76,19 @@ export function createAudioscopeLifecycleController({
     }
   }
 
+  function disposeWaveformWorker(): void {
+    if (state.waveformWorker) {
+      state.waveformWorker.postMessage({ type: 'disposeSession' });
+      state.waveformWorker.terminate();
+      state.waveformWorker = null;
+    }
+
+    if (state.waveformWorkerBootstrapUrl) {
+      URL.revokeObjectURL(state.waveformWorkerBootstrapUrl);
+      state.waveformWorkerBootstrapUrl = null;
+    }
+  }
+
   function disposeAnalysisWorker(): void {
     if (state.analysisWorker) {
       state.analysisWorker.postMessage({ type: 'disposeSession' });
@@ -96,6 +117,18 @@ export function createAudioscopeLifecycleController({
     }
   }
 
+  function resetEngineWorkerSession(): void {
+    state.engineWorker?.postMessage({ type: 'DisposeSession' });
+  }
+
+  function resetWaveformWorkerSession(): void {
+    state.waveformWorker?.postMessage({ type: 'dispose' });
+  }
+
+  function resetAnalysisWorkerSession(): void {
+    state.analysisWorker?.postMessage({ type: 'disposeSession' });
+  }
+
   function destroySession(): void {
     if (state.spectrogramDefaultsPersistTimer) {
       window.clearTimeout(state.spectrogramDefaultsPersistTimer);
@@ -113,6 +146,11 @@ export function createAudioscopeLifecycleController({
     window.cancelAnimationFrame(state.spectrogramFrame);
     state.spectrogramFrame = 0;
     state.spectrogramRenderForcePending = false;
+    state.analysisOverviewRefreshPending = false;
+    state.analysis = null;
+    state.pendingAnalysisSession = null;
+    state.initialWaveformReadyLoadToken = 0;
+    state.deferredAuxiliaryLoadsLoadToken = 0;
     state.selectionDrag = null;
     state.loopHandleDrag = null;
     state.engineUiState = null;
@@ -123,8 +161,9 @@ export function createAudioscopeLifecycleController({
     hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
     hideSurfaceHoverTooltip(elements.spectrogramHoverTooltip);
     hideWaveformSampleMarker();
-    disposeAnalysisWorker();
-    disposeEngineWorker();
+    resetAnalysisWorkerSession();
+    resetEngineWorkerSession();
+    resetWaveformWorkerSession();
 
     const audioTransport = state.audioTransport;
     state.audioTransport = null;
@@ -133,6 +172,8 @@ export function createAudioscopeLifecycleController({
     state.playbackSession = null;
     state.waveformCanvas = null;
     state.spectrogramCanvas = null;
+    state.waveformSurfaceReadyPromise = null;
+    state.spectrogramSurfaceReadyPromise = null;
     state.engineSurfacesPosted = false;
     state.waveformViewport = createInitialWaveformViewportState();
     state.followPlayback = false;
@@ -145,5 +186,6 @@ export function createAudioscopeLifecycleController({
     destroySession,
     disposeAnalysisWorker,
     disposeEngineWorker,
+    disposeWaveformWorker,
   };
 }

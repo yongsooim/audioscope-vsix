@@ -85,10 +85,12 @@ pub const AllocationHeader = extern struct {
 pub const WaveLevel = struct {
     block_size: i32 = 0,
     block_count: i32 = 0,
-    abs_peaks: []f32 = &.{},
+    max_peaks: []f32 = &.{},
+    min_peaks: []f32 = &.{},
 
     pub fn deinit(self: *WaveLevel) void {
-        if (self.abs_peaks.len > 0) allocator.free(self.abs_peaks);
+        if (self.max_peaks.len > 0) allocator.free(self.max_peaks);
+        if (self.min_peaks.len > 0) allocator.free(self.min_peaks);
         self.* = .{};
     }
 };

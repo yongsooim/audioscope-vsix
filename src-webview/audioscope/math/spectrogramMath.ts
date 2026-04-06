@@ -193,8 +193,7 @@ export function getFrequencyAtMelPosition(position: number, minFrequency: number
 export function formatFrequencyLabel(frequency: number): string {
   if (frequency >= 1000) {
     const kiloHertz = frequency / 1000;
-    const rounded = Number.isInteger(kiloHertz) ? String(kiloHertz) : kiloHertz.toFixed(1);
-    return `${rounded} kHz`;
+    return `${kiloHertz.toFixed(2)} kHz`;
   }
 
   return `${Math.round(frequency)} Hz`;

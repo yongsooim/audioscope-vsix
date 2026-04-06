@@ -1465,12 +1465,8 @@ function registerActiveConfigVersion(value: unknown): void {
 
   analysisState.activeConfigVersion = nextConfigVersion;
   analysisState.generationStatus.clear();
-  clearTileCache();
-  analysisState.overview = createEmptyLayerState('overview');
-  analysisState.visible = createEmptyLayerState('visible');
   pendingOverviewRequest = null;
   pendingVisibleRequest = null;
-  paintSpectrogramDisplay();
 }
 
 async function pumpOverviewLoop() {
@@ -1509,14 +1505,27 @@ async function pumpOverviewLoop() {
         viewStart: 0,
       });
 
+      if (isEquivalentPlan(plan, analysisState.overview.plan) && analysisState.overview.ready) {
+        paintSpectrogramDisplay();
+        continue;
+      }
+
+      const retainedPlan = analysisState.overview.ready
+        ? analysisState.overview.plan
+        : analysisState.overview.retainedPlan;
+
       analysisState.overview = {
         generation: 0,
         kind: 'overview',
         plan,
         ready: false,
-        retainedPlan: null,
+        retainedPlan,
         requestPending: true,
       };
+
+      if (!retainedPlan) {
+        paintSpectrogramDisplay();
+      }
 
       const completed = await ensurePlanTiles(runtime, plan, {
         shouldAbort: () => shouldAbortOverviewPlan(plan),

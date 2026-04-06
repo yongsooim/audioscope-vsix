@@ -13,6 +13,7 @@ export const WEBGPU_MEL_ANALYSIS_FUNCTIONS = /* wgsl */`
 fn computeMelPower(columnIndex: u32, rowIndex: u32, fftSize: u32) -> f32 {
   let row = melRows[rowIndex];
   let spectrumBaseIndex = columnIndex * fftSize;
+  let powerScale = params.timing.w;
   var melPower = 0.0;
   var weightIndex = row.weightOffset;
   let weightEnd = row.weightOffset + row.weightCount;
@@ -25,8 +26,7 @@ fn computeMelPower(columnIndex: u32, rowIndex: u32, fftSize: u32) -> f32 {
     let binIndex = melBins[weightIndex];
     let weight = melWeights[weightIndex];
     let spectrum = baseSpectrum[spectrumBaseIndex + binIndex];
-    let power = dot(spectrum, spectrum) * params.timing.w;
-    melPower += power * weight;
+    melPower += dot(spectrum, spectrum) * (weight * powerScale);
     weightIndex += 1u;
   }
 

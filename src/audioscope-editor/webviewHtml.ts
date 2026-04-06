@@ -5,6 +5,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'src-webview', 'audioscope.css'));
     const engineWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioEngineWorker.js'));
     const analysisWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioAnalysisWorker.js'));
+    const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'interactiveWaveformWorker.js'));
     const decodeWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'embeddedDecodeWorker.js'));
     const decodeBrowserModuleUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_browser_module.js'));
     const decodeBrowserModuleWasmUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_browser_module.wasm'));
@@ -23,7 +24,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     <link rel="stylesheet" href="${styleUri}" />
     <title>audioscope</title>
   </head>
-  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-decode-module-src="${decodeBrowserModuleUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}">
+  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-decode-module-src="${decodeBrowserModuleUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}">
     <main class="app-shell">
       <section id="audioscope-viewport" class="viewport" aria-label="audioscope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">
@@ -60,6 +61,10 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           </div>
           <div id="waveform-viewport" class="waveform-viewport" aria-label="Waveform">
             <div id="waveform-canvas-host" class="waveform-canvas-host" aria-hidden="true"></div>
+            <div class="waveform-level-labels" aria-hidden="true">
+              <div class="waveform-level-label waveform-level-label-positive">1.0</div>
+              <div class="waveform-level-label waveform-level-label-negative">-1.0</div>
+            </div>
             <div id="waveform-hit-target" class="waveform-hit-target" aria-hidden="true"></div>
             <div id="waveform-hover-tooltip" class="surface-hover-tooltip" aria-hidden="true"></div>
             <div id="waveform-selection" class="waveform-selection" aria-hidden="true"></div>
@@ -275,7 +280,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             </select>
           </div>
         </div>
-        <div id="time-readout" class="time-readout">0:00 / --:--</div>
+        <div id="time-readout" class="time-readout">0:00.00 / --:--.--</div>
         <div id="waveform-overview" class="timeline-shell">
           <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>
           <div id="timeline-current-marker" class="timeline-current-marker" aria-hidden="true" hidden></div>

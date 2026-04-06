@@ -54,12 +54,8 @@ fn computeCqtValues(
     return;
   }
 
-  var centerRatio = 0.5;
-  if (columnCount > 1u) {
-    centerRatio = (f32(columnIndex) + 0.5) / f32(columnCount);
-  }
-
-  let centerTime = params.timing.x + (centerRatio * params.timing.y);
+  let columnStep = params.timing.y / f32(max(columnCount, 1u));
+  let centerTime = params.timing.x + ((f32(columnIndex) + 0.5) * columnStep);
   let centerSample = i32(round(centerTime * params.timing.z));
   let row = rowMeta[binIndex];
   let firstSample = centerSample + row.firstOffset;
@@ -67,7 +63,10 @@ fn computeCqtValues(
   let useFullNormalization = firstSample >= 0 && u32(lastSample) < sampleCount;
   var real = 0.0;
   var imaginary = 0.0;
-  var norm = select(0.0, row.normalization, useFullNormalization);
+  var norm = 0.0;
+  if (useFullNormalization) {
+    norm = row.normalization;
+  }
   var tapIndex = localIndex;
 
   loop {
@@ -115,11 +114,10 @@ fn computeCqtValues(
   }
 
   let finalNorm = partialNorm[0];
-  let power = select(
-    0.0,
-    ((partialReal[0] * partialReal[0]) + (partialImaginary[0] * partialImaginary[0])) / max(finalNorm, 1e-8),
-    finalNorm > 1e-8,
-  );
+  var power = 0.0;
+  if (finalNorm > 1e-8) {
+    power = ((partialReal[0] * partialReal[0]) + (partialImaginary[0] * partialImaginary[0])) / finalNorm;
+  }
   cqtValues[(columnIndex * binCount) + binIndex] = power;
 }
 `;

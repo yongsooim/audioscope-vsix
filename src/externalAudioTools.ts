@@ -316,16 +316,23 @@ function formatDurationText(value: number | null): string | null {
     return null;
   }
 
-  const totalSeconds = Math.round(value);
+  const fractionDigits = 2;
+  const fractionScale = 10 ** fractionDigits;
+  const totalFractions = Math.max(0, Math.round(value * fractionScale));
+  const totalSeconds = Math.floor(totalFractions / fractionScale);
   const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const minutes = hours > 0
+    ? Math.floor((totalSeconds % 3600) / 60)
+    : Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
+  const fractions = totalFractions % fractionScale;
+  const fractionText = String(fractions).padStart(fractionDigits, '0');
 
   if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${fractionText}`;
   }
 
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  return `${minutes}:${String(seconds).padStart(2, '0')}.${fractionText}`;
 }
 
 function formatBitrateText(value: number | null): string | null {

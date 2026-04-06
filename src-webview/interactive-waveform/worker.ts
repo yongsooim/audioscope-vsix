@@ -116,7 +116,7 @@ type WorkerMessage =
   | { type: 'resizeCanvas'; body?: CanvasInitOptions };
 
 const CENTER_LINE_ALPHA = 0.14;
-const SYMMETRIC_ENVELOPE_GAIN = 0.76;
+const SYMMETRIC_ENVELOPE_GAIN = 1;
 const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
 const SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 28;
 const RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 0.9;
@@ -525,7 +525,7 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
 
   let peaks: Float32Array | null = null;
   if (!rawSamplePlotMode && !samplePlotMode) {
-    peaks = ensureWaveformSliceCapacity(module, columnCount);
+    peaks = ensureWaveformSliceCapacity(module, columnCount * 2);
 
     if (!module._wave_extract_waveform_peaks(
       viewStart,
@@ -550,6 +550,12 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     : null;
 
   if (!renderSurface) {
+    return;
+  }
+
+  if (!analysisState.waveformBuilt && !rawSamplePlotMode && !samplePlotMode) {
+    renderSurface.context.setTransform(1, 0, 0, 1, 0, 0);
+    renderSurface.context.clearRect(0, 0, renderSurface.canvas.width, renderSurface.canvas.height);
     return;
   }
 

@@ -142,6 +142,10 @@ export interface EngineBootstrapRuntimeMessage {
   type: 'bootstrapRuntime';
 }
 
+export interface DisposeSessionMessage {
+  type: 'DisposeSession';
+}
+
 export interface PlaybackClockTickMessage {
   body: PlaybackClockState;
   type: 'PlaybackClockTick';
@@ -262,6 +266,7 @@ export interface RequestSampleInfoMessage {
 
 export type EngineMainToWorkerMessage =
   | EngineBootstrapRuntimeMessage
+  | DisposeSessionMessage
   | InitSurfacesMessage
   | LoadAnalysisSessionMessage
   | PlaybackClockTickMessage

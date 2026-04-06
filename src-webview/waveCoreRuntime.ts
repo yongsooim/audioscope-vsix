@@ -11,6 +11,7 @@ const exportedFunctionNames = [
   'wave_extract_waveform_slice',
   'wave_plan_waveform_follow_render',
   'wave_plan_spectrogram_follow_render',
+  'wave_sample_analysis_value_at_frame',
   'wave_sample_mfcc_value_at_frame',
   'wave_render_spectrogram_tile_rgba',
 ] as const;
@@ -68,6 +69,21 @@ export interface WaveCoreModule {
     bufferFactor: number,
     marginRatio: number,
     epsilon: number,
+    outputPointer: number,
+  ): number;
+  _wave_sample_analysis_value_at_frame(
+    centerSample: number,
+    rowIndex: number,
+    rowCount: number,
+    melBandCount: number,
+    fftSize: number,
+    decimationFactor: number,
+    minFrequency: number,
+    maxFrequency: number,
+    analysisType: number,
+    frequencyScale: number,
+    scalogramOmega0: number,
+    windowFunction: number,
     outputPointer: number,
   ): number;
   _wave_sample_mfcc_value_at_frame(

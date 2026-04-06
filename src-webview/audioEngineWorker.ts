@@ -51,15 +51,19 @@ import {
 import {
   clearWaveformSurface,
   drawRawSamplePlot,
-  drawRepresentativeSamplePlot,
   drawWaveformEnvelope,
   fillRepresentativeSampleCache,
+  fillRepresentativeSampleCacheWithReuse,
+  fillRawDisplayCache,
+  fillRawDisplayCacheWithReuse,
   formatMfccValue,
   formatSampleOrdinal,
   formatSampleValue,
+  getRawDisplayCacheCapacity,
   getRepresentativeSampleCacheCapacity,
   getWaveformMarkerYRatio,
   resolveWaveformPlotMode,
+  type RawDisplayCache,
   type RepresentativeSampleCache,
 } from './audio-engine-worker/waveformRender';
 import {
@@ -99,7 +103,8 @@ const WAVEFORM_MAX_ZOOM_PIXELS_PER_SAMPLE = 8;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2;
 const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
-const WAVEFORM_PYRAMID_BUILD_STEP_BLOCKS = 32_768;
+const WAVEFORM_PYRAMID_BUILD_STEP_BLOCKS = 65_536;
+const WAVEFORM_PYRAMID_BUILD_TIME_BUDGET_MS = 8;
 const MAX_TILE_CACHE_ENTRIES = 24;
 const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
 
@@ -170,6 +175,21 @@ interface WaveformRepresentativeCacheState {
   sampleIndices: Int32Array | null;
   sampleStartFrame: number;
   sampleValues: Float32Array | null;
+  sessionRevision: number;
+  visibleSampleCount: number;
+}
+
+interface WaveformRawDisplayCacheState {
+  bucketCount: number;
+  bucketSize: number;
+  bucketStartIndex: number;
+  drawColumns: number;
+  firstIndices: Int32Array | null;
+  lastIndices: Int32Array | null;
+  maxIndices: Int32Array | null;
+  minIndices: Int32Array | null;
+  sampleCount: number;
+  sampleStartFrame: number;
   sessionRevision: number;
   visibleSampleCount: number;
 }
@@ -257,6 +277,9 @@ type DragState = LoopHandleDragState | SelectionDragState | null;
 interface EngineSessionState {
   durationFrames: number;
   initialized: boolean;
+  analysisSample: Float32Array | null;
+  analysisSampleCapacity: number;
+  analysisSamplePointer: number;
   maxFrequency: number;
   minFrequency: number;
   module: WaveCoreModule | null;
@@ -322,6 +345,7 @@ interface EngineState {
     targetStartFrame: number;
   };
   waveformCache: WaveformRenderCacheState;
+  waveformRawDisplayCache: WaveformRawDisplayCacheState;
   waveformRepresentativeCache: WaveformRepresentativeCacheState;
   waveformSurface: WaveformSurfaceState;
   spectrogramSurface: SpectrogramSurfaceState;
@@ -363,6 +387,21 @@ const waveformRepresentativeCache: WaveformRepresentativeCacheState = {
   sampleIndices: null,
   sampleStartFrame: 0,
   sampleValues: null,
+  sessionRevision: -1,
+  visibleSampleCount: 0,
+};
+
+const waveformRawDisplayCache: WaveformRawDisplayCacheState = {
+  bucketCount: 0,
+  bucketSize: 0,
+  bucketStartIndex: 0,
+  drawColumns: 0,
+  firstIndices: null,
+  lastIndices: null,
+  maxIndices: null,
+  minIndices: null,
+  sampleCount: 0,
+  sampleStartFrame: 0,
   sessionRevision: -1,
   visibleSampleCount: 0,
 };
@@ -420,6 +459,7 @@ const state: EngineState = {
     targetStartFrame: 0,
   },
   waveformCache,
+  waveformRawDisplayCache,
   waveformRepresentativeCache,
   waveformSurface,
   spectrogramSurface,
@@ -437,6 +477,9 @@ self.onmessage = (event: MessageEvent<EngineMainToWorkerMessage>) => {
       enqueueRequest(async () => {
         await getRuntime();
       });
+      return;
+    case 'DisposeSession':
+      handleDisposeSession();
       return;
     case 'InitSurfaces':
       handleInitSurfaces(message);
@@ -476,6 +519,9 @@ function createEmptyPlaybackClock(): PlaybackClockState {
 
 function createEmptySessionState(): EngineSessionState {
   return {
+    analysisSample: null,
+    analysisSampleCapacity: 0,
+    analysisSamplePointer: 0,
     durationFrames: 0,
     initialized: false,
     maxFrequency: MAX_FREQUENCY,
@@ -496,6 +542,34 @@ function createEmptySessionState(): EngineSessionState {
     waveformSliceCapacity: 0,
     waveformSlicePointer: 0,
   };
+}
+
+function handleDisposeSession(): void {
+  if (state.session.module) {
+    disposeWasmSession(state.session.module);
+  }
+
+  clearTileCache();
+  state.session = createEmptySessionState();
+  state.playbackClock = createEmptyPlaybackClock();
+  state.loopRangeFrames = null;
+  state.selectionDraftRangeFrames = null;
+  state.dragState = null;
+  state.hoverWaveformRatioX = null;
+  state.pendingTransportCommand = null;
+  state.renderScheduled = false;
+  state.renderToken += 1;
+  state.viewport.followEnabled = false;
+  state.viewport.plotMode = 'envelope';
+  state.viewport.presentedStartFrame = 0;
+  state.viewport.presentedEndFrame = 0;
+  state.viewport.renderedStartFrame = 0;
+  state.viewport.renderedEndFrame = 0;
+  state.viewport.targetStartFrame = 0;
+  state.viewport.targetEndFrame = 0;
+  invalidateWaveformCache();
+  invalidateWaveformRawDisplayCache();
+  invalidateWaveformRepresentativeCache();
 }
 
 function enqueueRequest(task: () => Promise<void>): void {
@@ -542,6 +616,17 @@ function invalidateWaveformRepresentativeCache(): void {
   state.waveformRepresentativeCache.visibleSampleCount = 0;
 }
 
+function invalidateWaveformRawDisplayCache(): void {
+  state.waveformRawDisplayCache.bucketCount = 0;
+  state.waveformRawDisplayCache.bucketSize = 0;
+  state.waveformRawDisplayCache.bucketStartIndex = 0;
+  state.waveformRawDisplayCache.drawColumns = 0;
+  state.waveformRawDisplayCache.sampleCount = 0;
+  state.waveformRawDisplayCache.sampleStartFrame = 0;
+  state.waveformRawDisplayCache.sessionRevision = -1;
+  state.waveformRawDisplayCache.visibleSampleCount = 0;
+}
+
 function areRangeFramesEqual(left: RangeFrames | null, right: RangeFrames | null): boolean {
   if (left === right) {
     return true;
@@ -552,6 +637,14 @@ function areRangeFramesEqual(left: RangeFrames | null, right: RangeFrames | null
   }
 
   return left.startFrame === right.startFrame && left.endFrame === right.endFrame;
+}
+
+function doesRangeContain(container: RangeFrames | null, candidate: RangeFrames): boolean {
+  return Boolean(
+    container
+    && candidate.startFrame >= container.startFrame
+    && candidate.endFrame <= container.endFrame,
+  );
 }
 
 function handleInitSurfaces(message: EngineMainToWorkerMessage & { type: 'InitSurfaces' }): void {
@@ -574,6 +667,7 @@ function handleInitSurfaces(message: EngineMainToWorkerMessage & { type: 'InitSu
   resizeWaveformSurface();
   resizeSpectrogramSurface();
   invalidateWaveformCache();
+  invalidateWaveformRawDisplayCache();
   invalidateWaveformRepresentativeCache();
   state.renderSurfacesRevision += 1;
   state.viewport.renderWidthPx = state.waveformSurface.widthCssPx;
@@ -600,6 +694,7 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
   disposeWasmSession(runtime.module);
   clearTileCache();
   invalidateWaveformCache();
+  invalidateWaveformRawDisplayCache();
   invalidateWaveformRepresentativeCache();
 
   const durationSeconds = durationFrames / sampleRate;
@@ -655,7 +750,6 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
   state.viewport.renderedEndFrame = 0;
   emitUiState();
   scheduleRender();
-  scheduleWaveformPyramidBuild(sessionRevision);
 }
 
 function scheduleWaveformPyramidBuild(sessionRevision: number): void {
@@ -687,7 +781,16 @@ function scheduleWaveformPyramidBuild(sessionRevision: number): void {
         return;
       }
 
-      const done = state.session.module._wave_build_waveform_pyramid_step(WAVEFORM_PYRAMID_BUILD_STEP_BLOCKS);
+      const buildDeadline = performance.now() + WAVEFORM_PYRAMID_BUILD_TIME_BUDGET_MS;
+      let done = 0;
+
+      do {
+        done = state.session.module._wave_build_waveform_pyramid_step(WAVEFORM_PYRAMID_BUILD_STEP_BLOCKS);
+
+        if (state.session.sessionRevision !== sessionRevision) {
+          return;
+        }
+      } while (!done && performance.now() < buildDeadline);
 
       if (state.session.sessionRevision !== sessionRevision) {
         return;
@@ -1259,16 +1362,33 @@ function applyFollowSolver(): boolean {
   const currentRange = getTargetRange();
   const spanFrames = Math.max(1, currentRange.endFrame - currentRange.startFrame);
   const anchorFrame = getClampedPlaybackFrame();
-  const nextStartFrame = clamp(
+  const desiredStartFrame = clamp(
     Math.round(anchorFrame - spanFrames * WAVEFORM_FOLLOW_RATIO),
     0,
     Math.max(0, state.session.durationFrames - spanFrames),
   );
+  const nextStartFrame = quantizeFollowStartFrame(desiredStartFrame, spanFrames);
   const changed = setTargetRange(nextStartFrame, nextStartFrame + spanFrames);
   if (changed) {
     scheduleRender();
   }
   return changed;
+}
+
+function quantizeFollowStartFrame(startFrame: number, spanFrames: number): number {
+  const deviceColumnCount = Math.max(
+    1,
+    Math.round(state.waveformSurface.widthCssPx * state.waveformSurface.renderScale),
+  );
+  const framesPerColumn = Math.max(1, Math.round(spanFrames / deviceColumnCount));
+  const quantizationStep = Math.max(1, Math.round(framesPerColumn * 0.25));
+  const quantizedStart = Math.round(startFrame / quantizationStep) * quantizationStep;
+
+  return clamp(
+    quantizedStart,
+    0,
+    Math.max(0, state.session.durationFrames - spanFrames),
+  );
 }
 
 function isInteractionActive(): boolean {
@@ -1442,14 +1562,16 @@ async function pumpRenderLoop(): Promise<void> {
       state.viewport.renderedStartFrame = targetRange.startFrame;
       state.viewport.renderedEndFrame = targetRange.endFrame;
       emitUiState();
-      postMessage({
-        type: 'WaveformSurfaceReady',
-        body: {
-          presentedEndFrame: targetRange.endFrame,
-          presentedStartFrame: targetRange.startFrame,
-          serial: state.uiRevision,
-        },
-      });
+      if (canRenderWaveformSurface()) {
+        postMessage({
+          type: 'WaveformSurfaceReady',
+          body: {
+            presentedEndFrame: targetRange.endFrame,
+            presentedStartFrame: targetRange.startFrame,
+            serial: state.uiRevision,
+          },
+        });
+      }
       if (canRenderSpectrogram()) {
         postMessage({
           type: 'SpectrogramSurfaceReady',
@@ -1467,10 +1589,13 @@ async function pumpRenderLoop(): Promise<void> {
 }
 
 function canRender(): boolean {
+  return state.session.initialized;
+}
+
+function canRenderWaveformSurface(): boolean {
   return Boolean(
-    state.session.initialized
-    && state.waveformSurface.canvas
-    && state.waveformSurface.context
+    state.waveformSurface.canvas
+    && state.waveformSurface.context,
   );
 }
 
@@ -1485,12 +1610,6 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
   const runtime = await getRuntime();
   const module = runtime.module;
   const surface = state.waveformSurface;
-  const context = surface.context;
-  const canvas = surface.canvas;
-  if (!context || !canvas) {
-    return state.viewport.plotMode;
-  }
-
   const viewStartSeconds = framesToSeconds(range.startFrame);
   const viewEndSeconds = framesToSeconds(range.endFrame);
   const renderWidthCssPx = Math.max(1, surface.widthCssPx);
@@ -1507,43 +1626,27 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
   );
   const samplePlotMode = plotMode !== 'envelope';
   const rawSamplePlotMode = plotMode === 'raw';
+  const context = surface.context;
+  const canvas = surface.canvas;
+
+  if (!context || !canvas) {
+    return plotMode;
+  }
+
+  if (!state.session.waveformBuilt && !rawSamplePlotMode && !samplePlotMode) {
+    invalidateWaveformCache();
+    clearWaveformSurface(context, canvas);
+    return plotMode;
+  }
 
   if (!rawSamplePlotMode && !samplePlotMode) {
-    if (!state.session.waveformBuilt) {
-      invalidateWaveformCache();
-      const peaks = ensureWaveformSliceCapacity(module, columnCount);
-      if (!module._wave_extract_waveform_peaks(
-        viewStartSeconds,
-        viewEndSeconds,
-        columnCount,
-        state.session.waveformSlicePointer,
-        0,
-      )) {
-        throw new Error('Waveform slice extraction failed.');
-      }
-
-      if (token !== state.renderToken) {
-        return plotMode;
-      }
-
-      drawWaveformEnvelope(
-        context,
-        canvas,
-        peaks,
-        columnCount,
-        renderHeightCssPx,
-        surface.renderScale,
-        surface.color,
-      );
-      return plotMode;
-    }
-
     const bufferedPlan = createWaveformBufferedRenderPlan(
       module,
       range,
       viewStartSeconds,
       viewEndSeconds,
       columnCount,
+      plotMode,
     );
 
     if (!isWaveformCacheReusable(bufferedPlan, plotMode)) {
@@ -1555,7 +1658,7 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
       const cacheColumnCount = Math.max(1, cacheSurface.canvas.width);
       const cacheViewStartSeconds = framesToSeconds(bufferedPlan.renderRange.startFrame);
       const cacheViewEndSeconds = framesToSeconds(bufferedPlan.renderRange.endFrame);
-      const peaks = ensureWaveformSliceCapacity(module, cacheColumnCount);
+      const peaks = ensureWaveformSliceCapacity(module, cacheColumnCount * 2);
 
       if (!module._wave_extract_waveform_peaks(
         cacheViewStartSeconds,
@@ -1588,7 +1691,7 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
     }
 
     if (!presentWaveformCacheRange(context, canvas, range)) {
-      const peaks = ensureWaveformSliceCapacity(module, columnCount);
+      const peaks = ensureWaveformSliceCapacity(module, columnCount * 2);
       if (!module._wave_extract_waveform_peaks(
         viewStartSeconds,
         viewEndSeconds,
@@ -1623,42 +1726,80 @@ async function renderWaveform(range: RangeFrames, token: number): Promise<Wavefo
     return plotMode;
   }
 
+  const bufferedPlan = createWaveformBufferedRenderPlan(
+    module,
+    range,
+    viewStartSeconds,
+    viewEndSeconds,
+    columnCount,
+    plotMode,
+  );
+
   if (rawSamplePlotMode) {
-    invalidateWaveformCache();
-    drawRawSamplePlot(
-      context,
-      canvas,
-      sampleData,
-      surface.color,
-      pixelsPerSample,
-      range.startFrame,
-      Math.max(0, visibleSampleCount - 1),
-      renderHeightCssPx,
-      surface.renderScale,
-    );
+    if (!isWaveformCacheReusable(bufferedPlan, plotMode)) {
+      const cacheSurface = ensureWaveformCacheSurface(
+        bufferedPlan.renderWidthCssPx,
+        renderHeightCssPx,
+        surface.renderScale,
+      );
+      const cacheColumnCount = Math.max(1, cacheSurface.canvas.width);
+      const cacheVisibleSampleCount = Math.max(1, bufferedPlan.renderRange.endFrame - bufferedPlan.renderRange.startFrame);
+      const cachePixelsPerSample = cacheColumnCount / cacheVisibleSampleCount;
+      const rawDisplayCache = getRawDisplayCache(
+        sampleData,
+        bufferedPlan.renderRange.startFrame,
+        cacheVisibleSampleCount,
+        cacheColumnCount,
+      );
+
+      drawRawSamplePlot(
+        cacheSurface.context,
+        cacheSurface.canvas,
+        sampleData,
+        surface.color,
+        cachePixelsPerSample,
+        bufferedPlan.renderRange.startFrame,
+        Math.max(0, cacheVisibleSampleCount - 1),
+        renderHeightCssPx,
+        surface.renderScale,
+        {
+          rawDisplayCache,
+        },
+      );
+      updateWaveformCache(bufferedPlan, plotMode);
+    }
+
+    if (token !== state.renderToken) {
+      return plotMode;
+    }
+
+    if (!presentWaveformCacheRange(context, canvas, range)) {
+      const rawDisplayCache = getRawDisplayCache(
+        sampleData,
+        range.startFrame,
+        visibleSampleCount,
+        columnCount,
+      );
+      drawRawSamplePlot(
+        context,
+        canvas,
+        sampleData,
+        surface.color,
+        pixelsPerSample,
+        range.startFrame,
+        Math.max(0, visibleSampleCount - 1),
+        renderHeightCssPx,
+        surface.renderScale,
+        {
+          rawDisplayCache,
+        },
+      );
+    }
     return plotMode;
   }
 
   invalidateWaveformCache();
-  const representativeCache = getRepresentativeSampleCache(
-    sampleData,
-    range.startFrame,
-    visibleSampleCount,
-    columnCount,
-  );
-  drawRepresentativeSamplePlot(
-    context,
-    canvas,
-    sampleData,
-    surface.color,
-    pixelsPerSample,
-    range.startFrame,
-    visibleSampleCount,
-    Math.max(0, visibleSampleCount - 1),
-    renderHeightCssPx,
-    surface.renderScale,
-    representativeCache,
-  );
+  clearWaveformSurface(context, canvas);
   return plotMode;
 }
 
@@ -1668,19 +1809,43 @@ function createWaveformBufferedRenderPlan(
   viewStartSeconds: number,
   viewEndSeconds: number,
   deviceColumnCount: number,
+  plotMode: WaveformPlotMode,
 ): WaveformBufferedRenderPlan {
   const displayWidth = Math.max(1, state.waveformSurface.widthCssPx);
   const sampleRate = Math.max(1, state.session.sampleRate);
   const durationSeconds = state.session.durationFrames / sampleRate;
+  const visibleSpanFrames = Math.max(1, visibleRange.endFrame - visibleRange.startFrame);
+  const existingCacheRange = state.waveformCache.renderRange;
+  const cacheIsReusableForPlot = state.waveformCache.sessionRevision === state.session.sessionRevision
+    && state.waveformCache.plotMode === plotMode
+    && state.waveformCache.heightCssPx === state.waveformSurface.heightCssPx
+    && Math.abs(state.waveformCache.renderScale - state.waveformSurface.renderScale) <= 1e-9;
+  const existingCacheSpanFrames = existingCacheRange
+    ? Math.max(1, existingCacheRange.endFrame - existingCacheRange.startFrame)
+    : 0;
+  const minimumReusableWidth = existingCacheSpanFrames > 0
+    ? Math.max(displayWidth, Math.ceil(displayWidth * (existingCacheSpanFrames / visibleSpanFrames)))
+    : 0;
+
+  if (
+    cacheIsReusableForPlot
+    && state.waveformCache.renderWidthCssPx > 0
+    && doesRangeContain(existingCacheRange, visibleRange)
+    && state.waveformCache.renderWidthCssPx >= minimumReusableWidth
+    && existingCacheRange
+  ) {
+    return {
+      renderRange: { ...existingCacheRange },
+      renderWidthCssPx: state.waveformCache.renderWidthCssPx,
+    };
+  }
+
   const secondsPerDeviceColumn = Math.max(
     1 / sampleRate,
     Math.max(1 / sampleRate, viewEndSeconds - viewStartSeconds) / Math.max(1, deviceColumnCount),
   );
-  const preferredRange = state.waveformCache.sessionRevision === state.session.sessionRevision
-    && state.waveformCache.plotMode === 'envelope'
-    && state.waveformCache.heightCssPx === state.waveformSurface.heightCssPx
-    && Math.abs(state.waveformCache.renderScale - state.waveformSurface.renderScale) <= 1e-9
-    ? state.waveformCache.renderRange
+  const preferredRange = cacheIsReusableForPlot
+    ? existingCacheRange
     : null;
   const planner = getDisplayPlanner(module);
   const planned = planner.planWaveformFollowRender({
@@ -1791,22 +1956,42 @@ function presentWaveformCacheRange(
   const cacheSpanFrames = Math.max(1, cacheRange.endFrame - cacheRange.startFrame);
   const sourceStartRatio = (visibleRange.startFrame - cacheRange.startFrame) / cacheSpanFrames;
   const sourceEndRatio = (visibleRange.endFrame - cacheRange.startFrame) / cacheSpanFrames;
-  const sourceX = clamp(
-    Math.floor(sourceStartRatio * cacheCanvas.width),
-    0,
-    Math.max(0, cacheCanvas.width - 1),
+  const maxSourceX = Math.max(0, cacheCanvas.width - 1);
+  const sourceStartX = clamp(sourceStartRatio * cacheCanvas.width, 0, maxSourceX);
+  const unclampedSourceEndX = sourceEndRatio * cacheCanvas.width;
+  const sourceEndX = clamp(
+    unclampedSourceEndX,
+    sourceStartX + 1,
+    cacheCanvas.width,
   );
-  const sourceWidth = Math.max(
+  const unclampedSourceWidth = sourceEndX - sourceStartX;
+  let sourceX = sourceStartX;
+  let sourceWidth = clamp(
+    unclampedSourceWidth,
     1,
-    Math.min(
-      cacheCanvas.width - sourceX,
-      Math.ceil((sourceEndRatio - sourceStartRatio) * cacheCanvas.width),
-    ),
+    Math.max(1, cacheCanvas.width - sourceStartX),
   );
+  const isEffectivelyOneToOne = Math.abs(sourceWidth - canvas.width) <= 0.01;
+
+  if (isEffectivelyOneToOne) {
+    const snappedSourceStartX = clamp(Math.round(sourceStartX), 0, maxSourceX);
+    const snappedSourceEndX = clamp(
+      Math.round(sourceEndX),
+      snappedSourceStartX + 1,
+      cacheCanvas.width,
+    );
+
+    sourceX = snappedSourceStartX;
+    sourceWidth = clamp(
+      snappedSourceEndX - snappedSourceStartX,
+      1,
+      Math.max(1, cacheCanvas.width - snappedSourceStartX),
+    );
+  }
 
   context.save();
   context.setTransform(1, 0, 0, 1, 0, 0);
-  context.imageSmoothingEnabled = true;
+  context.imageSmoothingEnabled = !isEffectivelyOneToOne;
   context.globalCompositeOperation = 'copy';
   context.drawImage(
     cacheCanvas,
@@ -2318,30 +2503,9 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
     };
   }
 
-  const renderColumnCount = Math.max(1, Math.round(state.waveformSurface.widthCssPx * state.waveformSurface.renderScale));
-  const visibleSampleCount = Math.max(1, spanFrames);
   const sampleStartFrame = range.startFrame;
-  const visibleSampleSpan = Math.max(0, visibleSampleCount - 1);
-
+  const visibleSampleSpan = Math.max(0, Math.max(1, spanFrames) - 1);
   let sampleIndex = frameAtPointer;
-  if (state.viewport.plotMode === 'sample') {
-    const representativeCache = getRepresentativeSampleCache(
-      sampleData,
-      sampleStartFrame,
-      visibleSampleCount,
-      renderColumnCount,
-    );
-    const samplePosition = sampleStartFrame + ratioX * visibleSampleSpan;
-    const bucketOffset = clamp(
-      Math.floor(samplePosition / Math.max(1, representativeCache.bucketSize)) - representativeCache.bucketStartIndex,
-      0,
-      Math.max(0, representativeCache.bucketCount - 1),
-    );
-
-    if (representativeCache.bucketCount > 0) {
-      sampleIndex = representativeCache.sampleIndices[bucketOffset] ?? sampleIndex;
-    }
-  }
 
   sampleIndex = clamp(sampleIndex, 0, Math.max(0, sampleData.length - 1));
   const sampleValue = clamp(sampleData[sampleIndex] ?? 0, -1, 1);
@@ -2358,7 +2522,7 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
 
 function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number, requestId: number): SampleInfoPayload | null {
   const sampleRate = state.session.sampleRate;
-  const range = getTargetRange();
+  const range = getPresentedRangeForInteraction();
   const spanFrames = Math.max(0, range.endFrame - range.startFrame);
   if (!(sampleRate > 0) || !(spanFrames > 0)) {
     return {
@@ -2377,13 +2541,17 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
     0,
     state.session.durationFrames,
   );
+  const timeLabel = formatAxisLabel(frame / sampleRate);
+  const activePlan = state.lastSpectrogramPlan?.analysisType === state.spectrogramConfig.analysisType
+    ? state.lastSpectrogramPlan
+    : createSpectrogramPlan(range);
   if (state.spectrogramConfig.analysisType === 'mfcc') {
     const coefficient = getMfccCoefficientAtPosition(clamp01(pointerRatioY));
     const coefficientValue = sampleMfccValueAtFrame(frame, coefficient);
     return {
       label: coefficientValue === null
-        ? `${formatAxisLabel(frame / sampleRate)} • MFCC C${coefficient}`
-        : `${formatAxisLabel(frame / sampleRate)} • MFCC C${coefficient} = ${formatMfccValue(coefficientValue)}`,
+        ? `${timeLabel} • MFCC C${coefficient}`
+        : `${timeLabel} • MFCC C${coefficient} = ${formatMfccValue(coefficientValue)}`,
       markerVisible: false,
       markerXRatio: ratioX,
       markerYRatio: clamp01(pointerRatioY),
@@ -2394,8 +2562,13 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
 
   if (isChromaAnalysisType(state.spectrogramConfig.analysisType)) {
     const chroma = getChromaBinAtPosition(clamp01(pointerRatioY));
+    const analysisSample = activePlan
+      ? sampleSpectrogramAnalysisValue(frame, getSpectrogramAnalysisRowIndex(clamp01(pointerRatioY), activePlan.rowCount), activePlan)
+      : null;
     return {
-      label: `${formatAxisLabel(frame / sampleRate)} • ${getChromaLabel(chroma)}`,
+      label: analysisSample
+        ? `${timeLabel} • ${getChromaLabel(chroma)} • ${formatDecibelValue(analysisSample.valueDb)}`
+        : `${timeLabel} • ${getChromaLabel(chroma)}`,
       markerVisible: false,
       markerXRatio: ratioX,
       markerYRatio: clamp01(pointerRatioY),
@@ -2404,9 +2577,27 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
     };
   }
 
+  if (activePlan) {
+    const rowIndex = getSpectrogramAnalysisRowIndex(clamp01(pointerRatioY), activePlan.rowCount);
+    const analysisSample = sampleSpectrogramAnalysisValue(frame, rowIndex, activePlan);
+    if (analysisSample) {
+      const rangeLabel = formatFrequencyRangeLabel(analysisSample.frequencyStart, analysisSample.frequencyEnd);
+      return {
+        label: rangeLabel
+          ? `${timeLabel} • ${rangeLabel} • ${formatDecibelValue(analysisSample.valueDb)}`
+          : `${timeLabel} • ${formatDecibelValue(analysisSample.valueDb)}`,
+        markerVisible: false,
+        markerXRatio: ratioX,
+        markerYRatio: clamp01(pointerRatioY),
+        requestId,
+        surface: 'spectrogram',
+      };
+    }
+  }
+
   const frequency = getSpectrogramFrequencyAtPosition(clamp01(pointerRatioY));
   return {
-    label: `${formatAxisLabel(frame / sampleRate)} • ${formatFrequencyLabel(frequency)}`,
+    label: `${timeLabel} • ${formatFrequencyLabel(frequency)}`,
     markerVisible: false,
     markerXRatio: ratioX,
     markerYRatio: clamp01(pointerRatioY),
@@ -2417,6 +2608,29 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
 
 function getActiveMfccCoefficientCount(): number {
   return normalizeMfccCoefficientCount(state.spectrogramConfig.mfccCoefficientCount);
+}
+
+function getSpectrogramAnalysisRowIndex(positionRatio: number, rowCount: number): number {
+  return clamp(
+    Math.floor((1 - clamp01(positionRatio)) * Math.max(1, rowCount)),
+    0,
+    Math.max(0, rowCount - 1),
+  );
+}
+
+function formatFrequencyRangeLabel(startFrequency: number, endFrequency: number): string {
+  if (!(Number.isFinite(startFrequency) && Number.isFinite(endFrequency))) {
+    return '';
+  }
+
+  const safeStart = Math.max(0, startFrequency);
+  const safeEnd = Math.max(safeStart, endFrequency);
+  return `${formatFrequencyLabel(safeStart)} - ${formatFrequencyLabel(safeEnd)}`;
+}
+
+function formatDecibelValue(valueDb: number): string {
+  const normalized = Math.abs(valueDb) < 0.05 ? 0 : valueDb;
+  return `${normalized.toFixed(1)} dB`;
 }
 
 function getActiveMfccMelBandCount(): number {
@@ -2461,6 +2675,51 @@ function sampleMfccValueAtFrame(frame: number, coefficient: number): number | nu
     WINDOW_FUNCTION_CODES[normalizeSpectrogramWindowFunction(state.spectrogramConfig.windowFunction)] ?? 0,
   );
   return Number.isFinite(value) ? value : null;
+}
+
+function sampleSpectrogramAnalysisValue(
+  frame: number,
+  rowIndex: number,
+  plan: SpectrogramPlan,
+): { frequencyEnd: number; frequencyStart: number; valueDb: number } | null {
+  const module = state.session.module;
+  if (!module || !state.session.initialized || rowIndex < 0 || rowIndex >= plan.rowCount) {
+    return null;
+  }
+
+  const output = ensureAnalysisSampleCapacity(module, 3);
+  const ok = module._wave_sample_analysis_value_at_frame(
+    clampFrame(frame),
+    rowIndex,
+    plan.rowCount,
+    plan.melBandCount,
+    plan.fftSize,
+    plan.decimationFactor,
+    plan.minFrequency,
+    plan.maxFrequency,
+    ANALYSIS_TYPE_CODES[plan.analysisType] ?? 0,
+    FREQUENCY_SCALE_CODES[plan.frequencyScale] ?? 0,
+    plan.scalogramOmega0,
+    WINDOW_FUNCTION_CODES[plan.windowFunction] ?? 0,
+    state.session.analysisSamplePointer,
+  );
+
+  if (!ok) {
+    return null;
+  }
+
+  const valueDb = Number(output[0]);
+  const frequencyStart = Number(output[1]);
+  const frequencyEnd = Number(output[2]);
+  if (!Number.isFinite(valueDb)) {
+    return null;
+  }
+
+  return {
+    frequencyEnd,
+    frequencyStart,
+    valueDb,
+  };
 }
 
 function getActiveSpectrogramFrequencyRange(): {
@@ -2820,6 +3079,26 @@ function ensureWaveformRepresentativeCacheCapacity(capacity: number): void {
   }
 }
 
+function ensureWaveformRawDisplayCacheCapacity(capacity: number): void {
+  const safeCapacity = Math.max(1, Math.round(capacity || 0));
+
+  if (!state.waveformRawDisplayCache.firstIndices || state.waveformRawDisplayCache.firstIndices.length < safeCapacity) {
+    state.waveformRawDisplayCache.firstIndices = new Int32Array(safeCapacity);
+  }
+
+  if (!state.waveformRawDisplayCache.minIndices || state.waveformRawDisplayCache.minIndices.length < safeCapacity) {
+    state.waveformRawDisplayCache.minIndices = new Int32Array(safeCapacity);
+  }
+
+  if (!state.waveformRawDisplayCache.maxIndices || state.waveformRawDisplayCache.maxIndices.length < safeCapacity) {
+    state.waveformRawDisplayCache.maxIndices = new Int32Array(safeCapacity);
+  }
+
+  if (!state.waveformRawDisplayCache.lastIndices || state.waveformRawDisplayCache.lastIndices.length < safeCapacity) {
+    state.waveformRawDisplayCache.lastIndices = new Int32Array(safeCapacity);
+  }
+}
+
 function getRepresentativeSampleCache(
   samples: Float32Array,
   sampleStartFrame: number,
@@ -2846,18 +3125,42 @@ function getRepresentativeSampleCache(
     };
   }
 
+  const previousCache = cache.sessionRevision === state.session.sessionRevision
+    && cache.sampleCount === samples.length
+    && cache.sampleIndices
+    && cache.sampleValues
+    && cache.bucketCount > 0
+    ? {
+      bucketCount: cache.bucketCount,
+      bucketSize: cache.bucketSize,
+      bucketStartIndex: cache.bucketStartIndex,
+      sampleIndices: cache.sampleIndices,
+      sampleValues: cache.sampleValues,
+    }
+    : null;
+
   ensureWaveformRepresentativeCacheCapacity(
     getRepresentativeSampleCacheCapacity(sampleStartFrame, visibleSampleCount, drawColumns),
   );
 
-  const representativeCache = fillRepresentativeSampleCache(
+  const representativeCache = previousCache
+    ? fillRepresentativeSampleCacheWithReuse(
+      samples,
+      sampleStartFrame,
+      visibleSampleCount,
+      drawColumns,
+      state.waveformRepresentativeCache.sampleIndices as Int32Array,
+      state.waveformRepresentativeCache.sampleValues as Float32Array,
+      previousCache,
+    )
+    : fillRepresentativeSampleCache(
     samples,
     sampleStartFrame,
     visibleSampleCount,
     drawColumns,
     state.waveformRepresentativeCache.sampleIndices as Int32Array,
     state.waveformRepresentativeCache.sampleValues as Float32Array,
-  );
+    );
 
   cache.bucketCount = representativeCache.bucketCount;
   cache.bucketSize = representativeCache.bucketSize;
@@ -2871,6 +3174,97 @@ function getRepresentativeSampleCache(
   cache.visibleSampleCount = visibleSampleCount;
 
   return representativeCache;
+}
+
+function getRawDisplayCache(
+  samples: Float32Array,
+  sampleStartFrame: number,
+  visibleSampleCount: number,
+  drawColumns: number,
+): RawDisplayCache {
+  const cache = state.waveformRawDisplayCache;
+
+  if (
+    cache.sessionRevision === state.session.sessionRevision
+    && cache.sampleCount === samples.length
+    && cache.sampleStartFrame === sampleStartFrame
+    && cache.visibleSampleCount === visibleSampleCount
+    && cache.drawColumns === drawColumns
+    && cache.firstIndices
+    && cache.minIndices
+    && cache.maxIndices
+    && cache.lastIndices
+  ) {
+    return {
+      bucketCount: cache.bucketCount,
+      bucketSize: cache.bucketSize,
+      bucketStartIndex: cache.bucketStartIndex,
+      firstIndices: cache.firstIndices,
+      lastIndices: cache.lastIndices,
+      maxIndices: cache.maxIndices,
+      minIndices: cache.minIndices,
+    };
+  }
+
+  const previousCache = cache.sessionRevision === state.session.sessionRevision
+    && cache.sampleCount === samples.length
+    && cache.firstIndices
+    && cache.minIndices
+    && cache.maxIndices
+    && cache.lastIndices
+    && cache.bucketCount > 0
+    ? {
+      bucketCount: cache.bucketCount,
+      bucketSize: cache.bucketSize,
+      bucketStartIndex: cache.bucketStartIndex,
+      firstIndices: cache.firstIndices,
+      lastIndices: cache.lastIndices,
+      maxIndices: cache.maxIndices,
+      minIndices: cache.minIndices,
+    }
+    : null;
+
+  ensureWaveformRawDisplayCacheCapacity(
+    getRawDisplayCacheCapacity(sampleStartFrame, visibleSampleCount, drawColumns),
+  );
+
+  const rawDisplayCache = previousCache
+    ? fillRawDisplayCacheWithReuse(
+      samples,
+      sampleStartFrame,
+      visibleSampleCount,
+      drawColumns,
+      state.waveformRawDisplayCache.firstIndices as Int32Array,
+      state.waveformRawDisplayCache.minIndices as Int32Array,
+      state.waveformRawDisplayCache.maxIndices as Int32Array,
+      state.waveformRawDisplayCache.lastIndices as Int32Array,
+      previousCache,
+    )
+    : fillRawDisplayCache(
+      samples,
+      sampleStartFrame,
+      visibleSampleCount,
+      drawColumns,
+      state.waveformRawDisplayCache.firstIndices as Int32Array,
+      state.waveformRawDisplayCache.minIndices as Int32Array,
+      state.waveformRawDisplayCache.maxIndices as Int32Array,
+      state.waveformRawDisplayCache.lastIndices as Int32Array,
+    );
+
+  cache.bucketCount = rawDisplayCache.bucketCount;
+  cache.bucketSize = rawDisplayCache.bucketSize;
+  cache.bucketStartIndex = rawDisplayCache.bucketStartIndex;
+  cache.drawColumns = drawColumns;
+  cache.firstIndices = rawDisplayCache.firstIndices;
+  cache.lastIndices = rawDisplayCache.lastIndices;
+  cache.maxIndices = rawDisplayCache.maxIndices;
+  cache.minIndices = rawDisplayCache.minIndices;
+  cache.sampleCount = samples.length;
+  cache.sampleStartFrame = sampleStartFrame;
+  cache.sessionRevision = state.session.sessionRevision;
+  cache.visibleSampleCount = visibleSampleCount;
+
+  return rawDisplayCache;
 }
 
 function ensureWaveformSliceCapacity(module: WaveCoreModule, floatCount: number): Float32Array {
@@ -2895,6 +3289,28 @@ function ensureWaveformSliceCapacity(module: WaveCoreModule, floatCount: number)
   return state.session.waveformSlice;
 }
 
+function ensureAnalysisSampleCapacity(module: WaveCoreModule, floatCount: number): Float32Array {
+  if (state.session.analysisSampleCapacity >= floatCount && state.session.analysisSamplePointer) {
+    const view = getHeapF32View(module, state.session.analysisSamplePointer, floatCount);
+    state.session.analysisSample = view;
+    return view;
+  }
+
+  if (state.session.analysisSamplePointer) {
+    module._free(state.session.analysisSamplePointer);
+  }
+
+  const pointer = module._malloc(floatCount * Float32Array.BYTES_PER_ELEMENT);
+  if (!pointer) {
+    throw new Error('Failed to allocate analysis sample buffer.');
+  }
+
+  state.session.analysisSamplePointer = pointer;
+  state.session.analysisSampleCapacity = floatCount;
+  state.session.analysisSample = getHeapF32View(module, pointer, floatCount);
+  return state.session.analysisSample;
+}
+
 function framesToSeconds(frame: number): number {
   return state.session.sampleRate > 0
     ? clamp(frame, 0, state.session.durationFrames) / state.session.sampleRate
@@ -2906,6 +3322,9 @@ function clampFrame(value: number): number {
 }
 
 function disposeWasmSession(module: WaveCoreModule): void {
+  if (state.session.analysisSamplePointer) {
+    module._free(state.session.analysisSamplePointer);
+  }
   if (state.session.waveformSlicePointer) {
     module._free(state.session.waveformSlicePointer);
   }
@@ -2915,6 +3334,9 @@ function disposeWasmSession(module: WaveCoreModule): void {
   if (state.session.initialized) {
     module._wave_dispose_session();
   }
+  state.session.analysisSamplePointer = 0;
+  state.session.analysisSampleCapacity = 0;
+  state.session.analysisSample = null;
   state.session.waveformSlicePointer = 0;
   state.session.waveformSliceCapacity = 0;
   state.session.waveformSlice = null;
@@ -2925,6 +3347,7 @@ function disposeWasmSession(module: WaveCoreModule): void {
   state.session.waveformBuilt = false;
   state.session.initialized = false;
   invalidateWaveformCache();
+  invalidateWaveformRawDisplayCache();
   invalidateWaveformRepresentativeCache();
 }
 

@@ -600,6 +600,11 @@ body {
 
 .waveform-viewport {
   position: relative;
+  --waveform-chart-height: calc(100% - var(--waveform-top-padding-px) - var(--waveform-bottom-padding-px));
+  --waveform-zero-y: calc(var(--waveform-top-padding-px) + (var(--waveform-chart-height) * 0.5));
+  --waveform-amplitude-span: calc(var(--waveform-chart-height) * var(--waveform-amplitude-height-ratio));
+  --waveform-clipping-positive-y: calc(var(--waveform-zero-y) - var(--waveform-amplitude-span));
+  --waveform-clipping-negative-y: calc(var(--waveform-zero-y) + var(--waveform-amplitude-span));
   margin: 0;
   padding: 0;
   min-height: 0;
@@ -619,6 +624,44 @@ body {
   pointer-events: none;
   transform: translate3d(0, 0, 0);
   transform-origin: left center;
+}
+
+.waveform-level-labels {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.waveform-viewport[data-waveform-geometry-ready="true"] .waveform-level-labels {
+  opacity: 1;
+}
+
+.waveform-level-label {
+  position: absolute;
+  left: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--spectrogram-label);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.92),
+    0 0 10px rgba(0, 0, 0, 0.5);
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+
+.waveform-level-label-positive {
+  top: var(--waveform-clipping-positive-y);
+}
+
+.waveform-level-label-negative {
+  top: var(--waveform-clipping-negative-y);
 }
 
 .waveform-canvas {

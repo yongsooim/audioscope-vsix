@@ -57,10 +57,6 @@
 - Spectrogram visualization
 - Audio analysis uses WebGPU when available, with WASM fallback for unsupported environments
 - Spectrogram, mel-spectrogram, MFCC, scalogram, and chroma analysis are computed from a mono downmix of the source audio
-- Mel-spectrogram analysis
-- MFCC analysis
-- Scalogram analysis
-- Chroma analysis
 - FFT size controls
 - Overlap ratio controls
 - Window function selection
@@ -70,7 +66,6 @@
 - Mel band count controls
 - MFCC coefficient controls
 - Scalogram omega0 control
-- Advanced scalogram frequency range and row density defaults via `audioscope.spectrogramDefaults`
 
 ### Metadata and loudness
 

@@ -98,12 +98,15 @@ function parseLoudnessNumber(value) {
   return Number.isFinite(numericValue) ? numericValue : null;
 }
 
+const LOUDNESS_FRACTION_DIGITS = 2;
+const LOUDNESS_ZERO_EPSILON = 0.5 / (10 ** LOUDNESS_FRACTION_DIGITS);
+
 function normalizeLoudnessDisplayValue(value) {
   if (!Number.isFinite(value)) {
     return value;
   }
 
-  return Math.abs(value) < 0.05 ? 0 : value;
+  return Math.abs(value) < LOUDNESS_ZERO_EPSILON ? 0 : value;
 }
 
 function formatLoudnessValue(status, value, unit) {
@@ -123,7 +126,7 @@ function formatLoudnessValue(status, value, unit) {
     return '--';
   }
 
-  return `${normalizeLoudnessDisplayValue(value).toFixed(1)} ${unit}`;
+  return `${normalizeLoudnessDisplayValue(value).toFixed(LOUDNESS_FRACTION_DIGITS)} ${unit}`;
 }
 
 function formatLoudnessSourceLabel(loudness) {
