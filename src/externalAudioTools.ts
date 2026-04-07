@@ -61,6 +61,7 @@ export interface MediaMetadataSummaryPayload {
   codecText: string | null;
   containerText: string | null;
   durationText: string | null;
+  profileText: string | null;
   sampleRateText: string | null;
   segments: string[];
   sizeText: string | null;
@@ -77,6 +78,7 @@ export interface MediaMetadataStreamPayload {
   dispositionDefault: boolean;
   durationText: string | null;
   index: number | null;
+  profileText: string | null;
   sampleFormat: string | null;
   sampleRateText: string | null;
 }
@@ -174,6 +176,7 @@ interface FfprobeStreamSection {
   disposition?: FfprobeDispositionSection;
   duration?: string;
   index?: number;
+  profile?: string;
   sample_fmt?: string;
   sample_rate?: string;
   tags?: Record<string, string>;
@@ -389,7 +392,9 @@ function formatBitDepthText(
     return `${Math.round(preferredBits)}-bit`;
   }
 
-  return inferBitDepthFromSampleFormat(sampleFormat);
+  // sample_fmt는 ffmpeg의 내부 디코딩 포맷이므로 원본 파일의 bit depth가 아님.
+  // 원본에 명시된 bits_per_raw_sample / bits_per_sample이 없으면 표시하지 않음.
+  return null;
 }
 
 function formatSizeText(value: number | null): string | null {
@@ -494,6 +499,7 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
     codecText: formatCodecText(primaryAudioStream),
     containerText: formatContainerText(formatSection),
     durationText: formatDurationText(parseNumberValue(primaryAudioStream?.duration) ?? parseNumberValue(formatSection?.duration)),
+    profileText: primaryAudioStream?.profile?.trim() || null,
     sampleRateText: formatFrequencyText(parseNumberValue(primaryAudioStream?.sample_rate)),
     segments: [],
     sizeText: formatSizeText(parseNumberValue(formatSection?.size)),
@@ -538,6 +544,7 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
       dispositionDefault: stream.disposition?.default === 1,
       durationText: formatDurationText(parseNumberValue(stream.duration)),
       index: typeof stream.index === 'number' ? stream.index : null,
+      profileText: stream.profile?.trim() || null,
       sampleFormat: stream.sample_fmt ?? null,
       sampleRateText: formatFrequencyText(parseNumberValue(stream.sample_rate)),
     })),
