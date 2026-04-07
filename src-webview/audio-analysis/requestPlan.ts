@@ -29,7 +29,6 @@ import {
   SCALOGRAM_ROW_DENSITY_OPTIONS,
   SCALOGRAM_OMEGA_OPTIONS,
   SPECTROGRAM_DB_WINDOW_LIMITS,
-  VISIBLE_ROW_OVERSAMPLE,
 } from './constants';
 
 export type QualityPreset = 'balanced' | 'high' | 'max';
@@ -201,6 +200,24 @@ export function isChromaAnalysisType(analysisType: AnalysisType): boolean {
   return analysisType === 'chroma';
 }
 
+function getSpectrogramRowCount(fftSize: number): number {
+  const safeFftSize = Math.max(1024, fftSize);
+  return clamp(
+    quantizeCeil(Math.round(safeFftSize / 4), ROW_BUCKET_SIZE),
+    256,
+    1024,
+  );
+}
+
+function getScalogramRowCount(rowDensity: number): number {
+  const safeDensity = clamp(rowDensity, 0.5, 4);
+  return clamp(
+    quantizeCeil(Math.round(512 * safeDensity), SCALOGRAM_ROW_BLOCK_SIZE),
+    256,
+    1024,
+  );
+}
+
 export function createRequestPlan(
   context: RequestPlanContext,
   request: SpectrogramRequest | null,
@@ -247,19 +264,15 @@ export function createRequestPlan(
   const melBandCount = analysisType === 'mfcc'
     ? normalizeMfccMelBandCount(request?.mfccMelBandCount ?? request?.melBandCount)
     : normalizeMelBandCount(request?.melBandCount);
-  const rowBucketSize = analysisType === 'scalogram' ? SCALOGRAM_ROW_BLOCK_SIZE : ROW_BUCKET_SIZE;
-  const rowOversample = requestKind === 'visible' && analysisType !== 'scalogram'
-    ? VISIBLE_ROW_OVERSAMPLE
-    : analysisType === 'scalogram'
-      ? scalogramRowDensity
-      : 1;
   const rowCount = chromaAnalysis
     ? CHROMA_BIN_COUNT
     : analysisType === 'mel'
     ? melBandCount
     : analysisType === 'mfcc'
       ? mfccCoefficientCount
-      : quantizeCeil(Math.ceil(pixelHeight * preset.rowsMultiplier * rowOversample), rowBucketSize);
+      : analysisType === 'scalogram'
+        ? getScalogramRowCount(scalogramRowDensity)
+        : getSpectrogramRowCount(fftSize);
   const targetColumns = Math.max(
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),

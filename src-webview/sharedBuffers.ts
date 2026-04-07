@@ -1,4 +1,4 @@
-export const DISPLAY_MIN_DPR = 2;
+export const DISPLAY_MIN_DPR = 1;
 export const TILE_COLUMN_COUNT = 256;
 
 export function quantizeCeil(value, bucketSize) {
