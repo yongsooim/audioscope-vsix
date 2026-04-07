@@ -66,6 +66,9 @@
     "Other"
   ],
   "main": "./out/extension.js",
+  "activationEvents": [
+    "onCustomEditor:audioscope.audioEditor"
+  ],
   "contributes": {
     "languages": [
       {
