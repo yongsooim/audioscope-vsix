@@ -3,22 +3,41 @@ export function clamp(value: number, min: number, max: number): number {
 }
 
 const TIME_FRACTION_DIGITS = 2;
-const TIME_FRACTION_SCALE = 10 ** TIME_FRACTION_DIGITS;
-const ZERO_TIME_TEXT = `0:00.${'0'.repeat(TIME_FRACTION_DIGITS)}`;
+const ZERO_TIME_TEXT = '0:00';
 
-function formatClockTime(value: number): string {
+function formatWholeSecondClockTime(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return ZERO_TIME_TEXT;
   }
 
-  const totalFractions = Math.max(0, Math.round(value * TIME_FRACTION_SCALE));
-  const totalSeconds = Math.floor(totalFractions / TIME_FRACTION_SCALE);
+  const totalSeconds = Math.max(0, Math.floor(value));
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = hours > 0
     ? Math.floor((totalSeconds % 3600) / 60)
     : Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  const fractions = totalFractions % TIME_FRACTION_SCALE;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatFractionalClockTime(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return `${ZERO_TIME_TEXT}.${'0'.repeat(TIME_FRACTION_DIGITS)}`;
+  }
+
+  const timeFractionScale = 10 ** TIME_FRACTION_DIGITS;
+  const totalFractions = Math.max(0, Math.round(value * timeFractionScale));
+  const totalSeconds = Math.floor(totalFractions / timeFractionScale);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = hours > 0
+    ? Math.floor((totalSeconds % 3600) / 60)
+    : Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  const fractions = totalFractions % timeFractionScale;
   const fractionText = String(fractions).padStart(TIME_FRACTION_DIGITS, '0');
 
   if (hours > 0) {
@@ -29,7 +48,7 @@ function formatClockTime(value: number): string {
 }
 
 export function formatTime(value: number): string {
-  return formatClockTime(value);
+  return formatWholeSecondClockTime(value);
 }
 
 export function getNiceTimeStep(rawStepSec: number): number {
@@ -46,5 +65,5 @@ export function getNiceTimeStep(rawStepSec: number): number {
 }
 
 export function formatAxisLabel(seconds: number): string {
-  return formatClockTime(seconds);
+  return formatFractionalClockTime(seconds);
 }
