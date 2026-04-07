@@ -11,23 +11,11 @@ const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
 const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
 const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
 const RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL = 4;
-const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 24;
-const SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 32;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
 const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
-const SAMPLE_TO_RAW_BLEND_END_SAMPLES_PER_PIXEL = 1.65;
-const SAMPLE_TO_RAW_BLEND_START_SAMPLES_PER_PIXEL = 0.8;
 const SYMMETRIC_ENVELOPE_GAIN = 1;
 const WAVEFORM_RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 8;
 const WAVEFORM_RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 12;
-
-export interface RepresentativeSampleCache {
-  bucketCount: number;
-  bucketSize: number;
-  bucketStartIndex: number;
-  sampleIndices: Int32Array;
-  sampleValues: Float32Array;
-}
 
 export interface RawDisplayCache {
   bucketCount: number;
@@ -43,19 +31,6 @@ interface SampleXTransform {
   maxX: number;
   xOffset: number;
   xScale: number;
-}
-
-interface RepresentativeDrawPointBuffer {
-  count: number;
-  sampleValues: Float32Array;
-  xPositions: Float32Array;
-}
-
-export interface RepresentativeSampleCacheMeta {
-  bucketCount: number;
-  bucketEndIndex: number;
-  bucketSize: number;
-  bucketStartIndex: number;
 }
 
 export interface RawDisplayCacheMeta {
@@ -111,216 +86,6 @@ export function drawWaveformEnvelope(
     const bottom = clamp(Math.round(midY - minValue * amplitudeHeight), chartTop, chartBottom);
     context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));
   }
-}
-
-export function getRepresentativeSampleCacheCapacity(
-  sampleStartFrame: number,
-  visibleSampleCount: number,
-  drawColumns: number,
-): number {
-  const { bucketCount } = getRepresentativeSampleCacheMeta(sampleStartFrame, visibleSampleCount, drawColumns);
-  return Math.max(1, bucketCount);
-}
-
-export function fillRepresentativeSampleCache(
-  samples: Float32Array,
-  sampleStartFrame: number,
-  visibleSampleCount: number,
-  drawColumns: number,
-  sampleIndices: Int32Array,
-  sampleValues: Float32Array,
-): RepresentativeSampleCache {
-  const meta = getRepresentativeSampleCacheMeta(sampleStartFrame, visibleSampleCount, drawColumns);
-
-  if (sampleIndices.length < meta.bucketCount || sampleValues.length < meta.bucketCount) {
-    throw new Error('Representative sample cache capacity is insufficient.');
-  }
-
-  const bucketCount = fillRepresentativeSampleBuckets(
-    samples,
-    meta.bucketStartIndex,
-    meta.bucketEndIndex,
-    meta.bucketSize,
-    sampleIndices,
-    sampleValues,
-    0,
-  );
-
-  return {
-    bucketCount,
-    bucketSize: meta.bucketSize,
-    bucketStartIndex: meta.bucketStartIndex,
-    sampleIndices,
-    sampleValues,
-  };
-}
-
-export function fillRepresentativeSampleCacheWithReuse(
-  samples: Float32Array,
-  sampleStartFrame: number,
-  visibleSampleCount: number,
-  drawColumns: number,
-  sampleIndices: Int32Array,
-  sampleValues: Float32Array,
-  previousCache: RepresentativeSampleCache | null = null,
-): RepresentativeSampleCache {
-  const meta = getRepresentativeSampleCacheMeta(sampleStartFrame, visibleSampleCount, drawColumns);
-
-  if (sampleIndices.length < meta.bucketCount || sampleValues.length < meta.bucketCount) {
-    throw new Error('Representative sample cache capacity is insufficient.');
-  }
-
-  if (!previousCache || previousCache.bucketSize !== meta.bucketSize || previousCache.bucketCount <= 0) {
-    return fillRepresentativeSampleCache(
-      samples,
-      sampleStartFrame,
-      visibleSampleCount,
-      drawColumns,
-      sampleIndices,
-      sampleValues,
-    );
-  }
-
-  const previousEndIndex = previousCache.bucketStartIndex + previousCache.bucketCount;
-  const overlapStartIndex = Math.max(meta.bucketStartIndex, previousCache.bucketStartIndex);
-  const overlapEndIndex = Math.min(meta.bucketEndIndex, previousEndIndex);
-
-  if (overlapEndIndex <= overlapStartIndex) {
-    return fillRepresentativeSampleCache(
-      samples,
-      sampleStartFrame,
-      visibleSampleCount,
-      drawColumns,
-      sampleIndices,
-      sampleValues,
-    );
-  }
-
-  const overlapCount = overlapEndIndex - overlapStartIndex;
-  const sourceOffset = overlapStartIndex - previousCache.bucketStartIndex;
-  const targetOffset = overlapStartIndex - meta.bucketStartIndex;
-  copyRepresentativeCacheWindow(
-    previousCache,
-    sampleIndices,
-    sampleValues,
-    sourceOffset,
-    targetOffset,
-    overlapCount,
-  );
-
-  fillRepresentativeSampleBuckets(
-    samples,
-    meta.bucketStartIndex,
-    overlapStartIndex,
-    meta.bucketSize,
-    sampleIndices,
-    sampleValues,
-    0,
-  );
-  fillRepresentativeSampleBuckets(
-    samples,
-    overlapEndIndex,
-    meta.bucketEndIndex,
-    meta.bucketSize,
-    sampleIndices,
-    sampleValues,
-    targetOffset + overlapCount,
-  );
-
-  return {
-    bucketCount: meta.bucketCount,
-    bucketSize: meta.bucketSize,
-    bucketStartIndex: meta.bucketStartIndex,
-    sampleIndices,
-    sampleValues,
-  };
-}
-
-export function drawRepresentativeSamplePlot(
-  context: OffscreenCanvasRenderingContext2D,
-  canvas: OffscreenCanvas,
-  samples: Float32Array,
-  color: string,
-  pixelsPerSample: number,
-  sampleStartFrame: number,
-  visibleSampleCount: number,
-  visibleSampleSpan: number,
-  heightCssPx: number,
-  renderScale: number,
-  representativeCache: RepresentativeSampleCache | null = null,
-  options: WaveformSamplePlotRenderOptions = {},
-): void {
-  const drawColumns = Math.max(1, canvas.width);
-  const deviceWidth = Math.max(1, canvas.width);
-  const deviceHeight = Math.max(1, canvas.height);
-  const chartTop = Math.round(WAVEFORM_TOP_PADDING_PX * renderScale);
-  const chartBottom = Math.max(chartTop + 1, Math.round((heightCssPx - WAVEFORM_BOTTOM_PADDING_PX) * renderScale));
-  const chartHeight = Math.max(1, chartBottom - chartTop);
-  const midY = chartTop + chartHeight * 0.5;
-  const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
-  const sampleXTransform = getSampleXTransform(sampleStartFrame, visibleSampleSpan, drawColumns);
-  const resolvedRepresentativeCache = representativeCache ?? createRepresentativeSampleCache(
-    samples,
-    sampleStartFrame,
-    visibleSampleCount,
-    drawColumns,
-  );
-  const startValue = getInterpolatedSample(samples, sampleStartFrame);
-  const endValue = getInterpolatedSample(samples, sampleStartFrame + visibleSampleSpan);
-  const alpha = clamp01(options.alpha ?? 1);
-
-  context.imageSmoothingEnabled = true;
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  if (!options.preserveExistingSurface) {
-    context.clearRect(0, 0, deviceWidth, deviceHeight);
-    drawWaveformReferenceGuides(context, deviceWidth, midY, amplitudeHeight, chartTop, chartBottom, renderScale);
-  }
-  if (alpha <= 0) {
-    return;
-  }
-  context.save();
-  context.globalAlpha = alpha;
-  context.strokeStyle = color;
-  context.fillStyle = color;
-  context.lineWidth = Math.max(1, renderScale * SAMPLE_PLOT_LINE_WIDTH_SCALE);
-  context.lineJoin = 'round';
-  context.lineCap = 'round';
-  const drawPoints = collectRepresentativeDrawPoints(
-    resolvedRepresentativeCache,
-    sampleXTransform,
-    startValue,
-    endValue,
-  );
-  context.beginPath();
-  for (let pointIndex = 0; pointIndex < drawPoints.count; pointIndex += 1) {
-    const x = drawPoints.xPositions[pointIndex] ?? 0;
-    const sampleValue = drawPoints.sampleValues[pointIndex] ?? 0;
-    const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
-    if (pointIndex === 0) {
-      context.moveTo(x, y);
-    } else {
-      context.lineTo(x, y);
-    }
-  }
-  context.stroke();
-
-  if (pixelsPerSample >= SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE) {
-    const pointSize = Math.max(1.5, renderScale * 1.1);
-    context.beginPath();
-    for (let pointIndex = 0; pointIndex < drawPoints.count; pointIndex += 1) {
-      const x = drawPoints.xPositions[pointIndex] ?? 0;
-      const sampleValue = drawPoints.sampleValues[pointIndex] ?? 0;
-      const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
-      context.rect(
-        Math.round(x - pointSize * 0.5),
-        Math.round(y - pointSize * 0.5),
-        Math.max(1, Math.round(pointSize)),
-        Math.max(1, Math.round(pointSize)),
-      );
-    }
-    context.fill();
-  }
-  context.restore();
 }
 
 export function drawRawSamplePlot(
@@ -459,53 +224,6 @@ export function resolveWaveformPlotMode(
   }
 
   return samplesPerPixel <= WAVEFORM_RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL ? 'raw' : 'envelope';
-}
-
-export function pickRepresentativeSamplePoint(
-  samples: Float32Array,
-  startPosition: number,
-  endPosition: number,
-): { sampleIndex: number; sampleValue: number } | null {
-  if (samples.length === 0) {
-    return null;
-  }
-
-  const maxSampleIndex = samples.length - 1;
-  const safeStart = clamp(Math.floor(startPosition), 0, maxSampleIndex);
-  const safeEndExclusive = clamp(Math.max(safeStart + 1, Math.ceil(endPosition)), safeStart + 1, samples.length);
-  const targetCenter = clamp((startPosition + Math.max(startPosition, endPosition - 1)) * 0.5, 0, maxSampleIndex);
-  let minValue = 1;
-  let maxValue = -1;
-
-  for (let sampleIndex = safeStart; sampleIndex < safeEndExclusive; sampleIndex += 1) {
-    const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
-    minValue = Math.min(minValue, value);
-    maxValue = Math.max(maxValue, value);
-  }
-
-  const targetValue = Math.abs(maxValue - minValue) <= 1e-6
-    ? clamp(samples[Math.round(targetCenter)] ?? 0, -1, 1)
-    : clamp((minValue + maxValue) * 0.5, -1, 1);
-
-  let bestIndex = safeStart;
-  let bestValue = clamp(samples[safeStart] ?? 0, -1, 1);
-  let bestScore = Number.POSITIVE_INFINITY;
-  const rangeSpan = Math.max(1, safeEndExclusive - safeStart);
-
-  for (let sampleIndex = safeStart; sampleIndex < safeEndExclusive; sampleIndex += 1) {
-    const value = clamp(samples[sampleIndex] ?? 0, -1, 1);
-    const score = Math.abs(value - targetValue) + (Math.abs(sampleIndex - targetCenter) / rangeSpan);
-    if (score < bestScore) {
-      bestScore = score;
-      bestIndex = sampleIndex;
-      bestValue = value;
-    }
-  }
-
-  return {
-    sampleIndex: bestIndex,
-    sampleValue: bestValue,
-  };
 }
 
 export function getWaveformMarkerYRatio(heightCssPx: number, sampleValue: number): number {
@@ -875,23 +593,6 @@ function drawWaveformReferenceGuides(
   context.fillRect(0, Math.round(midY), deviceWidth, guideThickness);
 }
 
-export function getRepresentativeSampleCacheMeta(
-  sampleStartFrame: number,
-  visibleSampleCount: number,
-  drawColumns: number,
-): RepresentativeSampleCacheMeta {
-  const bucketSize = quantizeRepresentativeBucketSize(visibleSampleCount, drawColumns);
-  const bucketStartIndex = Math.floor(sampleStartFrame / bucketSize);
-  const bucketEndIndex = Math.ceil((sampleStartFrame + visibleSampleCount) / bucketSize);
-
-  return {
-    bucketCount: Math.max(0, bucketEndIndex - bucketStartIndex),
-    bucketEndIndex,
-    bucketSize,
-    bucketStartIndex,
-  };
-}
-
 export function getRawDisplayCacheCapacity(
   sampleStartFrame: number,
   visibleSampleCount: number,
@@ -1062,33 +763,6 @@ export function fillRawDisplayCacheWithReuse(
   };
 }
 
-function quantizeRepresentativeBucketSize(visibleSampleCount: number, drawColumns: number): number {
-  const idealBucketSize = Math.max(1, visibleSampleCount / Math.max(1, drawColumns));
-  if (idealBucketSize <= 1) {
-    return 1;
-  }
-
-  // Snap to stable bucket sizes so representative samples do not jump on every zoom delta.
-  return Math.max(1, 2 ** Math.ceil(Math.log2(idealBucketSize)));
-}
-
-function createRepresentativeSampleCache(
-  samples: Float32Array,
-  sampleStartFrame: number,
-  visibleSampleCount: number,
-  drawColumns: number,
-): RepresentativeSampleCache {
-  const capacity = getRepresentativeSampleCacheCapacity(sampleStartFrame, visibleSampleCount, drawColumns);
-  return fillRepresentativeSampleCache(
-    samples,
-    sampleStartFrame,
-    visibleSampleCount,
-    drawColumns,
-    new Int32Array(capacity),
-    new Float32Array(capacity),
-  );
-}
-
 function getSampleXTransform(sampleStartFrame: number, visibleSampleSpan: number, drawColumns: number): SampleXTransform {
   const maxX = Math.max(0, drawColumns - 1);
   if (maxX <= 0 || visibleSampleSpan <= 0) {
@@ -1111,120 +785,6 @@ function getSampleX(samplePosition: number, sampleXTransform: SampleXTransform):
   return clamp(samplePosition * sampleXTransform.xScale + sampleXTransform.xOffset, 0, sampleXTransform.maxX);
 }
 
-function fillRepresentativeSampleBuckets(
-  samples: Float32Array,
-  bucketStartIndex: number,
-  bucketEndIndex: number,
-  bucketSize: number,
-  sampleIndices: Int32Array,
-  sampleValues: Float32Array,
-  writeOffset: number,
-): number {
-  let writeIndex = writeOffset;
-
-  for (let bucketIndex = bucketStartIndex; bucketIndex < bucketEndIndex; bucketIndex += 1) {
-    const samplePoint = pickRepresentativeSamplePoint(
-      samples,
-      bucketIndex * bucketSize,
-      bucketIndex * bucketSize + bucketSize,
-    );
-    if (!samplePoint) {
-      continue;
-    }
-
-    sampleIndices[writeIndex] = samplePoint.sampleIndex;
-    sampleValues[writeIndex] = samplePoint.sampleValue;
-    writeIndex += 1;
-  }
-
-  return writeIndex - writeOffset;
-}
-
-function copyRepresentativeCacheWindow(
-  representativeCache: RepresentativeSampleCache,
-  sampleIndices: Int32Array,
-  sampleValues: Float32Array,
-  sourceOffset: number,
-  targetOffset: number,
-  count: number,
-): void {
-  if (count <= 0) {
-    return;
-  }
-
-  const sourceEnd = sourceOffset + count;
-  if (representativeCache.sampleIndices === sampleIndices) {
-    sampleIndices.copyWithin(targetOffset, sourceOffset, sourceEnd);
-  } else {
-    sampleIndices.set(representativeCache.sampleIndices.subarray(sourceOffset, sourceEnd), targetOffset);
-  }
-
-  if (representativeCache.sampleValues === sampleValues) {
-    sampleValues.copyWithin(targetOffset, sourceOffset, sourceEnd);
-  } else {
-    sampleValues.set(representativeCache.sampleValues.subarray(sourceOffset, sourceEnd), targetOffset);
-  }
-}
-
-function collectRepresentativeDrawPoints(
-  representativeCache: RepresentativeSampleCache,
-  sampleXTransform: SampleXTransform,
-  startValue: number,
-  endValue: number,
-): RepresentativeDrawPointBuffer {
-  const xPositions = new Float32Array(representativeCache.bucketCount + 2);
-  const sampleValues = new Float32Array(representativeCache.bucketCount + 2);
-  let hasPendingPoint = false;
-  let pendingX = 0;
-  let pendingValue = 0;
-  let pointCount = 0;
-
-  const flushPendingPoint = (): void => {
-    if (!hasPendingPoint) {
-      return;
-    }
-
-    xPositions[pointCount] = pendingX;
-    sampleValues[pointCount] = pendingValue;
-    pointCount += 1;
-    hasPendingPoint = false;
-  };
-
-  const pushPoint = (x: number, sampleValue: number): void => {
-    const normalizedValue = clamp(sampleValue ?? 0, -1, 1);
-
-    if (hasPendingPoint && Math.abs(pendingX - x) <= 0.01) {
-      if (Math.abs(normalizedValue) >= Math.abs(pendingValue)) {
-        pendingValue = normalizedValue;
-      }
-      return;
-    }
-
-    flushPendingPoint();
-    pendingX = x;
-    pendingValue = normalizedValue;
-    hasPendingPoint = true;
-  };
-
-  pushPoint(0, startValue);
-
-  for (let pointOffset = 0; pointOffset < representativeCache.bucketCount; pointOffset += 1) {
-    pushPoint(
-      getSampleX(representativeCache.sampleIndices[pointOffset] ?? 0, sampleXTransform),
-      representativeCache.sampleValues[pointOffset] ?? 0,
-    );
-  }
-
-  pushPoint(sampleXTransform.maxX, endValue);
-  flushPendingPoint();
-
-  return {
-    count: pointCount,
-    sampleValues,
-    xPositions,
-  };
-}
-
 function getInterpolatedSample(samples: Float32Array, position: number): number {
   const index = Math.floor(position);
   const nextIndex = Math.min(samples.length - 1, index + 1);
@@ -1240,9 +800,4 @@ function clamp(value: number, min: number, max: number): number {
 
 function clamp01(value: number): number {
   return clamp(Number.isFinite(value) ? value : 0, 0, 1);
-}
-
-function smoothStep(edge0: number, edge1: number, value: number): number {
-  const t = clamp((value - edge0) / Math.max(1e-6, edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
 }

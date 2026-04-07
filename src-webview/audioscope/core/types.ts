@@ -34,7 +34,6 @@ export interface WaveformDisplaySnapshot {
   renderHeight: number;
   renderRange: TimeRange;
   renderWidth: number;
-  samplePlotMode: boolean;
   visibleSpan: number;
 }
 
@@ -55,7 +54,6 @@ export interface WaveformRenderRequest {
   generation: number;
   height: number;
   rawSamplePlotMode?: boolean;
-  samplePlotMode?: boolean;
   start: number;
   visibleSpan: number;
   width: number;
