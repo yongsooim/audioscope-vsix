@@ -113,8 +113,7 @@ The full build compiles:
 
 ## Third-Party And Vendor Code
 
-This repository includes a small amount of vendored and third-party source used
-to build the shipped extension and WASM tools.
+This repository includes vendored and third-party source.
 
 - `src-wasm/third_party/ffmpeg`
   The FFmpeg source tree vendored as a submodule and used to build the
