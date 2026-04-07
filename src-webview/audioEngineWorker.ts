@@ -103,6 +103,7 @@ const WAVEFORM_MAX_ZOOM_PIXELS_PER_SAMPLE = 8;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2;
 const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
+const HOVER_SAMPLE_VALUE_MAX_SAMPLES_PER_PIXEL = 32;
 const WAVEFORM_PYRAMID_BUILD_STEP_BLOCKS = 65_536;
 const WAVEFORM_PYRAMID_BUILD_TIME_BUDGET_MS = 8;
 const MAX_TILE_CACHE_ENTRIES = 24;
@@ -1275,7 +1276,7 @@ function applyZoomAroundFrame(anchorFrame: number, requestedSpanFrames: number, 
     Math.max(getMinVisibleFrames(), state.session.durationFrames),
   );
   const nextStartFrame = clamp(
-    Math.round(anchorFrame - nextSpanFrames * clamp01(anchorRatio)),
+    anchorFrame - nextSpanFrames * clamp01(anchorRatio),
     0,
     Math.max(0, state.session.durationFrames - nextSpanFrames),
   );
@@ -1437,8 +1438,8 @@ function normalizeViewportRange(startFrame: number, endFrame: number): RangeFram
   }
 
   const minVisibleFrames = getMinVisibleFrames();
-  const safeStart = Number.isFinite(startFrame) ? Math.round(startFrame) : 0;
-  const safeEnd = Number.isFinite(endFrame) ? Math.round(endFrame) : safeStart + minVisibleFrames;
+  const safeStart = Number.isFinite(startFrame) ? startFrame : 0;
+  const safeEnd = Number.isFinite(endFrame) ? endFrame : safeStart + minVisibleFrames;
   const spanFrames = clamp(
     Math.max(minVisibleFrames, safeEnd - safeStart),
     minVisibleFrames,
@@ -1468,7 +1469,7 @@ function getFrameAtPresentedRatio(pointerRatioX: number): number {
   const ratio = clamp01(pointerRatioX);
   const spanFrames = Math.max(1, presentedRange.endFrame - presentedRange.startFrame);
   return clamp(
-    Math.round(presentedRange.startFrame + ratio * spanFrames),
+    presentedRange.startFrame + ratio * spanFrames,
     0,
     state.session.durationFrames,
   );
@@ -2492,7 +2493,9 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
   );
   const timeLabel = formatAxisLabel(frameAtPointer / sampleRate);
 
-  if (!(sampleData instanceof Float32Array) || state.viewport.plotMode === 'envelope') {
+  const samplesPerPixel = spanFrames / Math.max(1, state.viewport.renderWidthPx);
+
+  if (!(sampleData instanceof Float32Array) || samplesPerPixel > HOVER_SAMPLE_VALUE_MAX_SAMPLES_PER_PIXEL) {
     return {
       label: timeLabel,
       markerVisible: false,
