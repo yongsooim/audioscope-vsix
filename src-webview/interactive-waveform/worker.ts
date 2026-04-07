@@ -1,11 +1,7 @@
 import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from '../waveCoreRuntime';
 import {
   drawRawSamplePlot as drawSharedRawSamplePlot,
-  drawRepresentativeSamplePlot as drawSharedRepresentativeSamplePlot,
   drawWaveformEnvelope as drawSharedWaveformEnvelope,
-  fillRepresentativeSampleCache,
-  getRepresentativeSampleCacheCapacity,
-  type RepresentativeSampleCache,
 } from '../audio-engine-worker/waveformRender';
 import { resizeInteractiveWaveformSurface } from './renderer';
 import {
@@ -14,7 +10,7 @@ import {
   WAVEFORM_TOP_PADDING_PX as TOP_PADDING,
 } from './geometry';
 
-type WaveformPlotMode = 'envelope' | 'raw' | 'sample';
+type WaveformPlotMode = 'envelope' | 'raw';
 
 interface CanvasInitOptions {
   color?: string;
@@ -117,12 +113,11 @@ type WorkerMessage =
 
 const CENTER_LINE_ALPHA = 0.14;
 const SYMMETRIC_ENVELOPE_GAIN = 1;
-const SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 20;
-const SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 28;
-const RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 0.9;
-const RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 1.15;
+const RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL = 60;
+const RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL = 64;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
 const SAMPLE_PLOT_POINT_MIN_PIXELS_PER_SAMPLE = 1;
+const SAMPLE_PLOT_ENVELOPE_ALPHA = 0.34;
 const RAW_SAMPLE_MARKER_MIN_CSS_PIXELS_PER_SAMPLE = 7.5;
 const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 1.5;
 const RAW_SAMPLE_MARKER_FILL = 'rgba(248, 250, 252, 0.94)';
@@ -510,7 +505,6 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
   const module = runtime.module;
   const sampleData = getWaveformSampleData(module);
   const plotMode = resolveWaveformPlotMode(samplesPerPixel, sampleData instanceof Float32Array);
-  const samplePlotMode = plotMode !== 'envelope';
   const rawSamplePlotMode = plotMode === 'raw';
   const sampleStartPosition = viewStart * analysisState.sampleRate;
   const visibleSampleSpan = Math.max(0, visibleSampleCount - 1);
@@ -524,7 +518,7 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
   resizeDisplaySurface();
 
   let peaks: Float32Array | null = null;
-  if (!rawSamplePlotMode && !samplePlotMode) {
+  if (!rawSamplePlotMode) {
     peaks = ensureWaveformSliceCapacity(module, columnCount * 2);
 
     if (!module._wave_extract_waveform_peaks(
@@ -553,7 +547,7 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     return;
   }
 
-  if (!analysisState.waveformBuilt && !rawSamplePlotMode && !samplePlotMode) {
+  if (!analysisState.waveformBuilt && !rawSamplePlotMode) {
     renderSurface.context.setTransform(1, 0, 0, 1, 0, 0);
     renderSurface.context.clearRect(0, 0, renderSurface.canvas.width, renderSurface.canvas.height);
     return;
@@ -579,44 +573,7 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
       generation,
       height,
       rawSamplePlotMode,
-      samplePlotMode,
-      viewEnd,
-      viewStart,
-      visibleSpan,
-      width,
-    });
-    return;
-  }
-
-  if (samplePlotMode && sampleData instanceof Float32Array) {
-    const representativeCache = getRepresentativeSampleCache(
-      sampleData,
-      sampleStartPosition,
-      visibleSampleCount,
-      columnCount,
-    );
-    drawSharedRepresentativeSamplePlot(
-      renderSurface.context,
-      renderSurface.canvas,
-      sampleData,
-      color,
-      pixelsPerSample,
-      sampleStartPosition,
-      visibleSampleCount,
-      visibleSampleSpan,
-      height,
-      renderScale,
-      representativeCache,
-    );
-    if (generation !== latestRequestedGeneration) {
-      return;
-    }
-    postWaveformPresented({
-      columnCount,
-      generation,
-      height,
-      rawSamplePlotMode,
-      samplePlotMode,
+      samplePlotMode: false,
       viewEnd,
       viewStart,
       visibleSpan,
@@ -645,7 +602,7 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     generation,
     height,
     rawSamplePlotMode,
-    samplePlotMode,
+    samplePlotMode: false,
     viewEnd,
     viewStart,
     visibleSpan,
@@ -731,6 +688,18 @@ function drawSamplePlot(
     return;
   }
 
+  drawSliceEnvelope(
+    context,
+    slice,
+    drawColumns,
+    color,
+    midY,
+    amplitudeHeight,
+    chartTop,
+    chartBottom,
+    SAMPLE_PLOT_ENVELOPE_ALPHA,
+  );
+
   context.strokeStyle = color;
   context.fillStyle = color;
   context.lineWidth = Math.max(1, surfaceState.renderScale * SAMPLE_PLOT_LINE_WIDTH_SCALE);
@@ -768,32 +737,49 @@ function drawSamplePlot(
   }
 }
 
+function drawSliceEnvelope(
+  context: OffscreenCanvasRenderingContext2D,
+  slice: Float32Array,
+  drawColumns: number,
+  color: string,
+  midY: number,
+  amplitudeHeight: number,
+  chartTop: number,
+  chartBottom: number,
+  alpha: number,
+): void {
+  const envelopeAlpha = clamp(alpha, 0, 1);
+  if (envelopeAlpha <= 0 || drawColumns <= 0) {
+    return;
+  }
+
+  context.save();
+  context.globalAlpha = envelopeAlpha;
+  context.fillStyle = color;
+
+  for (let x = 0; x < drawColumns; x += 1) {
+    const sourceIndex = x * 2;
+    const minValue = clamp(slice[sourceIndex] ?? 0, -1, 1);
+    const maxValue = clamp(slice[sourceIndex + 1] ?? 0, -1, 1);
+    const symmetricPeak = Math.max(Math.abs(minValue), Math.abs(maxValue)) * SYMMETRIC_ENVELOPE_GAIN;
+    const top = clamp(Math.round(midY - symmetricPeak * amplitudeHeight), chartTop, chartBottom);
+    const bottom = clamp(Math.round(midY + symmetricPeak * amplitudeHeight), chartTop, chartBottom);
+    context.fillRect(x, Math.min(top, bottom), 1, Math.max(1, Math.abs(bottom - top)));
+  }
+
+  context.restore();
+}
+
 function resolveWaveformPlotMode(samplesPerPixel: number, hasSampleData: boolean): WaveformPlotMode {
   if (!hasSampleData) {
     return 'envelope';
   }
 
   if (analysisState.plotMode === 'raw') {
-    if (samplesPerPixel <= RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL) {
-      return 'raw';
-    }
-
-    return samplesPerPixel <= SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL ? 'sample' : 'envelope';
+    return samplesPerPixel <= RAW_SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL ? 'raw' : 'envelope';
   }
 
-  if (analysisState.plotMode === 'sample') {
-    if (samplesPerPixel <= RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL) {
-      return 'raw';
-    }
-
-    return samplesPerPixel <= SAMPLE_PLOT_EXIT_SAMPLES_PER_PIXEL ? 'sample' : 'envelope';
-  }
-
-  if (samplesPerPixel <= RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL) {
-    return 'raw';
-  }
-
-  return samplesPerPixel <= SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL ? 'sample' : 'envelope';
+  return samplesPerPixel <= RAW_SAMPLE_PLOT_ENTER_SAMPLES_PER_PIXEL ? 'raw' : 'envelope';
 }
 
 function getRenderableSampleX(
@@ -1168,68 +1154,6 @@ function ensureWaveformSliceCapacity(module: WaveCoreModule, floatCount: number)
   analysisState.waveformSliceCapacity = floatCount;
   analysisState.waveformSlice = getHeapF32View(module, pointer, floatCount);
   return analysisState.waveformSlice;
-}
-
-function ensureRepresentativeSampleCacheCapacity(capacity: number): void {
-  const safeCapacity = Math.max(1, Math.round(capacity || 0));
-
-  if (!analysisState.representativeSampleIndices || analysisState.representativeSampleIndices.length < safeCapacity) {
-    analysisState.representativeSampleIndices = new Int32Array(safeCapacity);
-  }
-
-  if (!analysisState.representativeSampleValues || analysisState.representativeSampleValues.length < safeCapacity) {
-    analysisState.representativeSampleValues = new Float32Array(safeCapacity);
-    analysisState.representativeSampleValuesCapacity = safeCapacity;
-  }
-}
-
-function getRepresentativeSampleCache(
-  samples: Float32Array,
-  sampleStartPosition: number,
-  visibleSampleCount: number,
-  drawColumns: number,
-): RepresentativeSampleCache {
-  if (
-    analysisState.attachedSessionVersion >= 0
-    && analysisState.representativeSampleIndices
-    && analysisState.representativeSampleValues
-    && analysisState.representativeDrawColumns === drawColumns
-    && Math.abs(analysisState.representativeSampleStartPosition - sampleStartPosition) <= 1e-9
-    && analysisState.representativeSampleVisibleCount === visibleSampleCount
-    && analysisState.sampleCount === samples.length
-  ) {
-    return {
-      bucketCount: analysisState.representativeBucketCount,
-      bucketSize: analysisState.representativeBucketSize,
-      bucketStartIndex: analysisState.representativeBucketStartIndex,
-      sampleIndices: analysisState.representativeSampleIndices,
-      sampleValues: analysisState.representativeSampleValues,
-    };
-  }
-
-  ensureRepresentativeSampleCacheCapacity(
-    getRepresentativeSampleCacheCapacity(sampleStartPosition, visibleSampleCount, drawColumns),
-  );
-
-  const representativeCache = fillRepresentativeSampleCache(
-    samples,
-    sampleStartPosition,
-    visibleSampleCount,
-    drawColumns,
-    analysisState.representativeSampleIndices as Int32Array,
-    analysisState.representativeSampleValues as Float32Array,
-  );
-
-  analysisState.representativeBucketCount = representativeCache.bucketCount;
-  analysisState.representativeBucketSize = representativeCache.bucketSize;
-  analysisState.representativeBucketStartIndex = representativeCache.bucketStartIndex;
-  analysisState.representativeDrawColumns = drawColumns;
-  analysisState.representativeSampleIndices = representativeCache.sampleIndices;
-  analysisState.representativeSampleStartPosition = sampleStartPosition;
-  analysisState.representativeSampleValues = representativeCache.sampleValues;
-  analysisState.representativeSampleVisibleCount = visibleSampleCount;
-
-  return representativeCache;
 }
 
 function hasRenderableWaveformData(_waveformData: unknown): boolean {

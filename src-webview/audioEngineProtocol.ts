@@ -1,4 +1,4 @@
-export type WaveformPlotMode = 'envelope' | 'raw' | 'sample';
+export type WaveformPlotMode = 'envelope' | 'raw';
 export type SpectrogramAnalysisType =
   | 'chroma'
   | 'mel'
