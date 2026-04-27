@@ -14,9 +14,43 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function normalizeLoudnessRefLevel(value: unknown): number | null {
+  if (value === null || value === 'off') {
+    return null;
+  }
+
+  return Number.isFinite(Number(value))
+    ? Math.round(clamp(Number(value), -70, 6))
+    : DEFAULT_SPECTROGRAM_DEFAULTS.loudnessRefLevel;
+}
+
+function normalizeLoudnessYAxisRange(minValue: unknown, maxValue: unknown): {
+  loudnessYAxisMax: number;
+  loudnessYAxisMin: number;
+} {
+  const minimumSpan = 5;
+  let loudnessYAxisMin = Number.isFinite(Number(minValue))
+    ? Math.round(Number(minValue))
+    : DEFAULT_SPECTROGRAM_DEFAULTS.loudnessYAxisMin;
+  let loudnessYAxisMax = Number.isFinite(Number(maxValue))
+    ? Math.round(Number(maxValue))
+    : DEFAULT_SPECTROGRAM_DEFAULTS.loudnessYAxisMax;
+
+  loudnessYAxisMin = clamp(loudnessYAxisMin, -70, 6 - minimumSpan);
+  loudnessYAxisMax = clamp(loudnessYAxisMax, -70 + minimumSpan, 6);
+
+  if (loudnessYAxisMax < loudnessYAxisMin + minimumSpan) {
+    loudnessYAxisMax = Math.min(6, loudnessYAxisMin + minimumSpan);
+    loudnessYAxisMin = Math.min(loudnessYAxisMin, loudnessYAxisMax - minimumSpan);
+  }
+
+  return { loudnessYAxisMax, loudnessYAxisMin };
+}
+
 export function normalizeSpectrogramDefaults(value: unknown): SpectrogramDefaultsPayload {
   const input = (value && typeof value === 'object') ? value as Partial<SpectrogramDefaultsPayload> : {};
   const analysisType = input.analysisType === 'chroma'
+    || input.analysisType === 'loudness'
     || input.analysisType === 'mel'
     || input.analysisType === 'mfcc'
     || input.analysisType === 'scalogram'
@@ -29,6 +63,16 @@ export function normalizeSpectrogramDefaults(value: unknown): SpectrogramDefault
   const frequencyScale = input.frequencyScale === 'linear' || input.frequencyScale === 'mixed'
     ? input.frequencyScale
     : 'log';
+  const loudnessCurves = input.loudnessCurves === 'momentary' || input.loudnessCurves === 'shortTerm'
+    ? input.loudnessCurves
+    : 'both';
+  const loudnessRefLevel = normalizeLoudnessRefLevel(input.loudnessRefLevel);
+  const loudnessShowPeak = input.loudnessShowPeak === true;
+  const loudnessYAxisMode = input.loudnessYAxisMode === 'fixed' ? 'fixed' : 'auto';
+  const { loudnessYAxisMax, loudnessYAxisMin } = normalizeLoudnessYAxisRange(
+    input.loudnessYAxisMin,
+    input.loudnessYAxisMax,
+  );
   const melBandCount = MEL_BAND_OPTIONS.has(Number(input.melBandCount)) ? Number(input.melBandCount) : DEFAULT_SPECTROGRAM_DEFAULTS.melBandCount;
   const mfccCoefficientCount = MFCC_COEFFICIENT_OPTIONS.has(Number(input.mfccCoefficientCount))
     ? Number(input.mfccCoefficientCount)
@@ -71,6 +115,12 @@ export function normalizeSpectrogramDefaults(value: unknown): SpectrogramDefault
     colormapDistribution,
     fftSize,
     frequencyScale,
+    loudnessCurves,
+    loudnessRefLevel,
+    loudnessShowPeak,
+    loudnessYAxisMax,
+    loudnessYAxisMin,
+    loudnessYAxisMode,
     maxDecibels,
     melBandCount,
     mfccCoefficientCount,

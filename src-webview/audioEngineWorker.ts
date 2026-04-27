@@ -1804,13 +1804,7 @@ function renderLoudnessGraph(
 
   const blockSeconds = loudness.blockSamples / sampleRate;
 
-  // Draw short-term fill + line (behind momentary).
-  drawLoudnessFill(
-    context, loudness.shortTerm, loudness.blockCount,
-    blockSeconds, viewStartSeconds, viewSpan,
-    width, height, minLufs, maxLufs, lufsRange,
-    'rgba(70,130,255,0.15)',
-  );
+  // Draw short-term line behind momentary.
   drawLoudnessLine(
     context, loudness.shortTerm, loudness.blockCount,
     blockSeconds, viewStartSeconds, viewSpan,
@@ -1818,13 +1812,7 @@ function renderLoudnessGraph(
     'rgba(90,150,255,0.7)', 2.5,
   );
 
-  // Draw momentary fill + line on top.
-  drawLoudnessFill(
-    context, loudness.momentary, loudness.blockCount,
-    blockSeconds, viewStartSeconds, viewSpan,
-    width, height, minLufs, maxLufs, lufsRange,
-    'rgba(0,210,110,0.12)',
-  );
+  // Draw momentary line on top.
   drawLoudnessLine(
     context, loudness.momentary, loudness.blockCount,
     blockSeconds, viewStartSeconds, viewSpan,
@@ -1882,39 +1870,6 @@ function loudnessBlockToXY(
   const lufs = Math.max(minLufs, Math.min(maxLufs, data[i]));
   const y = ((maxLufs - lufs) / lufsRange) * height;
   return { x, y };
-}
-
-function drawLoudnessFill(
-  context: OffscreenCanvasRenderingContext2D,
-  data: Float32Array,
-  blockCount: number,
-  blockSeconds: number,
-  viewStartSeconds: number,
-  viewSpan: number,
-  width: number,
-  height: number,
-  minLufs: number,
-  maxLufs: number,
-  lufsRange: number,
-  fillColor: string,
-): void {
-  const { startBlock, endBlock } = loudnessBlockRange(blockCount, blockSeconds, viewStartSeconds, viewSpan);
-  if (endBlock < startBlock) { return; }
-
-  context.beginPath();
-  let first = true;
-  let firstX = 0;
-  let lastX = 0;
-  for (let i = startBlock; i <= endBlock; i++) {
-    const { x, y } = loudnessBlockToXY(i, data, blockSeconds, viewStartSeconds, viewSpan, width, height, minLufs, maxLufs, lufsRange);
-    if (first) { context.moveTo(x, y); firstX = x; first = false; } else { context.lineTo(x, y); }
-    lastX = x;
-  }
-  context.lineTo(lastX, height);
-  context.lineTo(firstX, height);
-  context.closePath();
-  context.fillStyle = fillColor;
-  context.fill();
 }
 
 function drawLoudnessLine(

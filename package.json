@@ -124,6 +124,12 @@
             "colormapDistribution": "balanced",
             "fftSize": 4096,
             "frequencyScale": "log",
+            "loudnessCurves": "both",
+            "loudnessRefLevel": -14,
+            "loudnessShowPeak": false,
+            "loudnessYAxisMax": 0,
+            "loudnessYAxisMin": -60,
+            "loudnessYAxisMode": "auto",
             "maxDecibels": 0,
             "melBandCount": 256,
             "mfccCoefficientCount": 20,
@@ -140,7 +146,7 @@
           "properties": {
             "analysisType": {
               "type": "string",
-              "enum": ["spectrogram", "mel", "mfcc", "scalogram", "chroma"]
+              "enum": ["spectrogram", "mel", "mfcc", "scalogram", "chroma", "loudness"]
             },
             "colormapDistribution": {
               "type": "string",
@@ -153,6 +159,32 @@
             "frequencyScale": {
               "type": "string",
               "enum": ["log", "mixed", "linear"]
+            },
+            "loudnessCurves": {
+              "type": "string",
+              "enum": ["both", "momentary", "shortTerm"]
+            },
+            "loudnessRefLevel": {
+              "type": ["number", "null"],
+              "minimum": -70,
+              "maximum": 6
+            },
+            "loudnessShowPeak": {
+              "type": "boolean"
+            },
+            "loudnessYAxisMax": {
+              "type": "number",
+              "minimum": -70,
+              "maximum": 6
+            },
+            "loudnessYAxisMin": {
+              "type": "number",
+              "minimum": -70,
+              "maximum": 6
+            },
+            "loudnessYAxisMode": {
+              "type": "string",
+              "enum": ["auto", "fixed"]
             },
             "maxDecibels": {
               "type": "number"

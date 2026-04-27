@@ -38,10 +38,16 @@ export interface AudioscopePayload {
 }
 
 export interface SpectrogramDefaultsPayload {
-  analysisType: 'chroma' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
+  analysisType: 'chroma' | 'loudness' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
   colormapDistribution: 'balanced' | 'contrast' | 'soft';
   fftSize: number;
   frequencyScale: 'linear' | 'log' | 'mixed';
+  loudnessCurves: 'both' | 'momentary' | 'shortTerm';
+  loudnessRefLevel: number | null;
+  loudnessShowPeak: boolean;
+  loudnessYAxisMax: number;
+  loudnessYAxisMin: number;
+  loudnessYAxisMode: 'auto' | 'fixed';
   maxDecibels: number;
   melBandCount: number;
   mfccCoefficientCount: number;

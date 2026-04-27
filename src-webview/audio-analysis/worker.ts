@@ -2381,38 +2381,6 @@ function loudnessBlockToXY(
   return { x, y };
 }
 
-function drawLoudnessFill(
-  context: OffscreenCanvasRenderingContext2D,
-  data: Float32Array,
-  blockCount: number,
-  blockSeconds: number,
-  viewStartSeconds: number,
-  viewSpan: number,
-  width: number,
-  height: number,
-  minLufs: number,
-  maxLufs: number,
-  lufsRange: number,
-  fillColor: string,
-): void {
-  const { startBlock, endBlock } = loudnessBlockRange(blockCount, blockSeconds, viewStartSeconds, viewSpan);
-  if (endBlock < startBlock) { return; }
-  context.beginPath();
-  let first = true;
-  let firstX = 0;
-  let lastX = 0;
-  for (let i = startBlock; i <= endBlock; i++) {
-    const { x, y } = loudnessBlockToXY(i, data, blockSeconds, viewStartSeconds, viewSpan, width, height, minLufs, maxLufs, lufsRange);
-    if (first) { context.moveTo(x, y); firstX = x; first = false; } else { context.lineTo(x, y); }
-    lastX = x;
-  }
-  context.lineTo(lastX, height);
-  context.lineTo(firstX, height);
-  context.closePath();
-  context.fillStyle = fillColor;
-  context.fill();
-}
-
 function drawLoudnessLine(
   context: OffscreenCanvasRenderingContext2D,
   data: Float32Array,
@@ -2503,14 +2471,8 @@ function paintLoudnessDisplay(context: OffscreenCanvasRenderingContext2D): void 
   const showMomentary = cfg.curves === 'both' || cfg.curves === 'momentary';
   const showShortTerm = cfg.curves === 'both' || cfg.curves === 'shortTerm';
 
-  // Short-term fill + line (behind momentary).
+  // Short-term line behind momentary.
   if (showShortTerm) {
-    drawLoudnessFill(
-      context, loudness.shortTerm, loudness.blockCount,
-      blockSeconds, viewStartSeconds, viewSpan,
-      width, height, minLufs, maxLufs, lufsRange,
-      'rgba(70,130,255,0.15)',
-    );
     drawLoudnessLine(
       context, loudness.shortTerm, loudness.blockCount,
       blockSeconds, viewStartSeconds, viewSpan,
@@ -2519,14 +2481,8 @@ function paintLoudnessDisplay(context: OffscreenCanvasRenderingContext2D): void 
     );
   }
 
-  // Momentary fill + line on top.
+  // Momentary line on top.
   if (showMomentary) {
-    drawLoudnessFill(
-      context, loudness.momentary, loudness.blockCount,
-      blockSeconds, viewStartSeconds, viewSpan,
-      width, height, minLufs, maxLufs, lufsRange,
-      'rgba(0,210,110,0.12)',
-    );
     drawLoudnessLine(
       context, loudness.momentary, loudness.blockCount,
       blockSeconds, viewStartSeconds, viewSpan,

@@ -88,6 +88,9 @@ const DEFAULT_SPECTROGRAM_COLORMAP_DISTRIBUTION: SpectrogramColormapDistribution
 const DEFAULT_MEL_BAND_COUNT = 256;
 const DEFAULT_MFCC_COEFFICIENT_COUNT = 20;
 const DEFAULT_MFCC_MEL_BAND_COUNT = 128;
+const DEFAULT_LOUDNESS_REF_LEVEL = -14;
+const DEFAULT_LOUDNESS_Y_AXIS_MIN = -60;
+const DEFAULT_LOUDNESS_Y_AXIS_MAX = 0;
 const SPECTROGRAM_CONFIG_APPLY_DELAY_MS = 16;
 const SCALOGRAM_HOP_SAMPLES_BY_QUALITY = {
   balanced: 2048,
@@ -99,6 +102,19 @@ const SPECTROGRAM_DB_WINDOW_LIMITS = {
   min: -120,
   minimumSpan: 6,
 } as const;
+const LOUDNESS_REF_LEVEL_LIMITS = {
+  max: 6,
+  min: -70,
+} as const;
+const LOUDNESS_Y_AXIS_LIMITS = {
+  max: 6,
+  min: -70,
+  minimumSpan: 5,
+} as const;
+
+type LoudnessCurveVisibility = 'both' | 'momentary' | 'shortTerm';
+type LoudnessRefPreset = '-14' | '-16' | '-23' | 'custom' | 'off';
+type LoudnessYAxisMode = 'auto' | 'fixed';
 
 const elements = createAudioscopeElements();
 applyWaveformGeometryCssVariables();
@@ -374,12 +390,12 @@ const state = {
     scalogramRowDensity: DEFAULT_SCALOGRAM_ROW_DENSITY,
     minDecibels: -80,
     overlapRatio: 0.75,
-    loudnessRefPreset: '-14' as string,
-    loudnessRefCustom: -14,
-    loudnessYAxisMode: 'auto' as string,
-    loudnessYAxisMin: -60,
-    loudnessYAxisMax: 0,
-    loudnessCurves: 'both' as string,
+    loudnessRefPreset: '-14' as LoudnessRefPreset,
+    loudnessRefCustom: DEFAULT_LOUDNESS_REF_LEVEL,
+    loudnessYAxisMode: 'auto' as LoudnessYAxisMode,
+    loudnessYAxisMin: DEFAULT_LOUDNESS_Y_AXIS_MIN,
+    loudnessYAxisMax: DEFAULT_LOUDNESS_Y_AXIS_MAX,
+    loudnessCurves: 'both' as LoudnessCurveVisibility,
     loudnessShowPeak: false,
   },
   spectrogramConfigApplyTimer: null as number | null,
@@ -518,6 +534,91 @@ function normalizeSpectrogramAnalysisType(value: unknown): SpectrogramAnalysisTy
     || value === 'scalogram'
     ? (value === 'chroma_cqt' ? 'chroma' : value)
     : 'spectrogram';
+}
+
+function normalizeLoudnessRefPreset(value: unknown): LoudnessRefPreset {
+  return value === 'off'
+    || value === '-14'
+    || value === '-16'
+    || value === '-23'
+    || value === 'custom'
+    ? value
+    : '-14';
+}
+
+function normalizeLoudnessRefCustom(value: unknown): number {
+  return Math.round(clamp(
+    Number.isFinite(Number(value)) ? Number(value) : DEFAULT_LOUDNESS_REF_LEVEL,
+    LOUDNESS_REF_LEVEL_LIMITS.min,
+    LOUDNESS_REF_LEVEL_LIMITS.max,
+  ));
+}
+
+function normalizeLoudnessRefLevel(value: unknown): number | null {
+  if (value === null || value === 'off') {
+    return null;
+  }
+
+  return normalizeLoudnessRefCustom(value);
+}
+
+function normalizeLoudnessYAxisMode(value: unknown): LoudnessYAxisMode {
+  return value === 'fixed' ? 'fixed' : 'auto';
+}
+
+function normalizeLoudnessCurves(value: unknown): LoudnessCurveVisibility {
+  return value === 'momentary' || value === 'shortTerm' ? value : 'both';
+}
+
+function normalizeLoudnessYAxisRange(
+  minValue: unknown,
+  maxValue: unknown,
+): {
+  max: number;
+  min: number;
+} {
+  let min = Number.isFinite(Number(minValue))
+    ? Math.round(Number(minValue))
+    : DEFAULT_LOUDNESS_Y_AXIS_MIN;
+  let max = Number.isFinite(Number(maxValue))
+    ? Math.round(Number(maxValue))
+    : DEFAULT_LOUDNESS_Y_AXIS_MAX;
+
+  min = clamp(min, LOUDNESS_Y_AXIS_LIMITS.min, LOUDNESS_Y_AXIS_LIMITS.max - LOUDNESS_Y_AXIS_LIMITS.minimumSpan);
+  max = clamp(max, LOUDNESS_Y_AXIS_LIMITS.min + LOUDNESS_Y_AXIS_LIMITS.minimumSpan, LOUDNESS_Y_AXIS_LIMITS.max);
+
+  if (max < min + LOUDNESS_Y_AXIS_LIMITS.minimumSpan) {
+    max = Math.min(LOUDNESS_Y_AXIS_LIMITS.max, min + LOUDNESS_Y_AXIS_LIMITS.minimumSpan);
+    min = Math.min(min, max - LOUDNESS_Y_AXIS_LIMITS.minimumSpan);
+  }
+
+  return { max, min };
+}
+
+function getConfiguredLoudnessRefLevel(): number | null {
+  const preset = normalizeLoudnessRefPreset(state.spectrogramConfig.loudnessRefPreset);
+  if (preset === 'off') {
+    return null;
+  }
+
+  return preset === 'custom'
+    ? normalizeLoudnessRefCustom(state.spectrogramConfig.loudnessRefCustom)
+    : Number(preset);
+}
+
+function applyLoudnessRefLevel(refLevel: unknown): void {
+  const normalizedRefLevel = normalizeLoudnessRefLevel(refLevel);
+  if (normalizedRefLevel === null) {
+    state.spectrogramConfig.loudnessRefPreset = 'off';
+    state.spectrogramConfig.loudnessRefCustom = DEFAULT_LOUDNESS_REF_LEVEL;
+    return;
+  }
+
+  const preset = String(normalizedRefLevel);
+  state.spectrogramConfig.loudnessRefPreset = preset === '-14' || preset === '-16' || preset === '-23'
+    ? preset
+    : 'custom';
+  state.spectrogramConfig.loudnessRefCustom = normalizedRefLevel;
 }
 
 function normalizeSpectrogramColormapDistribution(value: unknown): SpectrogramColormapDistribution {
@@ -1431,7 +1532,15 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMaxDbSlider.disabled = !supportsDbWindow;
 
   // Loudness-specific controls.
-  const isYAxisFixed = state.spectrogramConfig.loudnessYAxisMode === 'fixed';
+  const loudnessYAxisMode = normalizeLoudnessYAxisMode(state.spectrogramConfig.loudnessYAxisMode);
+  const loudnessYAxisRange = normalizeLoudnessYAxisRange(
+    state.spectrogramConfig.loudnessYAxisMin,
+    state.spectrogramConfig.loudnessYAxisMax,
+  );
+  const loudnessCurves = normalizeLoudnessCurves(state.spectrogramConfig.loudnessCurves);
+  const loudnessRefPreset = normalizeLoudnessRefPreset(state.spectrogramConfig.loudnessRefPreset);
+  const loudnessRefCustom = normalizeLoudnessRefCustom(state.spectrogramConfig.loudnessRefCustom);
+  const isYAxisFixed = loudnessYAxisMode === 'fixed';
   elements.loudnessLegend.hidden = !isLoudness;
   if (!isLoudness) { elements.loudnessRefLabel.hidden = true; }
   elements.loudnessRefControl.hidden = !isLoudness;
@@ -1439,23 +1548,23 @@ function renderSpectrogramMeta(): void {
   elements.loudnessYRangeControl.hidden = !isLoudness || !isYAxisFixed;
   elements.loudnessCurvesControl.hidden = !isLoudness;
   elements.loudnessPeakControl.hidden = !isLoudness;
-  elements.loudnessRefSelect.value = state.spectrogramConfig.loudnessRefPreset;
-  elements.loudnessRefInput.hidden = state.spectrogramConfig.loudnessRefPreset !== 'custom';
-  elements.loudnessRefInput.value = String(state.spectrogramConfig.loudnessRefCustom);
-  elements.loudnessYAxisSelect.value = state.spectrogramConfig.loudnessYAxisMode;
-  elements.loudnessMinLufsSlider.value = String(state.spectrogramConfig.loudnessYAxisMin);
-  elements.loudnessMaxLufsSlider.value = String(state.spectrogramConfig.loudnessYAxisMax);
-  elements.loudnessYRangeValue.textContent = `Min ${state.spectrogramConfig.loudnessYAxisMin} / Max ${state.spectrogramConfig.loudnessYAxisMax} LUFS`;
+  elements.loudnessRefSelect.value = loudnessRefPreset;
+  elements.loudnessRefInput.hidden = loudnessRefPreset !== 'custom';
+  elements.loudnessRefInput.value = String(loudnessRefCustom);
+  elements.loudnessYAxisSelect.value = loudnessYAxisMode;
+  elements.loudnessMinLufsSlider.value = String(loudnessYAxisRange.min);
+  elements.loudnessMaxLufsSlider.value = String(loudnessYAxisRange.max);
+  elements.loudnessYRangeValue.textContent = `Min ${loudnessYAxisRange.min} / Max ${loudnessYAxisRange.max} LUFS`;
   if (isLoudness && isYAxisFixed) {
     const rangeMin = -70;
     const rangeMax = 6;
     const rangeSpan = rangeMax - rangeMin;
-    const startPct = ((state.spectrogramConfig.loudnessYAxisMin - rangeMin) / rangeSpan) * 100;
-    const endPct = ((state.spectrogramConfig.loudnessYAxisMax - rangeMin) / rangeSpan) * 100;
+    const startPct = ((loudnessYAxisRange.min - rangeMin) / rangeSpan) * 100;
+    const endPct = ((loudnessYAxisRange.max - rangeMin) / rangeSpan) * 100;
     elements.loudnessYRangeGroup.style.setProperty('--range-start', `${startPct.toFixed(3)}%`);
     elements.loudnessYRangeGroup.style.setProperty('--range-end', `${endPct.toFixed(3)}%`);
   }
-  elements.loudnessCurvesSelect.value = state.spectrogramConfig.loudnessCurves;
+  elements.loudnessCurvesSelect.value = loudnessCurves;
   elements.loudnessPeakSelect.value = state.spectrogramConfig.loudnessShowPeak ? 'show' : 'hide';
 
   renderSpectrogramDbWindowUi(dbWindow);
@@ -1496,6 +1605,10 @@ function getEffectiveSpectrogramRenderConfig() {
     state.spectrogramConfig.scalogramMinFrequency,
     state.spectrogramConfig.scalogramMaxFrequency,
   );
+  const loudnessYAxisRange = normalizeLoudnessYAxisRange(
+    state.spectrogramConfig.loudnessYAxisMin,
+    state.spectrogramConfig.loudnessYAxisMax,
+  );
   const fftSize = normalizeSpectrogramFftSize(state.spectrogramConfig.fftSize);
   const overlapRatio = normalizeSpectrogramOverlapRatio(state.spectrogramConfig.overlapRatio);
   return {
@@ -1519,16 +1632,12 @@ function getEffectiveSpectrogramRenderConfig() {
     scalogramRowDensity: normalizeSpectrogramScalogramRowDensity(state.spectrogramConfig.scalogramRowDensity),
     minDecibels: dbWindow.minDecibels,
     overlapRatio,
-    loudnessRefLevel: state.spectrogramConfig.loudnessRefPreset === 'off'
-      ? null
-      : state.spectrogramConfig.loudnessRefPreset === 'custom'
-        ? state.spectrogramConfig.loudnessRefCustom
-        : Number(state.spectrogramConfig.loudnessRefPreset),
-    loudnessYAxisMode: state.spectrogramConfig.loudnessYAxisMode,
-    loudnessYAxisMin: state.spectrogramConfig.loudnessYAxisMin,
-    loudnessYAxisMax: state.spectrogramConfig.loudnessYAxisMax,
-    loudnessCurves: state.spectrogramConfig.loudnessCurves,
-    loudnessShowPeak: state.spectrogramConfig.loudnessShowPeak,
+    loudnessRefLevel: getConfiguredLoudnessRefLevel(),
+    loudnessYAxisMode: normalizeLoudnessYAxisMode(state.spectrogramConfig.loudnessYAxisMode),
+    loudnessYAxisMin: loudnessYAxisRange.min,
+    loudnessYAxisMax: loudnessYAxisRange.max,
+    loudnessCurves: normalizeLoudnessCurves(state.spectrogramConfig.loudnessCurves),
+    loudnessShowPeak: Boolean(state.spectrogramConfig.loudnessShowPeak),
   };
 }
 
@@ -1566,6 +1675,16 @@ function applyPersistedSpectrogramDefaults(defaults: any): void {
   state.spectrogramConfig.scalogramOmega0 = normalizeSpectrogramScalogramOmega0(defaults?.scalogramOmega0);
   state.spectrogramConfig.scalogramRowDensity = normalizeSpectrogramScalogramRowDensity(defaults?.scalogramRowDensity);
   state.spectrogramConfig.windowFunction = normalizeSpectrogramWindowFunction(defaults?.windowFunction);
+  applyLoudnessRefLevel(defaults?.loudnessRefLevel);
+  state.spectrogramConfig.loudnessYAxisMode = normalizeLoudnessYAxisMode(defaults?.loudnessYAxisMode);
+  const loudnessYAxisRange = normalizeLoudnessYAxisRange(
+    defaults?.loudnessYAxisMin,
+    defaults?.loudnessYAxisMax,
+  );
+  state.spectrogramConfig.loudnessYAxisMin = loudnessYAxisRange.min;
+  state.spectrogramConfig.loudnessYAxisMax = loudnessYAxisRange.max;
+  state.spectrogramConfig.loudnessCurves = normalizeLoudnessCurves(defaults?.loudnessCurves);
+  state.spectrogramConfig.loudnessShowPeak = defaults?.loudnessShowPeak === true;
 }
 
 function resetCurrentSpectrogramTypeToDefaults(): void {
@@ -1615,10 +1734,10 @@ function resetCurrentSpectrogramTypeToDefaults(): void {
       break;
     case 'loudness':
       state.spectrogramConfig.loudnessRefPreset = '-14';
-      state.spectrogramConfig.loudnessRefCustom = -14;
+      state.spectrogramConfig.loudnessRefCustom = DEFAULT_LOUDNESS_REF_LEVEL;
       state.spectrogramConfig.loudnessYAxisMode = 'auto';
-      state.spectrogramConfig.loudnessYAxisMin = -60;
-      state.spectrogramConfig.loudnessYAxisMax = 0;
+      state.spectrogramConfig.loudnessYAxisMin = DEFAULT_LOUDNESS_Y_AXIS_MIN;
+      state.spectrogramConfig.loudnessYAxisMax = DEFAULT_LOUDNESS_Y_AXIS_MAX;
       state.spectrogramConfig.loudnessCurves = 'both';
       state.spectrogramConfig.loudnessShowPeak = false;
       break;
@@ -3242,41 +3361,43 @@ function attachUiEvents(): void {
 
   // Loudness controls.
   elements.loudnessRefSelect.addEventListener('change', () => {
-    state.spectrogramConfig.loudnessRefPreset = elements.loudnessRefSelect.value;
+    state.spectrogramConfig.loudnessRefPreset = normalizeLoudnessRefPreset(elements.loudnessRefSelect.value);
     elements.loudnessRefInput.hidden = elements.loudnessRefSelect.value !== 'custom';
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });
   elements.loudnessRefInput.addEventListener('change', () => {
-    state.spectrogramConfig.loudnessRefCustom = Math.max(-70, Math.min(6, Number(elements.loudnessRefInput.value) || -14));
+    state.spectrogramConfig.loudnessRefCustom = normalizeLoudnessRefCustom(elements.loudnessRefInput.value);
     elements.loudnessRefInput.value = String(state.spectrogramConfig.loudnessRefCustom);
     refreshSpectrogramAnalysisConfig();
   });
   elements.loudnessYAxisSelect.addEventListener('change', () => {
-    state.spectrogramConfig.loudnessYAxisMode = elements.loudnessYAxisSelect.value;
+    state.spectrogramConfig.loudnessYAxisMode = normalizeLoudnessYAxisMode(elements.loudnessYAxisSelect.value);
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });
   elements.loudnessMinLufsSlider.addEventListener('input', () => {
-    let min = Number(elements.loudnessMinLufsSlider.value);
-    let max = state.spectrogramConfig.loudnessYAxisMax;
-    if (min >= max) { max = Math.min(6, min + 5); }
+    const { max, min } = normalizeLoudnessYAxisRange(
+      elements.loudnessMinLufsSlider.value,
+      state.spectrogramConfig.loudnessYAxisMax,
+    );
     state.spectrogramConfig.loudnessYAxisMin = min;
     state.spectrogramConfig.loudnessYAxisMax = max;
     renderSpectrogramMeta();
     scheduleSpectrogramConfigRefresh();
   });
   elements.loudnessMaxLufsSlider.addEventListener('input', () => {
-    let min = state.spectrogramConfig.loudnessYAxisMin;
-    let max = Number(elements.loudnessMaxLufsSlider.value);
-    if (max <= min) { min = Math.max(-70, max - 5); }
+    const { max, min } = normalizeLoudnessYAxisRange(
+      state.spectrogramConfig.loudnessYAxisMin,
+      elements.loudnessMaxLufsSlider.value,
+    );
     state.spectrogramConfig.loudnessYAxisMin = min;
     state.spectrogramConfig.loudnessYAxisMax = max;
     renderSpectrogramMeta();
     scheduleSpectrogramConfigRefresh();
   });
   elements.loudnessCurvesSelect.addEventListener('change', () => {
-    state.spectrogramConfig.loudnessCurves = elements.loudnessCurvesSelect.value;
+    state.spectrogramConfig.loudnessCurves = normalizeLoudnessCurves(elements.loudnessCurvesSelect.value);
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });
