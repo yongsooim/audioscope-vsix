@@ -17,7 +17,6 @@ pub const max_db: f32 = 0.0;
 pub const chroma_bin_count: i32 = 12;
 pub const cqt_default_bins_per_octave: i32 = 36;
 pub const cqt_default_fmin: f32 = 32.70319566257483;
-pub const librosa_default_mel_band_count: i32 = 128;
 pub const low_frequency_enhancement_max_frequency: f32 = 1_200.0;
 pub const morlet_omega0: f32 = 6.0;
 pub const morlet_support_sigma: f32 = 3.0;
@@ -85,12 +84,20 @@ pub const AllocationHeader = extern struct {
 pub const WaveLevel = struct {
     block_size: i32 = 0,
     block_count: i32 = 0,
+    first_values: []f32 = &.{},
+    last_values: []f32 = &.{},
     max_peaks: []f32 = &.{},
+    max_indices: []i32 = &.{},
     min_peaks: []f32 = &.{},
+    min_indices: []i32 = &.{},
 
     pub fn deinit(self: *WaveLevel) void {
+        if (self.first_values.len > 0) allocator.free(self.first_values);
+        if (self.last_values.len > 0) allocator.free(self.last_values);
         if (self.max_peaks.len > 0) allocator.free(self.max_peaks);
+        if (self.max_indices.len > 0) allocator.free(self.max_indices);
         if (self.min_peaks.len > 0) allocator.free(self.min_peaks);
+        if (self.min_indices.len > 0) allocator.free(self.min_indices);
         self.* = .{};
     }
 };
@@ -255,6 +262,7 @@ pub const ScalogramKernelBank = struct {
     pub fn initFromFrequencies(frequencies: []const f32, window_function: WindowFunction) !ScalogramKernelBank {
         var bank: ScalogramKernelBank = .{};
         errdefer bank.deinit();
+        const q_value = @as(f32, @floatFromInt(cqt_default_bins_per_octave)) / (std.math.pow(f32, 2.0, 1.0 / @as(f32, @floatFromInt(cqt_default_bins_per_octave))) - 1.0);
 
         bank.rows = try allocator.alloc(ScalogramRowKernel, frequencies.len);
         for (bank.rows) |*row| row.* = .{};
@@ -262,7 +270,6 @@ pub const ScalogramKernelBank = struct {
         var total_tap_count: usize = 0;
         for (bank.rows, frequencies) |*row_kernel, frequency| {
             const safe_frequency = maxF32(1.0, frequency);
-            const q_value = @as(f32, @floatFromInt(cqt_default_bins_per_octave)) / (std.math.pow(f32, 2.0, 1.0 / @as(f32, @floatFromInt(cqt_default_bins_per_octave))) - 1.0);
             const support_samples = minI32(
                 morlet_max_support_samples,
                 maxI32(24, @as(i32, @intFromFloat(@ceil((q_value * g_session.sample_rate) / safe_frequency)))),
@@ -355,6 +362,9 @@ pub const BandLayoutResource = struct {
     enhanced_band_ranges: []BandRange = &.{},
     use_low_frequency_enhancement: bool = false,
     low_frequency_maximum: f32 = 0.0,
+    mel_row_offsets: []i32 = &.{},
+    mel_bin_indices: []i32 = &.{},
+    mel_weights: []f32 = &.{},
     next: ?*BandLayoutResource = null,
 
     pub fn deinit(self: *BandLayoutResource) void {
@@ -362,6 +372,9 @@ pub const BandLayoutResource = struct {
         if (self.mel_bands.len > 0) allocator.free(self.mel_bands);
         if (self.mfcc_basis.len > 0) allocator.free(self.mfcc_basis);
         if (self.enhanced_band_ranges.len > 0) allocator.free(self.enhanced_band_ranges);
+        if (self.mel_row_offsets.len > 0) allocator.free(self.mel_row_offsets);
+        if (self.mel_bin_indices.len > 0) allocator.free(self.mel_bin_indices);
+        if (self.mel_weights.len > 0) allocator.free(self.mel_weights);
         self.* = .{};
     }
 };

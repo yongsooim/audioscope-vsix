@@ -3,6 +3,8 @@ import {
   type EmbeddedExecutableStatus,
   getEmbeddedExecutableStatusSync,
   runEmbeddedFfmpegDecodeToPcm,
+  runEmbeddedFfmpegDecodeToPcmWithLoudness,
+  startEmbeddedFfmpegDecodeToPcmWithDeferredLoudness,
   runEmbeddedFfmpegMeasureLoudness,
   runEmbeddedFfmpegDecodeToWav,
   runEmbeddedFfprobe,
@@ -144,6 +146,16 @@ export type DecodeFallbackPayload =
       source: 'ffmpeg';
     };
 
+export interface HostDecodeLoudnessPayload {
+  decodeFallback: DecodeFallbackPayload;
+  loudnessSummary: LoudnessSummaryPayload;
+}
+
+export interface HostDecodeLoudnessPipeline {
+  decodeFallback: DecodeFallbackPayload;
+  loudnessSummaryPromise: Promise<LoudnessSummaryPayload>;
+}
+
 export type ProbeOpenResult =
   | { kind: 'audio'; metadata: MediaMetadataPayload; toolStatus: ExternalToolStatusPayload }
   | { kind: 'not-audio'; message: string; toolStatus: ExternalToolStatusPayload }
@@ -209,7 +221,9 @@ const EXTERNAL_TOOL_TIMEOUT_MS = 15_000;
 const FFMPEG_DECODE_TIMEOUT_MS = 120_000;
 
 function getCliFilePath(resource: vscode.Uri): string | null {
-  return resource.scheme === 'file' ? resource.fsPath : null;
+  return typeof resource.fsPath === 'string' && resource.fsPath.trim().length > 0
+    ? resource.fsPath
+    : null;
 }
 
 function getExecErrorMessage(error: unknown): string {
@@ -272,12 +286,13 @@ async function resolvePreferredTools(resource: vscode.Uri): Promise<ResolvedTool
 }
 
 export function createInitialExternalToolStatus(resource: vscode.Uri): ExternalToolStatusPayload {
+  const ffmpeg = getEmbeddedExecutableStatusSync('ffmpeg');
+  const ffprobe = getEmbeddedExecutableStatusSync('ffprobe');
+  const fileBacked = Boolean(getCliFilePath(resource));
   const selection: ResolvedToolSelection = {
-    ffmpeg: getEmbeddedExecutableStatusSync('ffmpeg'),
-    ffprobe: getEmbeddedExecutableStatusSync('ffprobe'),
-    resourceReadable: Boolean(getCliFilePath(resource))
-      || getEmbeddedExecutableStatusSync('ffmpeg').available
-      || getEmbeddedExecutableStatusSync('ffprobe').available,
+    ffmpeg,
+    ffprobe,
+    resourceReadable: fileBacked || ffmpeg.available || ffprobe.available,
   };
 
   return createToolStatusPayload(true, selection);
@@ -613,6 +628,21 @@ export async function getLoudnessSummary(resource: vscode.Uri): Promise<Loudness
 
   const summary = await runEmbeddedFfmpegMeasureLoudness(resource, FFMPEG_DECODE_TIMEOUT_MS);
 
+  return normalizeLoudnessSummary(summary);
+}
+
+function normalizeLoudnessSummary(summary: {
+  channelCount: number | null;
+  channelLayout: string | null;
+  integratedLufs: number | null;
+  integratedThresholdLufs: number | null;
+  loudnessRangeLu: number | null;
+  lraHighLufs: number | null;
+  lraLowLufs: number | null;
+  rangeThresholdLufs: number | null;
+  samplePeakDbfs: number | null;
+  truePeakDbtp: number | null;
+}): LoudnessSummaryPayload {
   return {
     ...summary,
     channelCount: typeof summary.channelCount === 'number' && Number.isFinite(summary.channelCount)
@@ -632,6 +662,50 @@ export async function getLoudnessSummary(resource: vscode.Uri): Promise<Loudness
     source: 'FFmpeg ebur128',
     truePeakDbtp: parseNumberValue(summary.truePeakDbtp),
   };
+}
+
+export async function decodeAndSummarizeWithFfmpeg(resource: vscode.Uri): Promise<HostDecodeLoudnessPayload> {
+  const pipeline = await startDecodeAndSummarizeWithFfmpeg(resource);
+  return {
+    decodeFallback: pipeline.decodeFallback,
+    loudnessSummary: await pipeline.loudnessSummaryPromise,
+  };
+}
+
+export async function startDecodeAndSummarizeWithFfmpeg(resource: vscode.Uri): Promise<HostDecodeLoudnessPipeline> {
+  const preferredTools = await resolvePreferredTools(resource);
+  const toolStatus = createToolStatusPayload(true, preferredTools);
+
+  if (!toolStatus.fileBacked) {
+    throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
+  }
+
+  if (!toolStatus.ffmpegAvailable) {
+    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
+  }
+
+  if (!toolStatus.canDecodeFallback) {
+    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
+  }
+
+  try {
+    const result = await startEmbeddedFfmpegDecodeToPcmWithDeferredLoudness(resource);
+
+    return {
+      decodeFallback: {
+        ...result.decode,
+        kind: 'pcm',
+      },
+      loudnessSummaryPromise: result.loudnessPromise.then((summary) => normalizeLoudnessSummary(summary)),
+    };
+  } catch {
+    const decodeFallback = await decodeWithFfmpeg(resource);
+
+    return {
+      decodeFallback,
+      loudnessSummaryPromise: getLoudnessSummary(resource),
+    };
+  }
 }
 
 export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenResult> {

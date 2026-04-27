@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -158,7 +159,6 @@ const toolSpecs: ToolSpec[] = [
       'ffmpeg',
       'ffmpeg.wasm',
       'ffdecode_browser_module.js',
-      'ffdecode_browser_module.wasm',
       'ffdecode_module.js',
       'ffdecode_module.wasm',
     ],
@@ -198,13 +198,14 @@ async function main(): Promise<void> {
 async function buildTool(spec: ToolSpec, ffmpegRevision: string, emscripten: EmscriptenToolchain): Promise<void> {
   const buildDir = path.join(buildRoot, spec.buildDirName);
   const stampPath = path.join(buildDir, '.stamp.json');
+  const sourceInputs = await collectSourceInputs(spec);
   const nextStamp = JSON.stringify({
-    auxiliaryExecutables: spec.auxiliaryExecutables ?? [],
+    auxiliaryExecutables: sourceInputs.auxiliaryExecutables,
     browserModuleOutputBaseName: spec.browserModuleOutputBaseName ?? null,
     configureArgs: spec.configureArgs,
-    customExecutableSource: spec.customExecutableSource ?? null,
+    customExecutableSource: sourceInputs.customExecutableSource,
     directModuleOutputBaseName: spec.directModuleOutputBaseName ?? null,
-    directModuleSource: spec.directModuleSource ?? null,
+    directModuleSource: sourceInputs.directModuleSource,
     ffmpegRevision,
     speedOptimizedWasmFlags,
     tool: spec.name,
@@ -241,6 +242,8 @@ async function buildTool(spec: ToolSpec, ffmpegRevision: string, emscripten: Ems
     if (spec.directModuleSource && spec.browserModuleOutputBaseName) {
       await buildBrowserDirectModule(spec, buildDir, emscripten);
     }
+
+    await assertSharedDecodeWasmCompatibility(spec, buildDir);
 
     await fsp.writeFile(stampPath, nextStamp, 'utf8');
   }
@@ -473,6 +476,43 @@ async function readOptionalFile(filePath: string): Promise<string | null> {
   }
 }
 
+async function collectSourceInputs(spec: ToolSpec): Promise<{
+  auxiliaryExecutables: Array<{ hash: string | null; outputName: string; source: string }>;
+  customExecutableSource: { hash: string | null; source: string } | null;
+  directModuleSource: { hash: string | null; source: string } | null;
+}> {
+  return {
+    auxiliaryExecutables: await Promise.all(
+      (spec.auxiliaryExecutables ?? []).map(async (executable) => ({
+        hash: await hashFile(executable.source),
+        outputName: executable.outputName,
+        source: executable.source,
+      })),
+    ),
+    customExecutableSource: spec.customExecutableSource
+      ? {
+          hash: await hashFile(spec.customExecutableSource),
+          source: spec.customExecutableSource,
+        }
+      : null,
+    directModuleSource: spec.directModuleSource
+      ? {
+          hash: await hashFile(spec.directModuleSource),
+          source: spec.directModuleSource,
+        }
+      : null,
+  };
+}
+
+async function hashFile(filePath: string): Promise<string | null> {
+  try {
+    const contents = await fsp.readFile(filePath);
+    return createHash('sha256').update(contents).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
 async function buildCustomExecutable(spec: ToolSpec, buildDir: string, emscripten: EmscriptenToolchain): Promise<void> {
   if (!spec.customExecutableSource) {
     return;
@@ -559,12 +599,14 @@ async function buildDirectModule(spec: ToolSpec, buildDir: string, emscripten: E
       '-s',
       'EXPORTED_RUNTIME_METHODS=["FS","ccall","UTF8ToString"]',
       '-s',
-      'EXPORTED_FUNCTIONS=["_malloc","_free","_wave_decode_file","_wave_get_output_channel_count","_wave_get_output_sample_rate","_wave_get_output_frame_count","_wave_get_output_channel_ptr","_wave_get_output_channel_byte_length","_wave_clear_decode_output","_wave_get_last_error_ptr","_wave_get_last_error_length"]',
+      'EXPORTED_FUNCTIONS=["_malloc","_free","_wave_decode_file","_wave_decode_file_with_loudness","_wave_measure_loudness_from_decoded_output","_wave_get_output_channel_count","_wave_get_output_sample_rate","_wave_get_output_frame_count","_wave_get_output_channel_ptr","_wave_get_output_channel_byte_length","_wave_get_output_channel_layout_ptr","_wave_get_output_channel_layout_length","_wave_get_loudness_integrated_lufs","_wave_get_loudness_integrated_threshold_lufs","_wave_get_loudness_range_lu","_wave_get_loudness_range_threshold_lufs","_wave_get_loudness_lra_low_lufs","_wave_get_loudness_lra_high_lufs","_wave_get_loudness_sample_peak_dbfs","_wave_get_loudness_true_peak_dbtp","_wave_clear_decode_output","_wave_get_last_error_ptr","_wave_get_last_error_length"]',
       '-I',
       ffmpegSourceDir,
       '-I',
       buildDir,
       spec.directModuleSource,
+      '-L',
+      path.join(buildDir, 'libavfilter'),
       '-L',
       path.join(buildDir, 'libavformat'),
       '-L',
@@ -573,6 +615,7 @@ async function buildDirectModule(spec: ToolSpec, buildDir: string, emscripten: E
       path.join(buildDir, 'libswresample'),
       '-L',
       path.join(buildDir, 'libavutil'),
+      '-lavfilter',
       '-lavformat',
       '-lavcodec',
       '-lswresample',
@@ -616,12 +659,14 @@ async function buildBrowserDirectModule(
       '-s',
       'EXPORTED_RUNTIME_METHODS=["FS","ccall","UTF8ToString","stringToUTF8"]',
       '-s',
-      'EXPORTED_FUNCTIONS=["_malloc","_free","_wave_decode_file","_wave_get_output_channel_count","_wave_get_output_sample_rate","_wave_get_output_frame_count","_wave_get_output_channel_ptr","_wave_get_output_channel_byte_length","_wave_clear_decode_output","_wave_get_last_error_ptr","_wave_get_last_error_length"]',
+      'EXPORTED_FUNCTIONS=["_malloc","_free","_wave_decode_file","_wave_decode_file_with_loudness","_wave_measure_loudness_from_decoded_output","_wave_get_output_channel_count","_wave_get_output_sample_rate","_wave_get_output_frame_count","_wave_get_output_channel_ptr","_wave_get_output_channel_byte_length","_wave_get_output_channel_layout_ptr","_wave_get_output_channel_layout_length","_wave_get_loudness_integrated_lufs","_wave_get_loudness_integrated_threshold_lufs","_wave_get_loudness_range_lu","_wave_get_loudness_range_threshold_lufs","_wave_get_loudness_lra_low_lufs","_wave_get_loudness_lra_high_lufs","_wave_get_loudness_sample_peak_dbfs","_wave_get_loudness_true_peak_dbtp","_wave_clear_decode_output","_wave_get_last_error_ptr","_wave_get_last_error_length"]',
       '-I',
       ffmpegSourceDir,
       '-I',
       buildDir,
       spec.directModuleSource,
+      '-L',
+      path.join(buildDir, 'libavfilter'),
       '-L',
       path.join(buildDir, 'libavformat'),
       '-L',
@@ -630,6 +675,7 @@ async function buildBrowserDirectModule(
       path.join(buildDir, 'libswresample'),
       '-L',
       path.join(buildDir, 'libavutil'),
+      '-lavfilter',
       '-lavformat',
       '-lavcodec',
       '-lswresample',
@@ -643,6 +689,29 @@ async function buildBrowserDirectModule(
       env: emscripten.env,
     },
   );
+}
+
+async function assertSharedDecodeWasmCompatibility(spec: ToolSpec, buildDir: string): Promise<void> {
+  if (!spec.directModuleOutputBaseName || !spec.browserModuleOutputBaseName) {
+    return;
+  }
+
+  const directWasmPath = path.join(buildDir, `${spec.directModuleOutputBaseName}.wasm`);
+  const browserWasmPath = path.join(buildDir, `${spec.browserModuleOutputBaseName}.wasm`);
+  const [directWasm, browserWasm] = await Promise.all([
+    fsp.readFile(directWasmPath),
+    fsp.readFile(browserWasmPath),
+  ]);
+
+  if (!directWasm.equals(browserWasm)) {
+    throw new Error(
+      [
+        'Shared decode wasm outputs diverged.',
+        `${path.basename(directWasmPath)} and ${path.basename(browserWasmPath)} must match byte-for-byte`,
+        'because the packaged extension now ships only the shared direct module wasm.',
+      ].join(' '),
+    );
+  }
 }
 
 async function patchGeneratedLauncher(filePath: string): Promise<void> {

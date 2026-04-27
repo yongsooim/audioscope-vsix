@@ -6,3 +6,4 @@ dist
 .zig-cache
 zig-out
 .ffmpeg-build
+benchmarks/**/*

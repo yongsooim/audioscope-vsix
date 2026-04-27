@@ -49,25 +49,7 @@ export function createAudioscopeFocusController() {
       return true;
     }
 
-    const field = target.closest('input, textarea');
-
-    if (field instanceof HTMLTextAreaElement) {
-      return true;
-    }
-
-    if (!(field instanceof HTMLInputElement)) {
-      return false;
-    }
-
-    const inputType = field.type.toLowerCase();
-
-    return inputType === 'email'
-      || inputType === 'number'
-      || inputType === 'password'
-      || inputType === 'search'
-      || inputType === 'tel'
-      || inputType === 'text'
-      || inputType === 'url';
+    return target.closest('textarea') instanceof HTMLTextAreaElement;
   }
 
   function preventPointerFocus(event: PointerEvent): void {

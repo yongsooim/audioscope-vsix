@@ -68,6 +68,7 @@ int main(int argc, char **argv) {
     int resampled_capacity = 0;
     int bytes_written = 0;
     int audio_stream_index;
+    int fallback_channel_count;
     int output_channels;
     int output_sample_rate;
     AVChannelLayout output_layout = { 0 };
@@ -121,13 +122,21 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
+    fallback_channel_count = decoder_context->ch_layout.nb_channels;
+    if (fallback_channel_count <= 0) {
+        fallback_channel_count = format_context->streams[audio_stream_index]->codecpar->ch_layout.nb_channels;
+    }
+    if (fallback_channel_count <= 0) {
+        fallback_channel_count = 2;
+    }
+
     if (decoder_context->ch_layout.nb_channels > 0 && decoder_context->ch_layout.order != AV_CHANNEL_ORDER_UNSPEC) {
         if (av_channel_layout_copy(&output_layout, &decoder_context->ch_layout) < 0) {
             fprintf(stderr, "Unable to copy output channel layout.\n");
             goto cleanup;
         }
     } else {
-        output_layout = (AVChannelLayout) AV_CHANNEL_LAYOUT_STEREO;
+        av_channel_layout_default(&output_layout, fallback_channel_count);
     }
     output_channels = output_layout.nb_channels;
     output_sample_rate = decoder_context->sample_rate > 0 ? decoder_context->sample_rate : 44100;

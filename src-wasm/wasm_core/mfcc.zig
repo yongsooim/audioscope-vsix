@@ -78,13 +78,13 @@ pub fn writeDctBasis(destination: []f32, coefficient_count: i32, band_count: i32
 
 pub fn sampleCoefficient(
     power_spectrum: []const f32,
-    bands: []const core.MelBand,
+    row_offsets: []const i32,
+    bin_indices: []const i32,
+    weights: []const f32,
     dct_basis: []const f32,
     coefficient_index: usize,
-    fft_size: i32,
-    sample_rate: f32,
 ) f32 {
-    const band_count = bands.len;
+    const band_count = row_offsets.len -| 1;
     if (band_count == 0 or band_count > max_mel_bands) {
         return 0.0;
     }
@@ -95,13 +95,32 @@ pub fn sampleCoefficient(
     }
 
     var band_values: [max_mel_bands]f32 = undefined;
-    for (bands, 0..) |band, band_index| {
-        band_values[band_index] = powerToDb(mel_analysis.computeMelBandPower(power_spectrum, band, fft_size, sample_rate));
+    for (0..band_count) |band_index| {
+        band_values[band_index] = powerToDb(mel_analysis.computeMelBandPowerWeighted(
+            power_spectrum,
+            row_offsets,
+            bin_indices,
+            weights,
+            band_index,
+        ));
     }
 
-    var sum: f32 = 0.0;
     const basis_offset = coefficient_index * band_count;
-    for (0..band_count) |band_index| {
+    var sum0: f32 = 0.0;
+    var sum1: f32 = 0.0;
+    var sum2: f32 = 0.0;
+    var sum3: f32 = 0.0;
+    var band_index: usize = 0;
+
+    while (band_index + 4 <= band_count) : (band_index += 4) {
+        sum0 += band_values[band_index] * dct_basis[basis_offset + band_index];
+        sum1 += band_values[band_index + 1] * dct_basis[basis_offset + band_index + 1];
+        sum2 += band_values[band_index + 2] * dct_basis[basis_offset + band_index + 2];
+        sum3 += band_values[band_index + 3] * dct_basis[basis_offset + band_index + 3];
+    }
+
+    var sum = (sum0 + sum1) + (sum2 + sum3);
+    while (band_index < band_count) : (band_index += 1) {
         sum += band_values[band_index] * dct_basis[basis_offset + band_index];
     }
 
@@ -110,17 +129,17 @@ pub fn sampleCoefficient(
 
 pub fn writeColumn(
     power_spectrum: []const f32,
-    bands: []const core.MelBand,
+    row_offsets: []const i32,
+    bin_indices: []const i32,
+    weights: []const f32,
     dct_basis: []const f32,
     coefficient_count: usize,
-    fft_size: i32,
-    sample_rate: f32,
     distribution_gamma: f32,
     output: [*]u8,
     output_width: usize,
     column_index: usize,
 ) void {
-    const band_count = bands.len;
+    const band_count = row_offsets.len -| 1;
     if (band_count == 0 or band_count > max_mel_bands or coefficient_count == 0 or coefficient_count > max_coefficients) {
         return;
     }
@@ -128,15 +147,33 @@ pub fn writeColumn(
     var band_values: [max_mel_bands]f32 = undefined;
     var coefficients: [max_coefficients]f32 = undefined;
 
-    for (bands, 0..) |band, band_index| {
-        band_values[band_index] = powerToDb(mel_analysis.computeMelBandPower(power_spectrum, band, fft_size, sample_rate));
+    for (0..band_count) |band_index| {
+        band_values[band_index] = powerToDb(mel_analysis.computeMelBandPowerWeighted(
+            power_spectrum,
+            row_offsets,
+            bin_indices,
+            weights,
+            band_index,
+        ));
     }
 
     for (0..coefficient_count) |coefficient_index| {
-        var sum: f32 = 0.0;
         const basis_offset = coefficient_index * band_count;
+        var sum0: f32 = 0.0;
+        var sum1: f32 = 0.0;
+        var sum2: f32 = 0.0;
+        var sum3: f32 = 0.0;
+        var band_index: usize = 0;
 
-        for (0..band_count) |band_index| {
+        while (band_index + 4 <= band_count) : (band_index += 4) {
+            sum0 += band_values[band_index] * dct_basis[basis_offset + band_index];
+            sum1 += band_values[band_index + 1] * dct_basis[basis_offset + band_index + 1];
+            sum2 += band_values[band_index + 2] * dct_basis[basis_offset + band_index + 2];
+            sum3 += band_values[band_index + 3] * dct_basis[basis_offset + band_index + 3];
+        }
+
+        var sum = (sum0 + sum1) + (sum2 + sum3);
+        while (band_index < band_count) : (band_index += 1) {
             sum += band_values[band_index] * dct_basis[basis_offset + band_index];
         }
         coefficients[coefficient_index] = sum;

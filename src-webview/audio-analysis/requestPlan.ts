@@ -24,7 +24,6 @@ import {
   OVERLAP_RATIO_OPTIONS,
   QUALITY_PRESETS,
   ROW_BUCKET_SIZE,
-  SCALOGRAM_HOP_SAMPLES_OPTIONS,
   SCALOGRAM_ROW_BLOCK_SIZE,
   SCALOGRAM_ROW_DENSITY_OPTIONS,
   SCALOGRAM_OMEGA_OPTIONS,
@@ -32,7 +31,7 @@ import {
 } from './constants';
 
 export type QualityPreset = 'balanced' | 'high' | 'max';
-export type AnalysisType = 'chroma' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
+export type AnalysisType = 'chroma' | 'loudness' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
 export type ColormapDistribution = 'balanced' | 'contrast' | 'soft';
 export type FrequencyScale = 'linear' | 'log' | 'mixed';
 export type WindowFunction = SpectrogramWindowFunction;
@@ -114,7 +113,16 @@ interface RequestPlanContext {
   pixelWidth: number;
   quality: QualityPreset;
   runtimeVariant: string | null;
+  sampleCount: number;
   sampleRate: number;
+}
+
+function quantizeTimeToSampleIndex(value: number, sampleRate: number, maximumSampleIndex: number): number {
+  if (!(sampleRate > 0) || !(maximumSampleIndex >= 0)) {
+    return 0;
+  }
+
+  return clamp(Math.round(value * sampleRate), 0, maximumSampleIndex);
 }
 
 export function normalizeQualityPreset(value: unknown): QualityPreset {
@@ -124,6 +132,7 @@ export function normalizeQualityPreset(value: unknown): QualityPreset {
 export function normalizeAnalysisType(value: unknown): AnalysisType {
   return value === 'chroma'
     || value === 'chroma_cqt'
+    || value === 'loudness'
     || value === 'mel'
     || value === 'mfcc'
     || value === 'scalogram'
@@ -228,20 +237,28 @@ export function createRequestPlan(
   const configVersion = Number.isFinite(request?.configVersion) ? Math.max(0, Math.trunc(Number(request?.configVersion))) : 0;
   const requestedStart = Number.isFinite(request?.viewStart) ? Number(request?.viewStart) : 0;
   const requestedEnd = Number.isFinite(request?.viewEnd) ? Number(request?.viewEnd) : context.duration;
-  const viewStart = clamp(requestedStart, 0, context.duration);
-  const viewEnd = clamp(
-    Math.max(viewStart + (1 / context.sampleRate), requestedEnd),
-    viewStart + (1 / context.sampleRate),
-    context.duration,
+  const maximumSampleCount = Math.max(1, Math.round(context.sampleCount || (context.duration * context.sampleRate) || 1));
+  const maximumStartSample = Math.max(0, maximumSampleCount - 1);
+  const viewStartSample = quantizeTimeToSampleIndex(requestedStart, context.sampleRate, maximumStartSample);
+  const requestedEndSample = quantizeTimeToSampleIndex(requestedEnd, context.sampleRate, maximumSampleCount);
+  const viewEndSample = clamp(
+    Math.max(viewStartSample + 1, requestedEndSample),
+    viewStartSample + 1,
+    maximumSampleCount,
   );
+  const viewStart = viewStartSample / context.sampleRate;
+  const viewEnd = viewEndSample / context.sampleRate;
   const requestedDisplayStart = Number.isFinite(request?.displayStart) ? Number(request?.displayStart) : viewStart;
-  const displayStart = clamp(requestedDisplayStart, 0, context.duration);
+  const displayStartSample = quantizeTimeToSampleIndex(requestedDisplayStart, context.sampleRate, maximumStartSample);
+  const displayStart = displayStartSample / context.sampleRate;
   const requestedDisplayEnd = Number.isFinite(request?.displayEnd) ? Number(request?.displayEnd) : viewEnd;
-  const displayEnd = clamp(
-    Math.max(displayStart + (1 / context.sampleRate), requestedDisplayEnd),
-    displayStart + (1 / context.sampleRate),
-    context.duration,
+  const requestedDisplayEndSample = quantizeTimeToSampleIndex(requestedDisplayEnd, context.sampleRate, maximumSampleCount);
+  const displayEndSample = clamp(
+    Math.max(displayStartSample + 1, requestedDisplayEndSample),
+    displayStartSample + 1,
+    maximumSampleCount,
   );
+  const displayEnd = displayEndSample / context.sampleRate;
   const pixelWidth = Math.max(1, Math.round(Number(request?.pixelWidth) || context.pixelWidth || 1));
   const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || context.pixelHeight || 1));
   const dprBucket = Math.max(2, Math.round(Number(request?.dpr) || 2));

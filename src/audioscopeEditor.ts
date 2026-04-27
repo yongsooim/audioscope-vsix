@@ -6,12 +6,15 @@ import {
   getExternalToolStatus,
   getLoudnessSummary,
   getMediaMetadata,
+  startDecodeAndSummarizeWithFfmpeg,
   type AudioscopePayload,
 } from './externalAudioTools';
 import {
   getCachedDecodeFallback,
+  getCachedHostDecodeLoudnessPipeline,
   getCachedLoudnessSummary,
   getCachedMediaMetadata,
+  peekCachedHostDecodeLoudnessPipeline,
 } from './mediaHostCache';
 import { DEFAULT_SPECTROGRAM_DEFAULTS } from './audioscope-editor/constants';
 import { AudioscopeDocument } from './audioscope-editor/document';
@@ -19,6 +22,21 @@ import { canOpenInAudioscope, getActiveResource } from './audioscope-editor/edit
 import { cloneDecodeFallbackPayload } from './audioscope-editor/payloadClone';
 import { normalizeSpectrogramDefaults } from './audioscope-editor/spectrogramDefaults';
 import { getAudioscopeWebviewHtml } from './audioscope-editor/webviewHtml';
+
+const HOST_SHARED_LOUDNESS_EXTENSIONS = new Set([
+  'aac',
+  'flac',
+  'm4a',
+  'mp3',
+  'oga',
+  'ogg',
+  'opus',
+]);
+
+function shouldUseSharedHostDecodeLoudness(resource: vscode.Uri): boolean {
+  const extension = path.posix.extname(resource.path).replace(/^\./, '').toLowerCase();
+  return HOST_SHARED_LOUDNESS_EXTENSIONS.has(extension);
+}
 
 export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProvider<AudioscopeDocument> {
   public static readonly viewType = 'audioscope.editor';
@@ -155,10 +173,22 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         const loadToken = Number(message.body?.loadToken) || 0;
 
         try {
-          const fallback = await getCachedDecodeFallback(
-            document.uri,
-            () => decodeWithFfmpeg(document.uri),
-          );
+          let fallback;
+
+          try {
+            const sharedAnalysis = await getCachedHostDecodeLoudnessPipeline(
+              document.uri,
+              () => startDecodeAndSummarizeWithFfmpeg(document.uri),
+            );
+            fallback = sharedAnalysis.decodeFallback;
+            void sharedAnalysis.loudnessSummaryPromise.catch(() => {});
+          } catch {
+            fallback = await getCachedDecodeFallback(
+              document.uri,
+              () => decodeWithFfmpeg(document.uri),
+            );
+          }
+
           await webviewPanel.webview.postMessage({
             type: 'decodeFallbackReady',
             body: {
@@ -184,10 +214,18 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         const loadToken = Number(message.body?.loadToken) || 0;
 
         try {
-          const summary = await getCachedLoudnessSummary(
-            document.uri,
-            () => getLoudnessSummary(document.uri),
-          );
+          const sharedAnalysis = await peekCachedHostDecodeLoudnessPipeline(document.uri);
+          const summary = sharedAnalysis
+            ? await sharedAnalysis.loudnessSummaryPromise
+            : shouldUseSharedHostDecodeLoudness(document.uri)
+              ? await (await getCachedHostDecodeLoudnessPipeline(
+                  document.uri,
+                  () => startDecodeAndSummarizeWithFfmpeg(document.uri),
+                )).loudnessSummaryPromise
+              : await getCachedLoudnessSummary(
+                  document.uri,
+                  () => getLoudnessSummary(document.uri),
+                );
           await webviewPanel.webview.postMessage({
             type: 'loudnessSummaryReady',
             body: {

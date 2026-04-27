@@ -9,7 +9,7 @@ interface LifecycleState {
   analysisWorker: Worker | null;
   analysisWorkerBootstrapUrl: string | null;
   audioTransport: AudioTransport | null;
-  deferredAuxiliaryLoadsLoadToken: number;
+  deferredLoudnessLoadToken: number;
   engineSurfacesPosted: boolean;
   engineUiState: ViewportUiState | null;
   engineWorker: Worker | null;
@@ -30,6 +30,8 @@ interface LifecycleState {
   pendingAnalysisSession: unknown | null;
   resolveAnalysisRuntimeReady: (() => void) | null;
   selectionDrag: unknown | null;
+  sourceFetchController: AbortController | null;
+  mediaMetadataLoadToken: number;
   spectrogramCanvas: HTMLCanvasElement | null;
   spectrogramConfigApplyTimer: number | null;
   spectrogramConfigPersistPending: boolean;
@@ -150,7 +152,8 @@ export function createAudioscopeLifecycleController({
     state.analysis = null;
     state.pendingAnalysisSession = null;
     state.initialWaveformReadyLoadToken = 0;
-    state.deferredAuxiliaryLoadsLoadToken = 0;
+    state.deferredLoudnessLoadToken = 0;
+    state.mediaMetadataLoadToken = 0;
     state.selectionDrag = null;
     state.loopHandleDrag = null;
     state.engineUiState = null;
@@ -158,6 +161,8 @@ export function createAudioscopeLifecycleController({
     state.hoverState.waveform = null;
     state.hoverState.spectrogram = null;
     state.lastAppliedTransportCommandSerial = 0;
+    state.sourceFetchController?.abort();
+    state.sourceFetchController = null;
     hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
     hideSurfaceHoverTooltip(elements.spectrogramHoverTooltip);
     hideWaveformSampleMarker();

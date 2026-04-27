@@ -12,6 +12,7 @@ struct ComputeParams {
 @group(0) @binding(1) var<storage, read> pcmSamples: array<f32>;
 @group(0) @binding(2) var<storage, read_write> outputSpectrum: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read> windowCoefficients: array<f32>;
+@group(0) @binding(4) var<storage, read> centerSamples: array<i32>;
 
 @compute @workgroup_size(64)
 fn prepareSpectrogramInput(
@@ -31,9 +32,7 @@ fn prepareSpectrogramInput(
 
   let columnIndex = linearIndex / fftSize;
   let sampleOffset = linearIndex % fftSize;
-  let columnStep = params.timing.y / f32(max(columnCount, 1u));
-  let centerTime = params.timing.x + ((f32(columnIndex) + 0.5) * columnStep);
-  let centerSample = i32(round(centerTime * params.timing.z));
+  let centerSample = centerSamples[columnIndex];
   let fftSizeI32 = i32(fftSize);
   let sampleOffsetI32 = i32(sampleOffset);
   let decimationFactorI32 = i32(decimationFactor);
@@ -96,7 +95,6 @@ fn complexMul(left: vec2<f32>, right: vec2<f32>) -> vec2<f32> {
 @compute @workgroup_size(64)
 fn runSpectrogramFftStage(
   @builtin(global_invocation_id) globalId: vec3<u32>,
-  @builtin(num_workgroups) numWorkgroups: vec3<u32>,
 ) {
   let fftSize = params.header0.x;
   let columnCount = params.header0.y;
@@ -104,24 +102,21 @@ fn runSpectrogramFftStage(
   let q = 1u << stageIndex;
   let l = fftSize >> (stageIndex + 1u);
   let butterfliesPerColumn = fftSize / 2u;
-  let totalButterflies = butterfliesPerColumn * columnCount;
-  let butterflyIndex = globalId.x + (globalId.y * numWorkgroups.x * 64u);
+  let columnIndex = globalId.y;
+  let butterflyIndex = globalId.x;
 
-  if (butterflyIndex >= totalButterflies || l == 0u) {
+  if (columnIndex >= columnCount || butterflyIndex >= butterfliesPerColumn || l == 0u) {
     return;
   }
 
-  let columnIndex = butterflyIndex / butterfliesPerColumn;
-  let localIndex = butterflyIndex % butterfliesPerColumn;
-  let j = localIndex / l;
-  let k = localIndex % l;
-  let halfFftSize = max(1u, fftSize / 2u);
+  let j = butterflyIndex / l;
+  let k = butterflyIndex % l;
   let columnBase = columnIndex * fftSize;
   let evenIndex = columnBase + ((2u * j * l) + k);
   let oddIndex = evenIndex + l;
   let outputEvenIndex = columnBase + ((j * l) + k);
   let outputOddIndex = columnBase + (((j + q) * l) + k);
-  let baseTwiddle = twiddleFactors[(stageIndex * halfFftSize) + j];
+  let baseTwiddle = twiddleFactors[((1u << stageIndex) - 1u) + j];
   let twiddle = vec2<f32>(baseTwiddle.x, -baseTwiddle.y);
   let evenValue = sourceSpectrum[evenIndex];
   let oddValue = sourceSpectrum[oddIndex];
@@ -134,6 +129,7 @@ fn runSpectrogramFftStage(
 
 export const WEBGPU_SPECTROGRAM_RENDER_SHADER = /* wgsl */`
 ${WEBGPU_PALETTE_SHADER_HELPERS}
+const SPECTROGRAM_REDUCTION_SIZE: u32 = 32u;
 
 struct ComputeParams {
   header0: vec4<u32>,
@@ -159,14 +155,21 @@ struct RowBand {
 @group(0) @binding(3) var<storage, read> rowBands: array<RowBand>;
 @group(0) @binding(4) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
-@compute @workgroup_size(8, 8)
-fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
-  let columnIndex = globalId.x;
-  let rowIndex = globalId.y;
+var<workgroup> partialEnergy: array<f32, SPECTROGRAM_REDUCTION_SIZE>;
+var<workgroup> partialWeight: array<f32, SPECTROGRAM_REDUCTION_SIZE>;
+
+@compute @workgroup_size(32, 1, 1)
+fn renderSpectrogramTexture(
+  @builtin(workgroup_id) workgroupId: vec3<u32>,
+  @builtin(local_invocation_id) localId: vec3<u32>,
+) {
+  let columnIndex = workgroupId.x;
+  let rowIndex = workgroupId.y;
   let fftSize = params.header0.x;
   let columnCount = params.header0.y;
   let rowCount = params.header0.z;
   let useLowFrequencyEnhancement = params.header1.w != 0u;
+  let localIndex = localId.x;
 
   if (columnIndex >= columnCount || rowIndex >= rowCount) {
     return;
@@ -176,14 +179,14 @@ fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) 
   let useEnhancedBand = useLowFrequencyEnhancement && rowBand.useEnhanced != 0u;
   let spectrumBaseIndex = columnIndex * fftSize;
   let powerScale = params.timing.w;
-  var weightedEnergy = 0.0;
-  var totalWeight = 0.0;
   let startBin = select(rowBand.baseStartBin, rowBand.enhancedStartBin, useEnhancedBand);
   let endBin = select(rowBand.baseEndBin, rowBand.enhancedEndBin, useEnhancedBand);
   let bandSize = max(1u, endBin - startBin);
   let inverseBandSize = 1.0 / f32(bandSize);
-  var centeredPositionTwice = 1.0 - f32(bandSize);
-  var bin = startBin;
+  var centeredPositionTwice = (1.0 - f32(bandSize)) + (2.0 * f32(localIndex));
+  var bin = startBin + localIndex;
+  var weightedEnergy = 0.0;
+  var totalWeight = 0.0;
 
   if (useEnhancedBand) {
     loop {
@@ -195,8 +198,8 @@ fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) 
       let spectrum = enhancedSpectrum[spectrumBaseIndex + bin];
       weightedEnergy += dot(spectrum, spectrum) * (weight * powerScale);
       totalWeight += weight;
-      centeredPositionTwice += 2.0;
-      bin += 1u;
+      centeredPositionTwice += 2.0 * f32(SPECTROGRAM_REDUCTION_SIZE);
+      bin += SPECTROGRAM_REDUCTION_SIZE;
     }
   } else {
     loop {
@@ -208,17 +211,42 @@ fn renderSpectrogramTexture(@builtin(global_invocation_id) globalId: vec3<u32>) 
       let spectrum = baseSpectrum[spectrumBaseIndex + bin];
       weightedEnergy += dot(spectrum, spectrum) * (weight * powerScale);
       totalWeight += weight;
-      centeredPositionTwice += 2.0;
-      bin += 1u;
+      centeredPositionTwice += 2.0 * f32(SPECTROGRAM_REDUCTION_SIZE);
+      bin += SPECTROGRAM_REDUCTION_SIZE;
     }
   }
 
+  partialEnergy[localIndex] = weightedEnergy;
+  partialWeight[localIndex] = totalWeight;
+  workgroupBarrier();
+
+  var reductionStride = SPECTROGRAM_REDUCTION_SIZE / 2u;
+  loop {
+    if (reductionStride == 0u) {
+      break;
+    }
+
+    if (localIndex < reductionStride) {
+      partialEnergy[localIndex] += partialEnergy[localIndex + reductionStride];
+      partialWeight[localIndex] += partialWeight[localIndex + reductionStride];
+    }
+
+    workgroupBarrier();
+    reductionStride = reductionStride / 2u;
+  }
+
+  if (localIndex != 0u) {
+    return;
+  }
+
+  weightedEnergy = partialEnergy[0];
+  totalWeight = partialWeight[0];
   let meanPower = weightedEnergy / max(totalWeight, 1e-8);
   let targetRow = i32((rowCount - 1u) - rowIndex);
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePowerForAnalysis(meanPower, params.header1.y, params.padding.x, params.padding.y, params.padding.z)),
+    paletteColor(normalizePowerForAnalysis(meanPower, params.padding.w, params.padding.y, params.padding.z)),
   );
 }
 `;

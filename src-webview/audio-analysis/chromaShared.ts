@@ -34,24 +34,6 @@ export function getChromaBinAtPosition(positionRatio: number, chromaBinCount = C
   return Math.min(chromaBinCount - 1, Math.max(0, Math.round(normalized * (chromaBinCount - 1))));
 }
 
-export function normalizeChromaColumn(values: Float32Array): Float32Array {
-  let maximumValue = 0;
-  for (let index = 0; index < values.length; index += 1) {
-    maximumValue = Math.max(maximumValue, Math.abs(values[index] ?? 0));
-  }
-
-  if (maximumValue <= 1e-8) {
-    values.fill(0);
-    return values;
-  }
-
-  for (let index = 0; index < values.length; index += 1) {
-    values[index] = (values[index] ?? 0) / maximumValue;
-  }
-
-  return values;
-}
-
 export function buildConstantQFrequencies(
   maximumFrequency: number,
   {

@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import type {
   DecodeFallbackPayload,
+  HostDecodeLoudnessPayload,
+  HostDecodeLoudnessPipeline,
   LoudnessSummaryPayload,
   MediaMetadataPayload,
 } from './externalAudioTools';
@@ -63,21 +65,17 @@ class WeightedLruCache<T> {
   }
 }
 
-const sourceBytesCache = new WeightedLruCache<ArrayBuffer>(8, 128 * 1024 * 1024);
 const metadataCache = new WeightedLruCache<MediaMetadataPayload>(32);
 const loudnessCache = new WeightedLruCache<LoudnessSummaryPayload>(32);
 const decodeFallbackCache = new WeightedLruCache<DecodeFallbackPayload>(4, 256 * 1024 * 1024);
+const hostDecodeLoudnessCache = new WeightedLruCache<HostDecodeLoudnessPayload>(4, 256 * 1024 * 1024);
+const hostDecodeLoudnessPipelineCache = new WeightedLruCache<HostDecodeLoudnessPipeline>(4, 256 * 1024 * 1024);
 
-const pendingSourceBytesLoads = new Map<string, Promise<ArrayBuffer>>();
 const pendingMetadataLoads = new Map<string, Promise<MediaMetadataPayload>>();
 const pendingLoudnessLoads = new Map<string, Promise<LoudnessSummaryPayload>>();
 const pendingDecodeFallbackLoads = new Map<string, Promise<DecodeFallbackPayload>>();
-
-function getExactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy.buffer;
-}
+const pendingHostDecodeLoudnessLoads = new Map<string, Promise<HostDecodeLoudnessPayload>>();
+const pendingHostDecodeLoudnessPipelineLoads = new Map<string, Promise<HostDecodeLoudnessPipeline>>();
 
 function getDecodeFallbackWeight(payload: DecodeFallbackPayload): number {
   if (payload.kind === 'wav') {
@@ -89,6 +87,14 @@ function getDecodeFallbackWeight(payload: DecodeFallbackPayload): number {
     payload.byteLength
       || payload.channelBuffers.reduce((total, buffer) => total + buffer.byteLength, 0),
   );
+}
+
+function getHostDecodeLoudnessWeight(payload: HostDecodeLoudnessPayload): number {
+  return getDecodeFallbackWeight(payload.decodeFallback);
+}
+
+function getHostDecodeLoudnessPipelineWeight(payload: HostDecodeLoudnessPipeline): number {
+  return getDecodeFallbackWeight(payload.decodeFallback);
 }
 
 async function getResourceRevisionKey(resource: vscode.Uri): Promise<string> {
@@ -134,21 +140,6 @@ async function getOrLoadCached<T>(
   return nextLoad;
 }
 
-export async function getCachedSourceAudioBytes(resource: vscode.Uri): Promise<ArrayBuffer> {
-  const cacheKey = await getResourceRevisionKey(resource);
-
-  return getOrLoadCached(
-    cacheKey,
-    sourceBytesCache,
-    pendingSourceBytesLoads,
-    async () => {
-      const bytes = await vscode.workspace.fs.readFile(resource);
-      return getExactArrayBuffer(bytes);
-    },
-    (buffer) => Math.max(1, buffer.byteLength),
-  );
-}
-
 export async function getCachedMediaMetadata(
   resource: vscode.Uri,
   load: () => Promise<MediaMetadataPayload>,
@@ -190,4 +181,41 @@ export async function getCachedDecodeFallback(
     load,
     getDecodeFallbackWeight,
   );
+}
+
+export async function getCachedHostDecodeLoudness(
+  resource: vscode.Uri,
+  load: () => Promise<HostDecodeLoudnessPayload>,
+): Promise<HostDecodeLoudnessPayload> {
+  const cacheKey = await getResourceRevisionKey(resource);
+
+  return getOrLoadCached(
+    cacheKey,
+    hostDecodeLoudnessCache,
+    pendingHostDecodeLoudnessLoads,
+    load,
+    getHostDecodeLoudnessWeight,
+  );
+}
+
+export async function getCachedHostDecodeLoudnessPipeline(
+  resource: vscode.Uri,
+  load: () => Promise<HostDecodeLoudnessPipeline>,
+): Promise<HostDecodeLoudnessPipeline> {
+  const cacheKey = await getResourceRevisionKey(resource);
+
+  return getOrLoadCached(
+    cacheKey,
+    hostDecodeLoudnessPipelineCache,
+    pendingHostDecodeLoudnessPipelineLoads,
+    load,
+    getHostDecodeLoudnessPipelineWeight,
+  );
+}
+
+export async function peekCachedHostDecodeLoudnessPipeline(
+  resource: vscode.Uri,
+): Promise<HostDecodeLoudnessPipeline | undefined> {
+  const cacheKey = await getResourceRevisionKey(resource);
+  return hostDecodeLoudnessPipelineCache.get(cacheKey);
 }

@@ -112,7 +112,13 @@ function applyWaveformGeometryCssVariables(): void {
 
 function createInitialWaveformViewportState() {
   return {
+    activeRenderRange: null as TimeRange | null,
+    activeRenderWidthPx: 0,
+    pendingRenderRange: null as TimeRange | null,
+    pendingRenderWidthPx: 0,
     presentedRange: { end: 0, start: 0 },
+    renderedRange: { end: 0, start: 0 },
+    renderWidthPx: 0,
     targetRange: { end: 0, start: 0 },
   };
 }
@@ -125,6 +131,11 @@ type HoverContext = {
   clientX: number;
   clientY: number;
   requestId: number;
+};
+
+type HoverRequestPoint = {
+  clientX: number;
+  clientY: number;
 };
 
 type TimeRange = {
@@ -207,6 +218,19 @@ type AnalysisWorkerToMainMessage =
         message?: string;
       };
       type: 'error';
+    }
+  | {
+      body: {
+        integratedLufs?: number;
+        maxLufs?: number;
+        minLufs?: number;
+        peakTruePeakDb?: number;
+        refLevel?: number | null;
+        showMomentary?: boolean;
+        showPeak?: boolean;
+        showShortTerm?: boolean;
+      };
+      type: 'loudnessLegend';
     };
 
 type WaveformWorkerToMainMessage =
@@ -234,6 +258,7 @@ type WaveformWorkerToMainMessage =
         generation?: number;
         viewEnd?: number;
         viewStart?: number;
+        width?: number;
       };
       type: 'waveformPresented';
     }
@@ -267,7 +292,7 @@ const state = {
   decodeWorkerBootstrapUrl: null as string | null,
   decodeWorkerPrewarmed: false,
   decodeWorkerReady: false,
-  deferredAuxiliaryLoadsLoadToken: 0,
+  deferredLoudnessLoadToken: 0,
   engineSessionRevision: 0,
   engineUiState: null as ViewportUiState | null,
   engineSurfacesPosted: false,
@@ -281,6 +306,11 @@ const state = {
     spectrogram: 0,
     waveform: 0,
   },
+  hoverFrame: 0,
+  pendingHoverRequests: {
+    spectrogram: null as HoverRequestPoint | null,
+    waveform: null as HoverRequestPoint | null,
+  },
   hoverState: {
     spectrogram: null as HoverContext | null,
     waveform: null as HoverContext | null,
@@ -288,6 +318,7 @@ const state = {
   lastAppliedTransportCommandSerial: 0,
   loadToken: 0,
   loudness: createLoudnessSummaryState('idle'),
+  mediaMetadataLoadToken: 0,
   mediaMetadata: createMediaMetadataState('idle'),
   mediaMetadataDetailOpen: false,
   observedOverviewWidth: 0,
@@ -343,6 +374,13 @@ const state = {
     scalogramRowDensity: DEFAULT_SCALOGRAM_ROW_DENSITY,
     minDecibels: -80,
     overlapRatio: 0.75,
+    loudnessRefPreset: '-14' as string,
+    loudnessRefCustom: -14,
+    loudnessYAxisMode: 'auto' as string,
+    loudnessYAxisMin: -60,
+    loudnessYAxisMax: 0,
+    loudnessCurves: 'both' as string,
+    loudnessShowPeak: false,
   },
   spectrogramConfigApplyTimer: null as number | null,
   spectrogramConfigPersistPending: false,
@@ -474,6 +512,7 @@ function clearFatalStatus(): void {
 function normalizeSpectrogramAnalysisType(value: unknown): SpectrogramAnalysisType {
   return value === 'chroma'
     || value === 'chroma_cqt'
+    || value === 'loudness'
     || value === 'mel'
     || value === 'mfcc'
     || value === 'scalogram'
@@ -487,6 +526,8 @@ function normalizeSpectrogramColormapDistribution(value: unknown): SpectrogramCo
 
 function getSpectrogramAnalysisTypeLabel(analysisType: SpectrogramAnalysisType): string {
   switch (analysisType) {
+    case 'loudness':
+      return 'Loudness';
     case 'mel':
       return 'Mel-Spectrogram';
     case 'mfcc':
@@ -871,11 +912,13 @@ function resetSpectrogramCanvasElement(): HTMLCanvasElement {
 
 async function initializeWaveformSurface(loadToken: number): Promise<void> {
   elements.waveformCanvasHost.replaceChildren();
+  state.waveformViewport = createInitialWaveformViewportState();
 
   const canvas = document.createElement('canvas');
   canvas.className = 'waveform-canvas';
   canvas.style.width = '100%';
   canvas.style.height = '100%';
+  canvas.style.transform = 'translate3d(0, 0, 0)';
   elements.waveformCanvasHost.replaceChildren(canvas);
   state.waveformCanvas = canvas;
   state.engineSurfacesPosted = false;
@@ -1003,9 +1046,15 @@ function applyViewportUiState(uiState: ViewportUiState): void {
       start: uiState.viewport.targetStartFrame / sampleRate,
       end: uiState.viewport.targetEndFrame / sampleRate,
     };
+    state.waveformViewport.renderedRange = {
+      start: uiState.viewport.renderedStartFrame / sampleRate,
+      end: uiState.viewport.renderedEndFrame / sampleRate,
+    };
+    state.waveformViewport.renderWidthPx = Math.max(1, uiState.viewport.renderWidthPx);
   }
 
   renderWaveformUi();
+  syncWaveformCanvasPresentation(uiState);
   requestWaveformRender(uiState);
   renderSpectrogramScale();
   if (nextPresentedRange && !areTimeRangesEqual(previousPresentedRange, nextPresentedRange)) {
@@ -1091,7 +1140,7 @@ function renderWaveformAxis(): void {
     return;
   }
 
-  const renderWidthPx = Math.max(1, uiState.viewport.renderWidthPx);
+  const renderWidthPx = Math.max(1, elements.waveformViewport.clientWidth);
   if (
     state.renderedWaveformAxisWidthPx === renderWidthPx
     && areWaveformAxisTicksEqual(state.renderedWaveformAxisTicks, waveformAxisTicks)
@@ -1268,15 +1317,55 @@ function renderSpectrogramScale(): void {
   state.renderedFrequencyTicks = frequencyTicks;
 }
 
+function updateLoudnessLegendDom(body: {
+  integratedLufs?: number;
+  maxLufs?: number;
+  minLufs?: number;
+  peakTruePeakDb?: number;
+  refLevel?: number | null;
+  showMomentary?: boolean;
+  showPeak?: boolean;
+  showShortTerm?: boolean;
+} | null): void {
+  if (!body) { return; }
+
+  // Reference level label.
+  const ref = body.refLevel;
+  const minL = body.minLufs ?? -60;
+  const maxL = body.maxLufs ?? 0;
+  const refVisible = ref !== null && ref !== undefined && ref >= minL && ref <= maxL;
+  elements.loudnessRefLabel.hidden = !refVisible;
+  if (refVisible) {
+    const pct = ((maxL - ref) / Math.max(1, maxL - minL)) * 100;
+    elements.loudnessRefLabel.style.top = `${pct.toFixed(3)}%`;
+    elements.loudnessRefLabel.textContent = `${ref} LUFS`;
+  }
+
+  elements.loudnessLegendMomentary.hidden = !body.showMomentary;
+  elements.loudnessLegendShortTerm.hidden = !body.showShortTerm;
+  elements.loudnessLegendPeak.hidden = !body.showPeak;
+  if (body.showPeak) {
+    const peakFmt = (body.peakTruePeakDb ?? -100) > -100
+      ? `Peak ${(body.peakTruePeakDb ?? 0).toFixed(1)} dBFS`
+      : 'Peak -\u221E';
+    elements.loudnessLegendPeakText.textContent = peakFmt;
+  }
+  const intFmt = (body.integratedLufs ?? -100) > -100
+    ? `Integrated ${(body.integratedLufs ?? 0).toFixed(1)} LUFS`
+    : 'Integrated -\u221E';
+  elements.loudnessLegendIntegratedText.textContent = intFmt;
+}
+
 function renderSpectrogramMeta(): void {
   const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
   const isChroma = analysisType === 'chroma';
+  const isLoudness = analysisType === 'loudness';
   const supportsScale = analysisType === 'spectrogram';
   const supportsMelBands = analysisType === 'mel';
   const supportsMfccOptions = analysisType === 'mfcc';
   const supportsScalogramOptions = analysisType === 'scalogram';
-  const supportsWindowControl = analysisType !== 'scalogram';
-  const supportsDbWindow = analysisType !== 'mfcc' && !isChroma;
+  const supportsWindowControl = analysisType !== 'scalogram' && !isLoudness;
+  const supportsDbWindow = analysisType !== 'mfcc' && !isChroma && !isLoudness;
   const isScalogram = analysisType === 'scalogram';
   const dbWindow = normalizeSpectrogramDbWindow(
     state.spectrogramConfig.minDecibels,
@@ -1320,8 +1409,8 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramResetTypeButton.setAttribute('aria-label', `Reset ${analysisTypeLabel} settings to defaults`);
   elements.spectrogramResetTypeButton.title = `Reset ${analysisTypeLabel} settings to defaults`;
 
-  elements.spectrogramFftControl.hidden = isScalogram;
-  elements.spectrogramOverlapControl.hidden = false;
+  elements.spectrogramFftControl.hidden = isScalogram || isLoudness;
+  elements.spectrogramOverlapControl.hidden = isLoudness;
   elements.spectrogramWindowControl.hidden = !supportsWindowControl;
   elements.spectrogramScaleControl.hidden = !supportsScale;
   elements.spectrogramMelBandsControl.hidden = !supportsMelBands;
@@ -1329,8 +1418,9 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMfccMelBandsControl.hidden = !supportsMfccOptions;
   elements.spectrogramScalogramOmegaControl.hidden = !supportsScalogramOptions;
   elements.spectrogramDbRangeControl.hidden = !supportsDbWindow;
-  elements.spectrogramFftSelect.disabled = isScalogram || isChroma;
-  elements.spectrogramOverlapSelect.disabled = false;
+  elements.spectrogramDistributionControl.hidden = isLoudness;
+  elements.spectrogramFftSelect.disabled = isScalogram || isChroma || isLoudness;
+  elements.spectrogramOverlapSelect.disabled = isLoudness;
   elements.spectrogramWindowSelect.disabled = !supportsWindowControl;
   elements.spectrogramScaleSelect.disabled = !supportsScale;
   elements.spectrogramMelBandsSelect.disabled = !supportsMelBands;
@@ -1339,6 +1429,35 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramScalogramOmegaSlider.disabled = !supportsScalogramOptions;
   elements.spectrogramMinDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMaxDbSlider.disabled = !supportsDbWindow;
+
+  // Loudness-specific controls.
+  const isYAxisFixed = state.spectrogramConfig.loudnessYAxisMode === 'fixed';
+  elements.loudnessLegend.hidden = !isLoudness;
+  if (!isLoudness) { elements.loudnessRefLabel.hidden = true; }
+  elements.loudnessRefControl.hidden = !isLoudness;
+  elements.loudnessYAxisControl.hidden = !isLoudness;
+  elements.loudnessYRangeControl.hidden = !isLoudness || !isYAxisFixed;
+  elements.loudnessCurvesControl.hidden = !isLoudness;
+  elements.loudnessPeakControl.hidden = !isLoudness;
+  elements.loudnessRefSelect.value = state.spectrogramConfig.loudnessRefPreset;
+  elements.loudnessRefInput.hidden = state.spectrogramConfig.loudnessRefPreset !== 'custom';
+  elements.loudnessRefInput.value = String(state.spectrogramConfig.loudnessRefCustom);
+  elements.loudnessYAxisSelect.value = state.spectrogramConfig.loudnessYAxisMode;
+  elements.loudnessMinLufsSlider.value = String(state.spectrogramConfig.loudnessYAxisMin);
+  elements.loudnessMaxLufsSlider.value = String(state.spectrogramConfig.loudnessYAxisMax);
+  elements.loudnessYRangeValue.textContent = `Min ${state.spectrogramConfig.loudnessYAxisMin} / Max ${state.spectrogramConfig.loudnessYAxisMax} LUFS`;
+  if (isLoudness && isYAxisFixed) {
+    const rangeMin = -70;
+    const rangeMax = 6;
+    const rangeSpan = rangeMax - rangeMin;
+    const startPct = ((state.spectrogramConfig.loudnessYAxisMin - rangeMin) / rangeSpan) * 100;
+    const endPct = ((state.spectrogramConfig.loudnessYAxisMax - rangeMin) / rangeSpan) * 100;
+    elements.loudnessYRangeGroup.style.setProperty('--range-start', `${startPct.toFixed(3)}%`);
+    elements.loudnessYRangeGroup.style.setProperty('--range-end', `${endPct.toFixed(3)}%`);
+  }
+  elements.loudnessCurvesSelect.value = state.spectrogramConfig.loudnessCurves;
+  elements.loudnessPeakSelect.value = state.spectrogramConfig.loudnessShowPeak ? 'show' : 'hide';
+
   renderSpectrogramDbWindowUi(dbWindow);
   setSpectrogramMetaOpen(state.spectrogramMetaOpen);
 }
@@ -1400,6 +1519,16 @@ function getEffectiveSpectrogramRenderConfig() {
     scalogramRowDensity: normalizeSpectrogramScalogramRowDensity(state.spectrogramConfig.scalogramRowDensity),
     minDecibels: dbWindow.minDecibels,
     overlapRatio,
+    loudnessRefLevel: state.spectrogramConfig.loudnessRefPreset === 'off'
+      ? null
+      : state.spectrogramConfig.loudnessRefPreset === 'custom'
+        ? state.spectrogramConfig.loudnessRefCustom
+        : Number(state.spectrogramConfig.loudnessRefPreset),
+    loudnessYAxisMode: state.spectrogramConfig.loudnessYAxisMode,
+    loudnessYAxisMin: state.spectrogramConfig.loudnessYAxisMin,
+    loudnessYAxisMax: state.spectrogramConfig.loudnessYAxisMax,
+    loudnessCurves: state.spectrogramConfig.loudnessCurves,
+    loudnessShowPeak: state.spectrogramConfig.loudnessShowPeak,
   };
 }
 
@@ -1483,6 +1612,15 @@ function resetCurrentSpectrogramTypeToDefaults(): void {
       state.spectrogramConfig.overlapRatio = DEFAULT_SPECTROGRAM_OVERLAP_RATIO;
       state.spectrogramConfig.windowFunction = DEFAULT_SPECTROGRAM_WINDOW_FUNCTION;
       state.spectrogramConfig.scalogramHopSamples = DEFAULT_SCALOGRAM_HOP_SAMPLES;
+      break;
+    case 'loudness':
+      state.spectrogramConfig.loudnessRefPreset = '-14';
+      state.spectrogramConfig.loudnessRefCustom = -14;
+      state.spectrogramConfig.loudnessYAxisMode = 'auto';
+      state.spectrogramConfig.loudnessYAxisMin = -60;
+      state.spectrogramConfig.loudnessYAxisMax = 0;
+      state.spectrogramConfig.loudnessCurves = 'both';
+      state.spectrogramConfig.loudnessShowPeak = false;
       break;
   }
 
@@ -1589,6 +1727,56 @@ function getPresentedRangeSeconds(): TimeRange | null {
   const start = uiState.presentedStartFrame / sampleRate;
   const end = uiState.presentedEndFrame / sampleRate;
   return end > start ? { start, end } : null;
+}
+
+function areWaveformRenderRequestsEqual(
+  leftRange: TimeRange | null,
+  leftWidthPx: number,
+  rightRange: TimeRange | null,
+  rightWidthPx: number,
+): boolean {
+  return areTimeRangesEqual(leftRange, rightRange)
+    && Math.abs(Math.round(leftWidthPx) - Math.round(rightWidthPx)) <= 1;
+}
+
+function syncWaveformCanvasPresentation(uiState: ViewportUiState | null = state.engineUiState): void {
+  const canvas = state.waveformCanvas;
+  if (!canvas || !uiState) {
+    return;
+  }
+  const viewportWidthPx = getWaveformViewportSize().width;
+
+  const sampleRate = uiState.playback.sampleRate || getSampleRate();
+  if (!(sampleRate > 0)) {
+    canvas.style.width = '100%';
+    canvas.style.transform = 'translate3d(0, 0, 0)';
+    return;
+  }
+
+  const visibleStart = uiState.presentedStartFrame / sampleRate;
+  const visibleEnd = uiState.presentedEndFrame / sampleRate;
+  const activeRenderRange = state.waveformViewport.activeRenderRange;
+  const activeRenderWidthPx = Math.max(1, state.waveformViewport.activeRenderWidthPx);
+
+  if (!activeRenderRange || !(activeRenderRange.end > activeRenderRange.start)) {
+    canvas.style.width = '100%';
+    canvas.style.transform = 'translate3d(0, 0, 0)';
+    return;
+  }
+
+  const renderSpan = activeRenderRange.end - activeRenderRange.start;
+  const visibleSpan = Math.max(0, visibleEnd - visibleStart);
+  const widthPx = Math.max(viewportWidthPx, activeRenderWidthPx);
+  const visibleOffsetRatio = renderSpan > 0
+    ? clamp((visibleStart - activeRenderRange.start) / renderSpan, 0, 1)
+    : 0;
+  const maxOffsetPx = Math.max(0, widthPx - viewportWidthPx);
+  const offsetPx = clamp(visibleOffsetRatio * widthPx, 0, maxOffsetPx);
+  const hasBufferedCoverage = renderSpan > visibleSpan && widthPx > viewportWidthPx;
+
+  canvas.style.width = hasBufferedCoverage ? `${widthPx}px` : '100%';
+  canvas.style.height = '100%';
+  canvas.style.transform = hasBufferedCoverage ? `translate3d(${-offsetPx}px, 0, 0)` : 'translate3d(0, 0, 0)';
 }
 
 function expandRange(range: TimeRange, duration: number, factor: number): TimeRange {
@@ -1777,6 +1965,12 @@ function requestSpectrogramOverviewRender(renderConfig = getEffectiveSpectrogram
       scalogramOmega0: renderConfig.scalogramOmega0,
       scalogramRowDensity: renderConfig.scalogramRowDensity,
       windowFunction: renderConfig.windowFunction,
+      loudnessRefLevel: renderConfig.loudnessRefLevel,
+      loudnessYAxisMode: renderConfig.loudnessYAxisMode,
+      loudnessYAxisMin: renderConfig.loudnessYAxisMin,
+      loudnessYAxisMax: renderConfig.loudnessYAxisMax,
+      loudnessCurves: renderConfig.loudnessCurves,
+      loudnessShowPeak: renderConfig.loudnessShowPeak,
     },
   });
 }
@@ -1873,6 +2067,12 @@ function syncSpectrogramView({ force = false } = {}): void {
       scalogramRowDensity: renderConfig.scalogramRowDensity,
       minDecibels: renderConfig.minDecibels,
       overlapRatio: renderConfig.overlapRatio,
+      loudnessRefLevel: renderConfig.loudnessRefLevel,
+      loudnessYAxisMode: renderConfig.loudnessYAxisMode,
+      loudnessYAxisMin: renderConfig.loudnessYAxisMin,
+      loudnessYAxisMax: renderConfig.loudnessYAxisMax,
+      loudnessCurves: renderConfig.loudnessCurves,
+      loudnessShowPeak: renderConfig.loudnessShowPeak,
       pixelHeight,
       pixelWidth: requestPixelWidth,
       requestEnd: requestRange.end,
@@ -2002,8 +2202,37 @@ function requestSampleInfoAtClientPoint(surface: SurfaceKind, clientX: number, c
   });
 }
 
+function flushPendingSampleInfoRequests(): void {
+  const waveformRequest = state.pendingHoverRequests.waveform;
+  const spectrogramRequest = state.pendingHoverRequests.spectrogram;
+  state.pendingHoverRequests.waveform = null;
+  state.pendingHoverRequests.spectrogram = null;
+
+  if (waveformRequest) {
+    requestSampleInfoAtClientPoint('waveform', waveformRequest.clientX, waveformRequest.clientY);
+  }
+  if (spectrogramRequest) {
+    requestSampleInfoAtClientPoint('spectrogram', spectrogramRequest.clientX, spectrogramRequest.clientY);
+  }
+}
+
+function scheduleSampleInfoRequestAtClientPoint(surface: SurfaceKind, clientX: number, clientY: number): void {
+  state.pendingHoverRequests[surface] = {
+    clientX,
+    clientY,
+  };
+  if (state.hoverFrame) {
+    return;
+  }
+
+  state.hoverFrame = window.requestAnimationFrame(() => {
+    state.hoverFrame = 0;
+    flushPendingSampleInfoRequests();
+  });
+}
+
 function requestSampleInfo(surface: SurfaceKind, event: PointerEvent): void {
-  requestSampleInfoAtClientPoint(surface, event.clientX, event.clientY);
+  scheduleSampleInfoRequestAtClientPoint(surface, event.clientX, event.clientY);
 }
 
 function refreshHoveredSampleInfo(surface: SurfaceKind): void {
@@ -2012,7 +2241,17 @@ function refreshHoveredSampleInfo(surface: SurfaceKind): void {
     return;
   }
 
-  requestSampleInfoAtClientPoint(surface, hover.clientX, hover.clientY);
+  scheduleSampleInfoRequestAtClientPoint(surface, hover.clientX, hover.clientY);
+}
+
+function clearPendingSampleInfoRequest(surface: SurfaceKind): void {
+  state.pendingHoverRequests[surface] = null;
+  if (state.pendingHoverRequests.waveform || state.pendingHoverRequests.spectrogram || !state.hoverFrame) {
+    return;
+  }
+
+  window.cancelAnimationFrame(state.hoverFrame);
+  state.hoverFrame = 0;
 }
 
 function refreshHoveredSampleInfos(): void {
@@ -2021,12 +2260,14 @@ function refreshHoveredSampleInfos(): void {
 }
 
 function hideWaveformHoverTooltip(): void {
+  clearPendingSampleInfoRequest('waveform');
   state.hoverState.waveform = null;
   hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
   hideWaveformSampleMarker();
 }
 
 function hideSpectrogramHoverTooltip(): void {
+  clearPendingSampleInfoRequest('spectrogram');
   state.hoverState.spectrogram = null;
   hideSurfaceHoverTooltip(elements.spectrogramHoverTooltip);
 }
@@ -2281,6 +2522,11 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
     return;
   }
 
+  if (message?.type === 'loudnessLegend') {
+    updateLoudnessLegendDom(message.body);
+    return;
+  }
+
   if (message?.type === 'error') {
     setAnalysisStatus(`Spectrogram failed: ${message.body?.message || 'Unknown worker error.'}`, true);
   }
@@ -2294,7 +2540,7 @@ function handleWaveformSurfaceReady(): void {
   }
 
   state.initialWaveformReadyLoadToken = loadToken;
-  startDeferredAuxiliaryLoads(loadToken, state.activeFile);
+  startDeferredLoudnessLoad(loadToken, state.activeFile);
   void startDeferredAnalysisSession(loadToken)
     .catch((error) => {
       if (loadToken !== state.loadToken) {
@@ -2320,6 +2566,17 @@ function handleWaveformWorkerMessage(loadToken: number, message: WaveformWorkerT
       requestWaveformRender();
       return;
     case 'waveformPresented':
+      state.waveformViewport.activeRenderRange = {
+        start: Number(message.body?.viewStart) || 0,
+        end: Number(message.body?.viewEnd) || 0,
+      };
+      state.waveformViewport.activeRenderWidthPx = Math.max(
+        1,
+        Math.round(Number(message.body?.width) || state.waveformViewport.renderWidthPx || 1),
+      );
+      state.waveformViewport.pendingRenderRange = null;
+      state.waveformViewport.pendingRenderWidthPx = 0;
+      syncWaveformCanvasPresentation();
       handleWaveformSurfaceReady();
       return;
     case 'error':
@@ -2360,19 +2617,43 @@ function requestWaveformRender(uiState: ViewportUiState | null = state.engineUiS
   }
 
   const waveformSize = getWaveformViewportSize();
-  const viewStart = uiState.viewport.targetStartFrame / sampleRate;
-  const viewEnd = uiState.viewport.targetEndFrame / sampleRate;
+  const renderWidthPx = Math.max(1, uiState.viewport.renderWidthPx || waveformSize.width);
+  const renderRange: TimeRange = {
+    start: uiState.viewport.renderedStartFrame / sampleRate,
+    end: uiState.viewport.renderedEndFrame / sampleRate,
+  };
+  if (!(renderRange.end > renderRange.start)) {
+    return;
+  }
+
+  if (areWaveformRenderRequestsEqual(
+    state.waveformViewport.activeRenderRange,
+    state.waveformViewport.activeRenderWidthPx,
+    renderRange,
+    renderWidthPx,
+  ) || areWaveformRenderRequestsEqual(
+    state.waveformViewport.pendingRenderRange,
+    state.waveformViewport.pendingRenderWidthPx,
+    renderRange,
+    renderWidthPx,
+  )) {
+    syncWaveformCanvasPresentation(uiState);
+    return;
+  }
+
   state.waveformRenderGeneration += 1;
+  state.waveformViewport.pendingRenderRange = renderRange;
+  state.waveformViewport.pendingRenderWidthPx = renderWidthPx;
   state.waveformWorker.postMessage({
     type: 'renderWaveformView',
     body: {
       generation: state.waveformRenderGeneration,
       height: waveformSize.height,
       renderScale: DISPLAY_PIXEL_RATIO,
-      viewEnd,
-      viewStart,
-      visibleSpan: Math.max(0, viewEnd - viewStart),
-      width: waveformSize.width,
+      viewEnd: renderRange.end,
+      viewStart: renderRange.start,
+      visibleSpan: Math.max(0, renderRange.end - renderRange.start),
+      width: renderWidthPx,
     },
   });
 }
@@ -2566,7 +2847,7 @@ const {
   acceptDecodeFallbackResult,
   loadAudioFile,
   rejectDecodeFallbackRequest,
-  startDeferredAuxiliaryLoads,
+  startDeferredLoudnessLoad,
 } = createAudioscopeLoadController({
   audioTransportProcessorScriptUri,
   createModuleWorker,
@@ -2957,6 +3238,52 @@ function attachUiEvents(): void {
     if (!state.spectrogramMetaOpen) {
       scheduleKeyboardSurfaceFocus();
     }
+  });
+
+  // Loudness controls.
+  elements.loudnessRefSelect.addEventListener('change', () => {
+    state.spectrogramConfig.loudnessRefPreset = elements.loudnessRefSelect.value;
+    elements.loudnessRefInput.hidden = elements.loudnessRefSelect.value !== 'custom';
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.loudnessRefInput.addEventListener('change', () => {
+    state.spectrogramConfig.loudnessRefCustom = Math.max(-70, Math.min(6, Number(elements.loudnessRefInput.value) || -14));
+    elements.loudnessRefInput.value = String(state.spectrogramConfig.loudnessRefCustom);
+    refreshSpectrogramAnalysisConfig();
+  });
+  elements.loudnessYAxisSelect.addEventListener('change', () => {
+    state.spectrogramConfig.loudnessYAxisMode = elements.loudnessYAxisSelect.value;
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.loudnessMinLufsSlider.addEventListener('input', () => {
+    let min = Number(elements.loudnessMinLufsSlider.value);
+    let max = state.spectrogramConfig.loudnessYAxisMax;
+    if (min >= max) { max = Math.min(6, min + 5); }
+    state.spectrogramConfig.loudnessYAxisMin = min;
+    state.spectrogramConfig.loudnessYAxisMax = max;
+    renderSpectrogramMeta();
+    scheduleSpectrogramConfigRefresh();
+  });
+  elements.loudnessMaxLufsSlider.addEventListener('input', () => {
+    let min = state.spectrogramConfig.loudnessYAxisMin;
+    let max = Number(elements.loudnessMaxLufsSlider.value);
+    if (max <= min) { min = Math.max(-70, max - 5); }
+    state.spectrogramConfig.loudnessYAxisMin = min;
+    state.spectrogramConfig.loudnessYAxisMax = max;
+    renderSpectrogramMeta();
+    scheduleSpectrogramConfigRefresh();
+  });
+  elements.loudnessCurvesSelect.addEventListener('change', () => {
+    state.spectrogramConfig.loudnessCurves = elements.loudnessCurvesSelect.value;
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.loudnessPeakSelect.addEventListener('change', () => {
+    state.spectrogramConfig.loudnessShowPeak = elements.loudnessPeakSelect.value === 'show';
+    refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
   });
 
   elements.seekBackward.addEventListener('click', () => seekBy(-5));

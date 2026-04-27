@@ -1,6 +1,7 @@
 export type WaveformPlotMode = 'envelope' | 'raw';
 export type SpectrogramAnalysisType =
   | 'chroma'
+  | 'loudness'
   | 'mel'
   | 'mfcc'
   | 'scalogram'

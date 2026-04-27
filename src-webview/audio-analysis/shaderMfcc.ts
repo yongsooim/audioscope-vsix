@@ -43,6 +43,11 @@ fn computeMfccMelValues(@builtin(global_invocation_id) globalId: vec3<u32>) {
 `;
 
 export const WEBGPU_MFCC_RENDER_SHADER = /* wgsl */`
+const MFCC_COLUMN_TILE_SIZE: u32 = 4u;
+const MFCC_COEFFICIENT_TILE_SIZE: u32 = 8u;
+const MFCC_WORKGROUP_SIZE: u32 = MFCC_COLUMN_TILE_SIZE * MFCC_COEFFICIENT_TILE_SIZE;
+const MFCC_MAX_MEL_BANDS: u32 = 512u;
+
 struct ComputeParams {
   header0: vec4<u32>,
   header1: vec4<u32>,
@@ -55,6 +60,8 @@ struct ComputeParams {
 @group(0) @binding(2) var<storage, read> dctBasis: array<f32>;
 @group(0) @binding(3) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
+var<workgroup> cachedMelDbValues: array<f32, MFCC_COLUMN_TILE_SIZE * MFCC_MAX_MEL_BANDS>;
+
 fn compressCoefficient(value: f32, distributionGamma: f32) -> f32 {
   let contrast = clamp(distributionGamma, 0.2, 2.5);
   let magnitude = abs(value);
@@ -66,25 +73,16 @@ fn compressCoefficient(value: f32, distributionGamma: f32) -> f32 {
   return clamp(value / (magnitude + compression), -1.0, 1.0);
 }
 
-fn mixChannel(startValue: f32, endValue: f32, t: f32) -> f32 {
-  return startValue + ((endValue - startValue) * clamp(t, 0.0, 1.0));
-}
-
 fn writeGradient(startColor: vec3<f32>, endColor: vec3<f32>, t: f32) -> vec4<f32> {
-  return vec4<f32>(
-    mixChannel(startColor.x, endColor.x, t) / 255.0,
-    mixChannel(startColor.y, endColor.y, t) / 255.0,
-    mixChannel(startColor.z, endColor.z, t) / 255.0,
-    1.0,
-  );
+  return vec4<f32>(startColor + ((endColor - startColor) * t), 1.0);
 }
 
 fn mfccPalette(value: f32) -> vec4<f32> {
-  let center = vec3<f32>(8.0, 10.0, 18.0);
-  let negativeMid = vec3<f32>(33.0, 92.0, 180.0);
-  let negativeBright = vec3<f32>(148.0, 225.0, 255.0);
-  let positiveMid = vec3<f32>(190.0, 84.0, 54.0);
-  let positiveBright = vec3<f32>(255.0, 226.0, 138.0);
+  let center = vec3<f32>(8.0 / 255.0, 10.0 / 255.0, 18.0 / 255.0);
+  let negativeMid = vec3<f32>(33.0 / 255.0, 92.0 / 255.0, 180.0 / 255.0);
+  let negativeBright = vec3<f32>(148.0 / 255.0, 225.0 / 255.0, 255.0 / 255.0);
+  let positiveMid = vec3<f32>(190.0 / 255.0, 84.0 / 255.0, 54.0 / 255.0);
+  let positiveBright = vec3<f32>(255.0 / 255.0, 226.0 / 255.0, 138.0 / 255.0);
   let magnitude = sqrt(clamp(abs(value), 0.0, 1.0));
 
   if (value < 0.0) {
@@ -100,26 +98,48 @@ fn mfccPalette(value: f32) -> vec4<f32> {
   return writeGradient(positiveMid, positiveBright, (magnitude - 0.55) / 0.45);
 }
 
-@compute @workgroup_size(8, 8)
-fn renderMfccTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
-  let columnIndex = globalId.x;
-  let coefficientIndex = globalId.y;
+@compute @workgroup_size(MFCC_COLUMN_TILE_SIZE, MFCC_COEFFICIENT_TILE_SIZE)
+fn renderMfccTexture(
+  @builtin(workgroup_id) workgroupId: vec3<u32>,
+  @builtin(local_invocation_id) localId: vec3<u32>,
+) {
   let columnCount = params.header0.y;
   let coefficientCount = params.header0.z;
   let melBandCount = params.header1.x;
+  let columnIndex = (workgroupId.x * MFCC_COLUMN_TILE_SIZE) + localId.x;
+  let coefficientIndex = (workgroupId.y * MFCC_COEFFICIENT_TILE_SIZE) + localId.y;
+  let localLinearIndex = (localId.y * MFCC_COLUMN_TILE_SIZE) + localId.x;
+  let cachedValueCount = MFCC_COLUMN_TILE_SIZE * melBandCount;
+
+  var cachedValueIndex = localLinearIndex;
+  loop {
+    if (cachedValueIndex >= cachedValueCount) {
+      break;
+    }
+
+    let columnOffset = cachedValueIndex / melBandCount;
+    let bandIndex = cachedValueIndex % melBandCount;
+    let cachedColumnIndex = (workgroupId.x * MFCC_COLUMN_TILE_SIZE) + columnOffset;
+    if (cachedColumnIndex < columnCount) {
+      cachedMelDbValues[cachedValueIndex] = melDbValues[(cachedColumnIndex * melBandCount) + bandIndex];
+    } else {
+      cachedMelDbValues[cachedValueIndex] = 0.0;
+    }
+    cachedValueIndex += MFCC_WORKGROUP_SIZE;
+  }
+  workgroupBarrier();
 
   if (columnIndex >= columnCount || coefficientIndex >= coefficientCount) {
     return;
   }
 
-  let melBaseIndex = columnIndex * melBandCount;
+  let melBaseIndex = localId.x * melBandCount;
   let basisBaseIndex = coefficientIndex * melBandCount;
   var coefficient = 0.0;
 
   for (var bandIndex = 0u; bandIndex < melBandCount; bandIndex += 1u) {
-    coefficient += melDbValues[melBaseIndex + bandIndex] * dctBasis[basisBaseIndex + bandIndex];
+    coefficient += cachedMelDbValues[melBaseIndex + bandIndex] * dctBasis[basisBaseIndex + bandIndex];
   }
-
   if (coefficientIndex == 0u) {
     coefficient *= 0.25;
   }

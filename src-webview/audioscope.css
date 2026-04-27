@@ -727,17 +727,27 @@ body {
   left: 0;
   top: 0;
   display: none;
-  width: 7px;
-  height: 7px;
-  border: 1px solid rgba(191, 219, 254, 0.92);
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border: 2px solid rgba(125, 211, 252, 0.98);
   border-radius: 999px;
-  background: rgba(79, 140, 255, 0.92);
+  background: rgba(59, 130, 246, 0.22);
   box-shadow:
-    0 0 0 1px rgba(5, 8, 20, 0.82),
-    0 0 10px rgba(79, 140, 255, 0.3);
+    0 0 0 2px rgba(5, 8, 20, 0.88),
+    0 0 0 5px rgba(59, 130, 246, 0.18),
+    0 0 18px rgba(96, 165, 250, 0.44);
   transform: translate(-50%, -50%);
   z-index: 4;
   pointer-events: none;
+}
+
+.waveform-sample-marker::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.98);
 }
 
 .waveform-loop-handle {
@@ -1236,6 +1246,45 @@ body {
   inset: 0;
   z-index: 2;
   pointer-events: none;
+}
+
+.spectrogram-loudness-ref-label {
+  position: absolute;
+  left: 4px;
+  z-index: 5;
+  pointer-events: none;
+  font: 10px / 1 var(--monospace-font, monospace);
+  color: rgba(255, 180, 50, 0.9);
+  transform: translateY(-100%);
+  padding-bottom: 3px;
+}
+
+.spectrogram-loudness-legend {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 5;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 4px 8px;
+  border-radius: 3px;
+  font: 11px / 1.5 var(--monospace-font, monospace);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.spectrogram-loudness-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.spectrogram-loudness-legend-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 1px;
 }
 
 .spectrogram-guide {

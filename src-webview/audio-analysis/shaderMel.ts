@@ -72,7 +72,7 @@ fn renderMelTexture(@builtin(global_invocation_id) globalId: vec3<u32>) {
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePowerForAnalysis(melPower, ANALYSIS_TYPE_MEL, params.padding.x, params.padding.y, params.padding.z)),
+    paletteColor(normalizePowerForAnalysis(melPower, params.padding.w, params.padding.y, params.padding.z)),
   );
 }
 `;

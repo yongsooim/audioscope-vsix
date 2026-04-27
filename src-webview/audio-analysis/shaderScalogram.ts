@@ -34,7 +34,8 @@ struct ScalogramTap {
 @group(0) @binding(1) var<storage, read> pcmSamples: array<f32>;
 @group(0) @binding(2) var<storage, read> rowMeta: array<ScalogramRow>;
 @group(0) @binding(3) var<storage, read> taps: array<ScalogramTap>;
-@group(0) @binding(4) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(4) var<storage, read> centerSamples: array<i32>;
+@group(0) @binding(5) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
 var<workgroup> partialReal: array<f32, SCALOGRAM_TAP_REDUCTION_SIZE>;
 var<workgroup> partialImaginary: array<f32, SCALOGRAM_TAP_REDUCTION_SIZE>;
@@ -56,9 +57,7 @@ fn renderScalogramTexture(
     return;
   }
 
-  let columnStep = params.timing.y / f32(max(columnCount, 1u));
-  let centerTime = params.timing.x + ((f32(columnIndex) + 0.5) * columnStep);
-  let centerSample = i32(round(centerTime * params.timing.z));
+  let centerSample = centerSamples[columnIndex];
   let row = rowMeta[rowIndex];
   let firstSample = centerSample + row.firstOffset;
   let lastSample = centerSample + row.lastOffset;
@@ -126,7 +125,7 @@ fn renderScalogramTexture(
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePowerForAnalysis(power, ANALYSIS_TYPE_SCALOGRAM, params.padding1.x, params.padding1.y, params.padding1.z)),
+    paletteColor(normalizePowerForAnalysis(power, params.padding1.w, params.padding1.y, params.padding1.z)),
   );
 }
 `;
@@ -153,33 +152,29 @@ fn complexMul(left: vec2<f32>, right: vec2<f32>) -> vec2<f32> {
 @compute @workgroup_size(64)
 fn runScalogramFftStage(
   @builtin(global_invocation_id) globalId: vec3<u32>,
-  @builtin(num_workgroups) numWorkgroups: vec3<u32>,
 ) {
   let fftSize = params.header0.x;
   let stageIndex = params.header0.y;
   let inverseFlag = params.header0.z;
-  let sequenceCount = max(1u, params.header0.w);
+  let sequenceCount = params.header0.w;
   let q = 1u << stageIndex;
   let l = fftSize >> (stageIndex + 1u);
   let butterfliesPerSequence = fftSize / 2u;
-  let globalIndex = globalId.x + (globalId.y * numWorkgroups.x * 64u);
-  let totalButterflies = butterfliesPerSequence * sequenceCount;
+  let sequenceIndex = globalId.y;
+  let butterflyIndex = globalId.x;
 
-  if (globalIndex >= totalButterflies || l == 0u || butterfliesPerSequence == 0u) {
+  if (sequenceIndex >= sequenceCount || butterflyIndex >= butterfliesPerSequence || l == 0u || butterfliesPerSequence == 0u) {
     return;
   }
 
-  let sequenceIndex = globalIndex / butterfliesPerSequence;
-  let butterflyIndex = globalIndex % butterfliesPerSequence;
   let j = butterflyIndex / l;
   let k = butterflyIndex % l;
-  let halfFftSize = max(1u, fftSize / 2u);
   let baseIndex = sequenceIndex * fftSize;
   let evenIndex = (2u * j * l) + k;
   let oddIndex = evenIndex + l;
   let outputEvenIndex = (j * l) + k;
   let outputOddIndex = ((j + q) * l) + k;
-  let baseTwiddle = twiddleFactors[(stageIndex * halfFftSize) + j];
+  let baseTwiddle = twiddleFactors[((1u << stageIndex) - 1u) + j];
   let twiddle = select(
     vec2<f32>(baseTwiddle.x, -baseTwiddle.y),
     baseTwiddle,
@@ -212,7 +207,7 @@ fn multiplyScalogramWavelet(
   let fftSize = params.header0.x;
   let rowStart = params.header0.y;
   let batchCount = params.header0.z;
-  let halfFftSize = max(1u, params.header0.w);
+  let halfFftSize = params.header0.w;
   let globalIndex = globalId.x + (globalId.y * numWorkgroups.x * 64u);
   let totalBins = fftSize * batchCount;
 
@@ -255,7 +250,8 @@ struct ScalogramFftRow {
 @group(0) @binding(0) var<uniform> params: ComputeParams;
 @group(0) @binding(1) var<storage, read> timeDomain: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> rowParams: array<ScalogramFftRow>;
-@group(0) @binding(3) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var<storage, read> centerSamples: array<i32>;
+@group(0) @binding(4) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
 @compute @workgroup_size(64)
 fn renderScalogramFftRow(
@@ -283,9 +279,7 @@ fn renderScalogramFftRow(
     return;
   }
 
-  let columnStep = params.timing.y / f32(max(columnCount, 1u));
-  let centerTime = params.timing.x + ((f32(columnIndex) + 0.5) * columnStep);
-  let sampleIndex = i32(round(centerTime * params.timing.z)) - i32(inputStartSample);
+  let sampleIndex = centerSamples[columnIndex] - i32(inputStartSample);
   let row = rowParams[rowIndex];
   var power = 0.0;
 
@@ -298,7 +292,7 @@ fn renderScalogramFftRow(
   textureStore(
     outputTexture,
     vec2<i32>(i32(columnIndex), targetRow),
-    paletteColor(normalizePowerForAnalysis(power, ANALYSIS_TYPE_SCALOGRAM, params.padding1.x, params.padding1.y, params.padding1.z)),
+    paletteColor(normalizePowerForAnalysis(power, params.padding1.w, params.padding1.y, params.padding1.z)),
   );
 }
 `;

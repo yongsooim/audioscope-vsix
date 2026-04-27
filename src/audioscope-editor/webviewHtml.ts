@@ -8,7 +8,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'interactiveWaveformWorker.js'));
     const decodeWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'embeddedDecodeWorker.js'));
     const decodeBrowserModuleUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_browser_module.js'));
-    const decodeBrowserModuleWasmUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_browser_module.wasm'));
+    const decodeBrowserModuleWasmUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_module.wasm'));
     const audioTransportProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioTransportProcessor.js'));
     const stretchProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'src-webview', 'vendor', 'SignalsmithStretch.mjs'));
 
@@ -113,6 +113,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                       <option value="mfcc">MFCC</option>
                       <option value="scalogram">Scalogram</option>
                       <option value="chroma">Chroma</option>
+                      <option value="loudness">Loudness</option>
                     </select>
                     <button
                       id="spectrogram-reset-type-button"
@@ -238,6 +239,68 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                     <span id="spectrogram-db-range-value" class="spectrogram-control-slider-value">Min -80 / Max 0 dB</span>
                   </span>
                 </div>
+                <label id="spectrogram-loudness-ref-control" class="spectrogram-control" hidden>
+                  <span class="spectrogram-control-label">Ref</span>
+                  <span class="spectrogram-control-inline">
+                    <select id="spectrogram-loudness-ref-select" class="spectrogram-control-select" aria-label="Loudness reference level preset">
+                      <option value="off">Off</option>
+                      <option value="-14" selected>Streaming (-14)</option>
+                      <option value="-16">Apple (-16)</option>
+                      <option value="-23">Broadcast (-23)</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                    <input id="spectrogram-loudness-ref-input" class="spectrogram-control-input" type="number" min="-70" max="6" step="1" value="-14" aria-label="Custom reference level in LUFS" hidden />
+                  </span>
+                </label>
+                <label id="spectrogram-loudness-yaxis-control" class="spectrogram-control" hidden>
+                  <span class="spectrogram-control-label">Y-axis</span>
+                  <select id="spectrogram-loudness-yaxis-select" class="spectrogram-control-select" aria-label="Loudness Y-axis mode">
+                    <option value="auto" selected>Auto</option>
+                    <option value="fixed">Fixed</option>
+                  </select>
+                </label>
+                <div id="spectrogram-loudness-yrange-control" class="spectrogram-control spectrogram-control-slider" hidden>
+                  <span class="spectrogram-control-label">Range</span>
+                  <span id="spectrogram-loudness-yrange-group" class="spectrogram-control-slider-group spectrogram-control-slider-group-dual">
+                    <span class="spectrogram-control-range-dual" aria-hidden="true"></span>
+                    <input
+                      id="spectrogram-loudness-min-lufs-slider"
+                      class="spectrogram-control-range spectrogram-control-range-min"
+                      type="range"
+                      min="-70"
+                      max="6"
+                      step="1"
+                      value="-60"
+                      aria-label="Loudness Y-axis minimum LUFS"
+                    />
+                    <input
+                      id="spectrogram-loudness-max-lufs-slider"
+                      class="spectrogram-control-range spectrogram-control-range-max"
+                      type="range"
+                      min="-70"
+                      max="6"
+                      step="1"
+                      value="0"
+                      aria-label="Loudness Y-axis maximum LUFS"
+                    />
+                    <span id="spectrogram-loudness-yrange-value" class="spectrogram-control-slider-value">Min -60 / Max 0 LUFS</span>
+                  </span>
+                </div>
+                <label id="spectrogram-loudness-curves-control" class="spectrogram-control" hidden>
+                  <span class="spectrogram-control-label">Curves</span>
+                  <select id="spectrogram-loudness-curves-select" class="spectrogram-control-select" aria-label="Loudness curve visibility">
+                    <option value="both" selected>Both</option>
+                    <option value="momentary">Momentary</option>
+                    <option value="shortTerm">Short-term</option>
+                  </select>
+                </label>
+                <label id="spectrogram-loudness-peak-control" class="spectrogram-control" hidden>
+                  <span class="spectrogram-control-label">Peak</span>
+                  <select id="spectrogram-loudness-peak-select" class="spectrogram-control-select" aria-label="Show true peak curve">
+                    <option value="hide" selected>Hide</option>
+                    <option value="show">Show</option>
+                  </select>
+                </label>
               </div>
             </div>
             <div id="spectrogram-hover-tooltip" class="surface-hover-tooltip surface-hover-tooltip-detail" aria-hidden="true"></div>
@@ -247,6 +310,25 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             <div id="spectrogram-loop-start" class="waveform-loop-handle spectrogram-loop-handle" aria-hidden="true"></div>
             <div id="spectrogram-loop-end" class="waveform-loop-handle spectrogram-loop-handle" aria-hidden="true"></div>
             <div id="spectrogram-guides" class="spectrogram-guides" aria-hidden="true"></div>
+            <div id="spectrogram-loudness-ref-label" class="spectrogram-loudness-ref-label" aria-hidden="true" hidden></div>
+            <div id="spectrogram-loudness-legend" class="spectrogram-loudness-legend" aria-hidden="true" hidden>
+              <div id="spectrogram-loudness-legend-momentary" class="spectrogram-loudness-legend-row">
+                <span class="spectrogram-loudness-legend-swatch" style="background:rgba(0,230,120,1)"></span>
+                <span>Momentary (400ms)</span>
+              </div>
+              <div id="spectrogram-loudness-legend-shortterm" class="spectrogram-loudness-legend-row">
+                <span class="spectrogram-loudness-legend-swatch" style="background:rgba(90,150,255,1)"></span>
+                <span>Short-term (3s)</span>
+              </div>
+              <div id="spectrogram-loudness-legend-peak" class="spectrogram-loudness-legend-row" hidden>
+                <span class="spectrogram-loudness-legend-swatch" style="background:rgba(255,80,80,1)"></span>
+                <span id="spectrogram-loudness-legend-peak-text">Peak</span>
+              </div>
+              <div class="spectrogram-loudness-legend-row">
+                <span class="spectrogram-loudness-legend-swatch" style="background:rgba(255,220,130,1)"></span>
+                <span id="spectrogram-loudness-legend-integrated-text">Integrated</span>
+              </div>
+            </div>
             <div id="spectrogram-hit-target" class="spectrogram-hit-target" aria-hidden="true"></div>
           </div>
         </div>

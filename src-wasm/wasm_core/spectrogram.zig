@@ -307,10 +307,18 @@ fn getBandLayoutResource(
         .mel => {
             resource.mel_bands = core.allocator.alloc(core.MelBand, @as(usize, @intCast(band_count))) catch return null;
             mel_analysis.createMelBands(resource.mel_bands, fft_size, core.g_session.sample_rate, min_frequency, max_frequency);
+            const mel_layout = mel_analysis.createMelWeightLayout(resource.mel_bands, fft_size, core.g_session.sample_rate) catch return null;
+            resource.mel_row_offsets = mel_layout.row_offsets;
+            resource.mel_bin_indices = mel_layout.bin_indices;
+            resource.mel_weights = mel_layout.weights;
         },
         .mfcc => {
             resource.mel_bands = core.allocator.alloc(core.MelBand, @as(usize, @intCast(band_count))) catch return null;
             mel_analysis.createMelBands(resource.mel_bands, fft_size, core.g_session.sample_rate, min_frequency, max_frequency);
+            const mel_layout = mel_analysis.createMelWeightLayout(resource.mel_bands, fft_size, core.g_session.sample_rate) catch return null;
+            resource.mel_row_offsets = mel_layout.row_offsets;
+            resource.mel_bin_indices = mel_layout.bin_indices;
+            resource.mel_weights = mel_layout.weights;
             resource.mfcc_basis = core.allocator.alloc(
                 f32,
                 @as(usize, @intCast(row_count)) * @as(usize, @intCast(band_count)),
@@ -548,21 +556,50 @@ fn writePowerSpectrum(resource: *const core.FftResource, power_spectrum: []f32) 
 
 fn computeBandMeanPower(power_spectrum: []const f32, range: core.BandRange) f32 {
     const band_size = core.maxI32(1, range.end_bin - range.start_bin);
-    var weighted_energy: f32 = 0.0;
-    var total_weight: f32 = 0.0;
+    const position_scale = 1.0 / @as(f32, @floatFromInt(band_size));
+    var weighted_energy0: f32 = 0.0;
+    var weighted_energy1: f32 = 0.0;
+    var weighted_energy2: f32 = 0.0;
+    var weighted_energy3: f32 = 0.0;
+    var total_weight0: f32 = 0.0;
+    var total_weight1: f32 = 0.0;
+    var total_weight2: f32 = 0.0;
+    var total_weight3: f32 = 0.0;
     var bin = range.start_bin;
+    var lane: usize = 0;
 
     while (bin < range.end_bin) : (bin += 1) {
         const position = if (band_size == 1)
             0.5
         else
-            (@as(f32, @floatFromInt(bin - range.start_bin)) + 0.5) / @as(f32, @floatFromInt(band_size));
+            (@as(f32, @floatFromInt(bin - range.start_bin)) + 0.5) * position_scale;
         const taper = 1.0 - @abs((position * 2.0) - 1.0);
         const weight = 0.7 + (taper * 0.3);
-        weighted_energy += power_spectrum[@as(usize, @intCast(bin))] * weight;
-        total_weight += weight;
+        const weighted_power = power_spectrum[@as(usize, @intCast(bin))] * weight;
+
+        switch (lane & 3) {
+            0 => {
+                weighted_energy0 += weighted_power;
+                total_weight0 += weight;
+            },
+            1 => {
+                weighted_energy1 += weighted_power;
+                total_weight1 += weight;
+            },
+            2 => {
+                weighted_energy2 += weighted_power;
+                total_weight2 += weight;
+            },
+            else => {
+                weighted_energy3 += weighted_power;
+                total_weight3 += weight;
+            },
+        }
+        lane += 1;
     }
 
+    const weighted_energy = (weighted_energy0 + weighted_energy1) + (weighted_energy2 + weighted_energy3);
+    const total_weight = (total_weight0 + total_weight1) + (total_weight2 + total_weight3);
     return weighted_energy / core.maxF32(total_weight, 1e-8);
 }
 
@@ -786,12 +823,48 @@ fn writePaletteColor(normalized: f32, output: []u8) void {
     output[3] = color[3];
 }
 
+fn clampTileSampleWindow(tile_start_sample: i32, tile_sample_span: i32) struct {
+    sample_span: i32,
+    start_sample: i32,
+} {
+    const max_start_sample = core.maxI32(0, core.g_session.sample_count - 1);
+    const clamped_start_sample = core.clampi32(tile_start_sample, 0, max_start_sample);
+    const requested_end_sample = @as(i64, @intCast(tile_start_sample)) + @as(i64, @intCast(core.maxI32(1, tile_sample_span)));
+    const minimum_end_sample = @as(i64, @intCast(clamped_start_sample + 1));
+    const maximum_end_sample = @as(i64, @intCast(core.maxI32(clamped_start_sample + 1, core.g_session.sample_count)));
+    const clamped_end_sample = @as(i32, @intCast(std.math.clamp(requested_end_sample, minimum_end_sample, maximum_end_sample)));
+
+    return .{
+        .sample_span = clamped_end_sample - clamped_start_sample,
+        .start_sample = clamped_start_sample,
+    };
+}
+
+fn computeColumnCenterSample(
+    tile_start_sample: i32,
+    tile_sample_span: i32,
+    column_offset: i32,
+    column_index: i32,
+    total_column_count: i32,
+) i32 {
+    const safe_total_column_count = core.maxI32(1, total_column_count);
+    const safe_column_offset = core.clampi32(column_offset, 0, safe_total_column_count - 1);
+    const safe_global_column_index = core.clampi32(safe_column_offset + column_index, 0, safe_total_column_count - 1);
+    const numerator = (@as(i64, @intCast((safe_global_column_index * 2) + 1)) * @as(i64, @intCast(core.maxI32(1, tile_sample_span))))
+        + @as(i64, @intCast(safe_total_column_count));
+    const denominator = @as(i64, @intCast(safe_total_column_count * 2));
+    const centered_sample = tile_start_sample + @as(i32, @intCast(@divFloor(numerator, denominator)));
+    return core.clampi32(centered_sample, 0, core.g_session.sample_count - 1);
+}
+
 fn renderStftDerivedTile(
     analysis_type: core.AnalysisType,
     window_function: core.WindowFunction,
     frequency_scale: core.FrequencyScale,
-    tile_start: f64,
-    tile_end: f64,
+    tile_start_sample: i32,
+    tile_sample_span: i32,
+    column_offset: i32,
+    total_column_count: i32,
     column_count: i32,
     row_count: i32,
     mel_band_count: i32,
@@ -804,16 +877,12 @@ fn renderStftDerivedTile(
     max_db: f32,
     output_ptr: usize,
 ) i32 {
-    if (!core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
+    if (column_count <= 0 or total_column_count <= 0 or column_offset < 0 or column_offset + column_count > total_column_count or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
         return 0;
     }
 
     const resource = getFftResource(fft_size, window_function) orelse return 0;
-    const session_duration = @as(f64, core.g_session.duration);
-    const minimum_tile_span = 1.0 / @as(f64, core.g_session.sample_rate);
-    const maximum_tile_start = @max(0.0, session_duration - minimum_tile_span);
-    const clamped_tile_start = core.clampf64(tile_start, 0.0, maximum_tile_start);
-    const clamped_tile_end = core.clampf64(tile_end, clamped_tile_start + minimum_tile_span, session_duration);
+    const tile_window = clampTileSampleWindow(tile_start_sample, tile_sample_span);
     const safe_min_frequency = core.clampf32(min_frequency, core.g_session.min_frequency, core.g_session.max_frequency);
     const safe_max_frequency = core.clampf32(max_frequency, safe_min_frequency, core.g_session.max_frequency);
     if (safe_max_frequency <= safe_min_frequency) {
@@ -830,19 +899,19 @@ fn renderStftDerivedTile(
         safe_max_frequency,
     ) orelse return 0;
     const output = @as([*]u8, @ptrFromInt(output_ptr));
-    const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(clamped_tile_end - clamped_tile_start)));
     const output_width = @as(usize, @intCast(column_count));
     const power_spectrum = resource.power_spectrum;
     const low_power_spectrum = resource.low_power_spectrum;
 
     var column_index: i32 = 0;
     while (column_index < column_count) : (column_index += 1) {
-        const center_ratio = if (column_count == 1)
-            0.5
-        else
-            (@as(f64, @floatFromInt(column_index)) + 0.5) / @as(f64, @floatFromInt(column_count));
-        const center_time = clamped_tile_start + (center_ratio * @as(f64, safe_tile_span));
-        const center_sample = @as(i32, @intFromFloat(@round(center_time * @as(f64, core.g_session.sample_rate))));
+        const center_sample = computeColumnCenterSample(
+            tile_window.start_sample,
+            tile_window.sample_span,
+            column_offset,
+            column_index,
+            total_column_count,
+        );
         const input = resource.input.?;
         const output_buffer = resource.output.?;
         const work_buffer = resource.work.?;
@@ -861,11 +930,11 @@ fn renderStftDerivedTile(
         if (analysis_type == .mfcc) {
             mfcc.writeColumn(
                 power_spectrum,
-                layout.mel_bands,
+                layout.mel_row_offsets,
+                layout.mel_bin_indices,
+                layout.mel_weights,
                 layout.mfcc_basis,
                 @as(usize, @intCast(row_count)),
-                fft_size,
-                core.g_session.sample_rate,
                 distribution_gamma,
                 output,
                 output_width,
@@ -877,11 +946,12 @@ fn renderStftDerivedTile(
         var row: i32 = 0;
         while (row < row_count) : (row += 1) {
             const normalized = switch (analysis_type) {
-                .mel => normalizePowerForDisplay(mel_analysis.computeMelBandPower(
+                .mel => normalizePowerForDisplay(mel_analysis.computeMelBandPowerWeighted(
                     power_spectrum,
-                    layout.mel_bands[@as(usize, @intCast(row))],
-                    fft_size,
-                    core.g_session.sample_rate,
+                    layout.mel_row_offsets,
+                    layout.mel_bin_indices,
+                    layout.mel_weights,
+                    @as(usize, @intCast(row)),
                 ), .mel, distribution_gamma, min_db, max_db),
                 .mfcc => 0.0,
                 .chroma => 0.0,
@@ -908,23 +978,21 @@ fn renderStftDerivedTile(
 }
 
 fn renderChromaTile(
-    tile_start: f64,
-    tile_end: f64,
+    tile_start_sample: i32,
+    tile_sample_span: i32,
+    column_offset: i32,
+    total_column_count: i32,
     column_count: i32,
     row_count: i32,
     window_function: core.WindowFunction,
     distribution_gamma: f32,
     output_ptr: usize,
 ) i32 {
-    if (!core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end)) {
+    if (column_count <= 0 or total_column_count <= 0 or column_offset < 0 or column_offset + column_count > total_column_count) {
         return 0;
     }
 
-    const session_duration = @as(f64, core.g_session.duration);
-    const minimum_tile_span = 1.0 / @as(f64, core.g_session.sample_rate);
-    const maximum_tile_start = @max(0.0, session_duration - minimum_tile_span);
-    const clamped_tile_start = core.clampf64(tile_start, 0.0, maximum_tile_start);
-    const clamped_tile_end = core.clampf64(tile_end, clamped_tile_start + minimum_tile_span, session_duration);
+    const tile_window = clampTileSampleWindow(tile_start_sample, tile_sample_span);
     const safe_max_frequency = core.maxF32(core.cqt_default_fmin * 1.01, core.g_session.max_frequency);
     const cqt_resource = getConstantQResource(safe_max_frequency, core.cqt_default_bins_per_octave, window_function) orelse return 0;
     const layout = getChromaLayoutResource(
@@ -939,18 +1007,18 @@ fn renderChromaTile(
     defer core.allocator.free(cqt_powers);
 
     const output = @as([*]u8, @ptrFromInt(output_ptr));
-    const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(clamped_tile_end - clamped_tile_start)));
     const output_width = @as(usize, @intCast(column_count));
     var chroma_values: [core.chroma_bin_count]f32 = [_]f32{0.0} ** core.chroma_bin_count;
 
     var column_index: i32 = 0;
     while (column_index < column_count) : (column_index += 1) {
-        const center_ratio = if (column_count == 1)
-            0.5
-        else
-            (@as(f64, @floatFromInt(column_index)) + 0.5) / @as(f64, @floatFromInt(column_count));
-        const center_time = clamped_tile_start + (center_ratio * @as(f64, safe_tile_span));
-        const center_sample = @as(i32, @intFromFloat(@round(center_time * @as(f64, core.g_session.sample_rate))));
+        const center_sample = computeColumnCenterSample(
+            tile_window.start_sample,
+            tile_window.sample_span,
+            column_offset,
+            column_index,
+            total_column_count,
+        );
 
         for (cqt_resource.bank.rows, 0..) |*kernel, bin_usize| {
             cqt_powers[bin_usize] = computeScalogramKernelPower(center_sample, kernel);
@@ -978,8 +1046,10 @@ fn renderChromaTile(
 }
 
 fn renderScalogramTile(
-    tile_start: f64,
-    tile_end: f64,
+    tile_start_sample: i32,
+    tile_sample_span: i32,
+    column_offset: i32,
+    total_column_count: i32,
     column_count: i32,
     row_count: i32,
     min_frequency: f32,
@@ -990,15 +1060,11 @@ fn renderScalogramTile(
     omega0: f32,
     output_ptr: usize,
 ) i32 {
-    if (!core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
+    if (column_count <= 0 or total_column_count <= 0 or column_offset < 0 or column_offset + column_count > total_column_count or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency)) {
         return 0;
     }
 
-    const session_duration = @as(f64, core.g_session.duration);
-    const minimum_tile_span = 1.0 / @as(f64, core.g_session.sample_rate);
-    const maximum_tile_start = @max(0.0, session_duration - minimum_tile_span);
-    const clamped_tile_start = core.clampf64(tile_start, 0.0, maximum_tile_start);
-    const clamped_tile_end = core.clampf64(tile_end, clamped_tile_start + minimum_tile_span, session_duration);
+    const tile_window = clampTileSampleWindow(tile_start_sample, tile_sample_span);
     const safe_min_frequency = core.clampf32(min_frequency, core.g_session.min_frequency, core.g_session.max_frequency);
     const safe_max_frequency = core.clampf32(max_frequency, safe_min_frequency, core.g_session.max_frequency);
     if (safe_max_frequency <= safe_min_frequency) {
@@ -1009,18 +1075,18 @@ fn renderScalogramTile(
     const resource = getScalogramResource(row_count, safe_min_frequency, safe_max_frequency, safe_omega0) orelse return 0;
     const kernel_bank = &resource.bank;
     const output = @as([*]u8, @ptrFromInt(output_ptr));
-    const safe_tile_span = core.maxF32(1.0 / core.g_session.sample_rate, @as(f32, @floatCast(clamped_tile_end - clamped_tile_start)));
     const output_width = @as(usize, @intCast(column_count));
     const center_samples = resource.ensureCenterSampleCapacity(column_count) catch return 0;
 
     var column_index: i32 = 0;
     while (column_index < column_count) : (column_index += 1) {
-        const center_ratio = if (column_count == 1)
-            0.5
-        else
-            (@as(f64, @floatFromInt(column_index)) + 0.5) / @as(f64, @floatFromInt(column_count));
-        const center_time = clamped_tile_start + (center_ratio * @as(f64, safe_tile_span));
-        center_samples[@as(usize, @intCast(column_index))] = @as(i32, @intFromFloat(@round(center_time * @as(f64, core.g_session.sample_rate))));
+        center_samples[@as(usize, @intCast(column_index))] = computeColumnCenterSample(
+            tile_window.start_sample,
+            tile_window.sample_span,
+            column_offset,
+            column_index,
+            total_column_count,
+        );
     }
 
     var row_block_start: i32 = 0;
@@ -1098,11 +1164,11 @@ pub export fn wave_sample_mfcc_value_at_frame(
 
     return mfcc.sampleCoefficient(
         resource.power_spectrum,
-        layout.mel_bands,
+        layout.mel_row_offsets,
+        layout.mel_bin_indices,
+        layout.mel_weights,
         layout.mfcc_basis,
         @as(usize, @intCast(coefficient_index)),
-        fft_size,
-        core.g_session.sample_rate,
     );
 }
 
@@ -1172,11 +1238,12 @@ pub export fn wave_sample_analysis_value_at_frame(
 
             if (analysis_type == .mel) {
                 const band = layout.mel_bands[@as(usize, @intCast(row_index))];
-                const power = mel_analysis.computeMelBandPower(
+                const power = mel_analysis.computeMelBandPowerWeighted(
                     resource.power_spectrum,
-                    band,
-                    fft_size,
-                    core.g_session.sample_rate,
+                    layout.mel_row_offsets,
+                    layout.mel_bin_indices,
+                    layout.mel_weights,
+                    @as(usize, @intCast(row_index)),
                 );
                 writeAnalysisSampleOutput(output_ptr, powerToDecibels(power), band.start_frequency, band.end_frequency);
                 return 1;
@@ -1261,8 +1328,10 @@ pub export fn wave_sample_analysis_value_at_frame(
 }
 
 pub export fn wave_render_spectrogram_tile_rgba(
-    tile_start: f64,
-    tile_end: f64,
+    tile_start_sample: i32,
+    tile_sample_span: i32,
+    column_offset: i32,
+    total_column_count: i32,
     column_count: i32,
     row_count: i32,
     mel_band_count: i32,
@@ -1279,7 +1348,7 @@ pub export fn wave_render_spectrogram_tile_rgba(
     window_function_value: i32,
     output_ptr: usize,
 ) i32 {
-    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or decimation_factor <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or !core.isFiniteF32(core.g_session.duration) or core.g_session.sample_rate <= 0.0 or core.g_session.duration <= 0.0 or !core.isFiniteF64(tile_start) or !core.isFiniteF64(tile_end) or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or !core.isFiniteF32(distribution_gamma) or !core.isFiniteF32(min_db) or !core.isFiniteF32(max_db) or !core.isFiniteF32(scalogram_omega0) or tile_end <= tile_start) {
+    if (core.g_session.samples.len == 0 or output_ptr == 0 or column_count <= 0 or row_count <= 0 or decimation_factor <= 0 or total_column_count <= 0 or column_offset < 0 or column_offset + column_count > total_column_count or tile_sample_span <= 0 or !core.isFiniteF32(core.g_session.sample_rate) or !core.isFiniteF32(core.g_session.duration) or core.g_session.sample_rate <= 0.0 or core.g_session.duration <= 0.0 or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or !core.isFiniteF32(distribution_gamma) or !core.isFiniteF32(min_db) or !core.isFiniteF32(max_db) or !core.isFiniteF32(scalogram_omega0)) {
         return 0;
     }
 
@@ -1289,8 +1358,10 @@ pub export fn wave_render_spectrogram_tile_rgba(
 
     return switch (analysis_type) {
         .scalogram => renderScalogramTile(
-            tile_start,
-            tile_end,
+            tile_start_sample,
+            tile_sample_span,
+            column_offset,
+            total_column_count,
             column_count,
             row_count,
             min_frequency,
@@ -1302,8 +1373,10 @@ pub export fn wave_render_spectrogram_tile_rgba(
             output_ptr,
         ),
         .chroma => renderChromaTile(
-            tile_start,
-            tile_end,
+            tile_start_sample,
+            tile_sample_span,
+            column_offset,
+            total_column_count,
             column_count,
             row_count,
             window_function,
@@ -1315,8 +1388,10 @@ pub export fn wave_render_spectrogram_tile_rgba(
                 analysis_type,
                 window_function,
                 frequency_scale,
-                tile_start,
-                tile_end,
+                tile_start_sample,
+                tile_sample_span,
+                column_offset,
+                total_column_count,
                 column_count,
                 row_count,
                 mel_band_count,

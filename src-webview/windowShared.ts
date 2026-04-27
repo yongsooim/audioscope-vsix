@@ -1,12 +1,5 @@
 export type SpectrogramWindowFunction = 'blackman' | 'hamming' | 'hann' | 'rectangular';
 
-export const SPECTROGRAM_WINDOW_FUNCTION_OPTIONS: SpectrogramWindowFunction[] = [
-  'hann',
-  'hamming',
-  'blackman',
-  'rectangular',
-];
-
 export const WINDOW_FUNCTION_CODES: Record<SpectrogramWindowFunction, number> = {
   hann: 0,
   hamming: 1,
@@ -16,19 +9,6 @@ export const WINDOW_FUNCTION_CODES: Record<SpectrogramWindowFunction, number> = 
 
 export function normalizeSpectrogramWindowFunction(value: unknown): SpectrogramWindowFunction {
   return value === 'hamming' || value === 'blackman' || value === 'rectangular' ? value : 'hann';
-}
-
-export function getWindowFunctionLabel(value: SpectrogramWindowFunction): string {
-  switch (value) {
-    case 'hamming':
-      return 'Hamming';
-    case 'blackman':
-      return 'Blackman';
-    case 'rectangular':
-      return 'Rectangular';
-    default:
-      return 'Hann';
-  }
 }
 
 export function getWindowValue(

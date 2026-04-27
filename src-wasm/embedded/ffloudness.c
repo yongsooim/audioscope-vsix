@@ -1,5 +1,6 @@
 #include "config.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,6 +92,11 @@ typedef struct AudioscopeEbur128Context {
     int gauge_type;
     int scale;
 } AudioscopeEbur128Context;
+
+typedef struct ConvertedFrameCache {
+    AVFrame *frame;
+    int allocated_samples;
+} ConvertedFrameCache;
 
 static void print_usage(void) {
     fprintf(stderr, "usage: ffloudness <input>\n");
@@ -228,17 +234,72 @@ static int create_loudness_graph(
     return 0;
 }
 
+static int ensure_converted_frame_capacity(
+    ConvertedFrameCache *cache,
+    const AVChannelLayout *output_layout,
+    int output_sample_rate,
+    int sample_count
+) {
+    int target_samples;
+    int result;
+
+    if (cache->frame == NULL) {
+        cache->frame = av_frame_alloc();
+        if (cache->frame == NULL) {
+            return AVERROR(ENOMEM);
+        }
+    }
+
+    if (cache->allocated_samples < sample_count) {
+        if (cache->allocated_samples > 0 && cache->allocated_samples <= INT_MAX / 2) {
+            target_samples = cache->allocated_samples * 2;
+            if (target_samples < sample_count) {
+                target_samples = sample_count;
+            }
+        } else {
+            target_samples = sample_count;
+        }
+
+        av_frame_unref(cache->frame);
+        cache->frame->format = AV_SAMPLE_FMT_DBL;
+        cache->frame->nb_samples = target_samples;
+        cache->frame->sample_rate = output_sample_rate;
+
+        result = av_channel_layout_copy(&cache->frame->ch_layout, output_layout);
+        if (result < 0) {
+            return result;
+        }
+
+        result = av_frame_get_buffer(cache->frame, 0);
+        if (result < 0) {
+            return result;
+        }
+
+        cache->allocated_samples = target_samples;
+    } else {
+        result = av_frame_make_writable(cache->frame);
+        if (result < 0) {
+            return result;
+        }
+    }
+
+    cache->frame->nb_samples = sample_count;
+    cache->frame->sample_rate = output_sample_rate;
+    return 0;
+}
+
 static int process_decoded_frame(
     AVFrame *decoded_frame,
     SwrContext *resampler,
     const AVChannelLayout *output_layout,
     int output_sample_rate,
     int64_t *output_pts,
+    ConvertedFrameCache *converted_frame_cache,
     AVFilterContext *source_context,
     AVFilterContext *sink_context,
     AVFrame *sink_frame
 ) {
-    AVFrame *converted_frame = NULL;
+    AVFrame *converted_frame;
     int dst_samples;
     int converted_samples;
     int result;
@@ -250,26 +311,17 @@ static int process_decoded_frame(
         AV_ROUND_UP
     );
 
-    converted_frame = av_frame_alloc();
-    if (converted_frame == NULL) {
-        return AVERROR(ENOMEM);
-    }
-
-    converted_frame->format = AV_SAMPLE_FMT_DBL;
-    converted_frame->nb_samples = dst_samples;
-    converted_frame->sample_rate = output_sample_rate;
-    result = av_channel_layout_copy(&converted_frame->ch_layout, output_layout);
+    result = ensure_converted_frame_capacity(
+        converted_frame_cache,
+        output_layout,
+        output_sample_rate,
+        dst_samples
+    );
     if (result < 0) {
-        av_frame_free(&converted_frame);
         return result;
     }
 
-    result = av_frame_get_buffer(converted_frame, 0);
-    if (result < 0) {
-        av_frame_free(&converted_frame);
-        return result;
-    }
-
+    converted_frame = converted_frame_cache->frame;
     converted_samples = swr_convert(
         resampler,
         converted_frame->extended_data,
@@ -278,7 +330,6 @@ static int process_decoded_frame(
         decoded_frame->nb_samples
     );
     if (converted_samples < 0) {
-        av_frame_free(&converted_frame);
         return converted_samples;
     }
 
@@ -287,7 +338,6 @@ static int process_decoded_frame(
     *output_pts += converted_samples;
 
     result = av_buffersrc_add_frame_flags(source_context, converted_frame, AV_BUFFERSRC_FLAG_KEEP_REF);
-    av_frame_free(&converted_frame);
     if (result < 0) {
         return result;
     }
@@ -306,6 +356,7 @@ static int flush_decoder(
     const AVChannelLayout *output_layout,
     int output_sample_rate,
     int64_t *output_pts,
+    ConvertedFrameCache *converted_frame_cache,
     AVFilterContext *source_context,
     AVFilterContext *sink_context,
     AVFrame *decoded_frame,
@@ -333,6 +384,7 @@ static int flush_decoder(
             output_layout,
             output_sample_rate,
             output_pts,
+            converted_frame_cache,
             source_context,
             sink_context,
             sink_frame
@@ -358,6 +410,7 @@ int main(int argc, char **argv) {
     AVFilterContext *buffer_sink_context = NULL;
     SwrContext *resampler = NULL;
     AVChannelLayout output_layout = { 0 };
+    ConvertedFrameCache converted_frame_cache = { 0 };
     AudioscopeEbur128Context *ebur128 = NULL;
     int audio_stream_index;
     int output_sample_rate;
@@ -502,6 +555,7 @@ int main(int argc, char **argv) {
                     &output_layout,
                     output_sample_rate,
                     &output_pts,
+                    &converted_frame_cache,
                     buffer_source_context,
                     buffer_sink_context,
                     sink_frame
@@ -520,6 +574,7 @@ int main(int argc, char **argv) {
             &output_layout,
             output_sample_rate,
             &output_pts,
+            &converted_frame_cache,
             buffer_source_context,
             buffer_sink_context,
             decoded_frame,
@@ -586,6 +641,7 @@ cleanup:
     av_channel_layout_uninit(&output_layout);
     av_packet_free(&packet);
     av_frame_free(&decoded_frame);
+    av_frame_free(&converted_frame_cache.frame);
     av_frame_free(&sink_frame);
     avfilter_graph_free(&filter_graph);
     swr_free(&resampler);

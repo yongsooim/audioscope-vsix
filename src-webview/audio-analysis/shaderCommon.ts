@@ -98,47 +98,16 @@ fn tileFs(input: VertexOutput) -> @location(0) vec4<f32> {
 export const WEBGPU_PALETTE_SHADER_HELPERS = /* wgsl */`
 const LOG10_E: f32 = 0.4342944819032518;
 const DB_LOG_SCALE: f32 = 10.0 * LOG10_E;
-const ANALYSIS_TYPE_SPECTROGRAM: u32 = 0u;
-const ANALYSIS_TYPE_MEL: u32 = 1u;
-const ANALYSIS_TYPE_SCALOGRAM: u32 = 2u;
-const MEL_DISPLAY_MIN_DB: f32 = -92.0;
-const MEL_DISPLAY_GAMMA: f32 = 0.92;
-const SCALOGRAM_DISPLAY_MIN_DB: f32 = -72.0;
-const SCALOGRAM_DISPLAY_GAMMA: f32 = 1.08;
-
-fn displayMinDbForAnalysisType(analysisType: u32) -> f32 {
-  if (analysisType == ANALYSIS_TYPE_MEL) {
-    return MEL_DISPLAY_MIN_DB;
-  }
-  if (analysisType == ANALYSIS_TYPE_SCALOGRAM) {
-    return SCALOGRAM_DISPLAY_MIN_DB;
-  }
-  return -80.0;
-}
-
-fn displayGammaForAnalysisType(analysisType: u32) -> f32 {
-  if (analysisType == ANALYSIS_TYPE_MEL) {
-    return MEL_DISPLAY_GAMMA;
-  }
-  if (analysisType == ANALYSIS_TYPE_SCALOGRAM) {
-    return SCALOGRAM_DISPLAY_GAMMA;
-  }
-  return 1.0;
-}
 
 fn normalizePowerForAnalysis(
   power: f32,
-  analysisType: u32,
-  distributionGamma: f32,
+  effectiveGamma: f32,
   minDb: f32,
-  maxDb: f32,
+  inverseDbSpan: f32,
 ) -> f32 {
   let decibels = log(max(power + 1e-14, 1e-20)) * DB_LOG_SCALE;
-  let clampedMaxDb = max(minDb + 1.0, maxDb);
-  let inverseDbSpan = 1.0 / (clampedMaxDb - minDb);
   let normalized = clamp((decibels - minDb) * inverseDbSpan, 0.0, 1.0);
-  let gamma = max(0.2, displayGammaForAnalysisType(analysisType) * distributionGamma);
-  return pow(normalized, gamma);
+  return pow(normalized, effectiveGamma);
 }
 
 fn paletteColor(normalized: f32) -> vec4<f32> {
@@ -149,27 +118,26 @@ fn paletteColor(normalized: f32) -> vec4<f32> {
 
   if (t < 0.14) {
     localT = t / 0.14;
-    startColor = vec3<f32>(4.0, 4.0, 12.0);
-    endColor = vec3<f32>(34.0, 17.0, 70.0);
+    startColor = vec3<f32>(4.0 / 255.0, 4.0 / 255.0, 12.0 / 255.0);
+    endColor = vec3<f32>(34.0 / 255.0, 17.0 / 255.0, 70.0 / 255.0);
   } else if (t < 0.34) {
     localT = (t - 0.14) / 0.2;
-    startColor = vec3<f32>(34.0, 17.0, 70.0);
-    endColor = vec3<f32>(91.0, 31.0, 126.0);
+    startColor = vec3<f32>(34.0 / 255.0, 17.0 / 255.0, 70.0 / 255.0);
+    endColor = vec3<f32>(91.0 / 255.0, 31.0 / 255.0, 126.0 / 255.0);
   } else if (t < 0.58) {
     localT = (t - 0.34) / 0.24;
-    startColor = vec3<f32>(91.0, 31.0, 126.0);
-    endColor = vec3<f32>(179.0, 68.0, 112.0);
+    startColor = vec3<f32>(91.0 / 255.0, 31.0 / 255.0, 126.0 / 255.0);
+    endColor = vec3<f32>(179.0 / 255.0, 68.0 / 255.0, 112.0 / 255.0);
   } else if (t < 0.82) {
     localT = (t - 0.58) / 0.24;
-    startColor = vec3<f32>(179.0, 68.0, 112.0);
-    endColor = vec3<f32>(248.0, 143.0, 84.0);
+    startColor = vec3<f32>(179.0 / 255.0, 68.0 / 255.0, 112.0 / 255.0);
+    endColor = vec3<f32>(248.0 / 255.0, 143.0 / 255.0, 84.0 / 255.0);
   } else {
     localT = (t - 0.82) / 0.18;
-    startColor = vec3<f32>(248.0, 143.0, 84.0);
-    endColor = vec3<f32>(252.0, 236.0, 176.0);
+    startColor = vec3<f32>(248.0 / 255.0, 143.0 / 255.0, 84.0 / 255.0);
+    endColor = vec3<f32>(252.0 / 255.0, 236.0 / 255.0, 176.0 / 255.0);
   }
 
-  let rgb = (startColor + ((endColor - startColor) * localT)) / 255.0;
-  return vec4<f32>(rgb, 1.0);
+  return vec4<f32>(startColor + ((endColor - startColor) * localT), 1.0);
 }
 `;

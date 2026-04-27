@@ -137,9 +137,10 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
     }
 
     const sourceChannels = this.channelData.length;
+    const lastSourceChannelIndex = Math.max(0, sourceChannels - 1);
     const sourceStep = this.sourceSampleRate / Math.max(1, sampleRate || this.sourceSampleRate);
 
-    for (let frameIndex = 0; frameIndex < quantumLength; frameIndex += 1) {
+    for (let frameIndex = 0; frameIndex < quantumLength;) {
       if (!this.playing) {
         zeroRemainingFrames(output, frameIndex);
         break;
@@ -151,6 +152,14 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
         break;
       }
 
+      const directCopyFrameCount = this.getDirectCopyFrameCount(sourceStep, quantumLength - frameIndex);
+      if (directCopyFrameCount > 0) {
+        this.copyFrameBlock(output, frameIndex, this.positionFrame, directCopyFrameCount, lastSourceChannelIndex);
+        this.positionFrame += directCopyFrameCount;
+        frameIndex += directCopyFrameCount;
+        continue;
+      }
+
       const sampleIndex = Math.max(0, Math.min(this.positionFrame, Math.max(0, this.sourceLength - 1)));
       const baseIndex = Math.floor(sampleIndex);
       const nextIndex = Math.min(this.sourceLength - 1, baseIndex + 1);
@@ -158,7 +167,7 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
 
       for (let channelIndex = 0; channelIndex < output.length; channelIndex += 1) {
         const outputChannel = output[channelIndex];
-        const sourceChannel = this.channelData[Math.min(channelIndex, Math.max(0, sourceChannels - 1))];
+        const sourceChannel = this.channelData[Math.min(channelIndex, lastSourceChannelIndex)];
 
         if (!(sourceChannel instanceof Float32Array) || sourceChannel.length === 0) {
           outputChannel[frameIndex] = 0;
@@ -171,10 +180,59 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
       }
 
       this.advanceFrame(sourceStep);
+      frameIndex += 1;
     }
 
     this.publishState(false);
     return true;
+  }
+
+  getDirectCopyFrameCount(sourceStep: number, maxFrames: number): number {
+    if (sourceStep !== 1 || maxFrames <= 0 || !Number.isInteger(this.positionFrame)) {
+      return 0;
+    }
+
+    const startFrame = this.positionFrame;
+    let availableFrames = this.sourceLength - startFrame - 1;
+
+    if (this.loopEnabled && this.loopEndFrame > this.loopStartFrame) {
+      availableFrames = Math.min(availableFrames, this.loopEndFrame - startFrame - 1);
+    }
+
+    return Math.max(0, Math.min(maxFrames, availableFrames));
+  }
+
+  copyFrameBlock(
+    output: Float32Array[],
+    outputFrameIndex: number,
+    sourceFrameIndex: number,
+    frameCount: number,
+    lastSourceChannelIndex: number,
+  ): void {
+    const sourceStartFrame = Math.trunc(sourceFrameIndex);
+
+    for (let channelIndex = 0; channelIndex < output.length; channelIndex += 1) {
+      const outputChannel = output[channelIndex];
+      const sourceChannel = this.channelData[Math.min(channelIndex, lastSourceChannelIndex)];
+
+      if (!(sourceChannel instanceof Float32Array) || sourceChannel.length === 0) {
+        outputChannel.fill(0, outputFrameIndex, outputFrameIndex + frameCount);
+        continue;
+      }
+
+      const availableFrames = Math.max(0, Math.min(frameCount, sourceChannel.length - sourceStartFrame));
+
+      if (availableFrames > 0) {
+        outputChannel.set(
+          sourceChannel.subarray(sourceStartFrame, sourceStartFrame + availableFrames),
+          outputFrameIndex,
+        );
+      }
+
+      if (availableFrames < frameCount) {
+        outputChannel.fill(0, outputFrameIndex + availableFrames, outputFrameIndex + frameCount);
+      }
+    }
   }
 
   advanceFrame(sourceStep: number): void {
