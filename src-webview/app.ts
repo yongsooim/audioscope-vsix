@@ -237,14 +237,9 @@ type AnalysisWorkerToMainMessage =
     }
   | {
       body: {
-        integratedLufs?: number;
         maxLufs?: number;
         minLufs?: number;
-        peakTruePeakDb?: number;
         refLevel?: number | null;
-        showMomentary?: boolean;
-        showPeak?: boolean;
-        showShortTerm?: boolean;
       };
       type: 'loudnessLegend';
     };
@@ -1419,18 +1414,12 @@ function renderSpectrogramScale(): void {
 }
 
 function updateLoudnessLegendDom(body: {
-  integratedLufs?: number;
   maxLufs?: number;
   minLufs?: number;
-  peakTruePeakDb?: number;
   refLevel?: number | null;
-  showMomentary?: boolean;
-  showPeak?: boolean;
-  showShortTerm?: boolean;
 } | null): void {
   if (!body) { return; }
 
-  // Reference level label.
   const ref = body.refLevel;
   const minL = body.minLufs ?? -60;
   const maxL = body.maxLufs ?? 0;
@@ -1441,20 +1430,6 @@ function updateLoudnessLegendDom(body: {
     elements.loudnessRefLabel.style.top = `${pct.toFixed(3)}%`;
     elements.loudnessRefLabel.textContent = `${ref} LUFS`;
   }
-
-  elements.loudnessLegendMomentary.hidden = !body.showMomentary;
-  elements.loudnessLegendShortTerm.hidden = !body.showShortTerm;
-  elements.loudnessLegendPeak.hidden = !body.showPeak;
-  if (body.showPeak) {
-    const peakFmt = (body.peakTruePeakDb ?? -100) > -100
-      ? `Peak ${(body.peakTruePeakDb ?? 0).toFixed(1)} dBFS`
-      : 'Peak -\u221E';
-    elements.loudnessLegendPeakText.textContent = peakFmt;
-  }
-  const intFmt = (body.integratedLufs ?? -100) > -100
-    ? `Integrated ${(body.integratedLufs ?? 0).toFixed(1)} LUFS`
-    : 'Integrated -\u221E';
-  elements.loudnessLegendIntegratedText.textContent = intFmt;
 }
 
 function renderSpectrogramMeta(): void {
@@ -1541,7 +1516,6 @@ function renderSpectrogramMeta(): void {
   const loudnessRefPreset = normalizeLoudnessRefPreset(state.spectrogramConfig.loudnessRefPreset);
   const loudnessRefCustom = normalizeLoudnessRefCustom(state.spectrogramConfig.loudnessRefCustom);
   const isYAxisFixed = loudnessYAxisMode === 'fixed';
-  elements.loudnessLegend.hidden = !isLoudness;
   if (!isLoudness) { elements.loudnessRefLabel.hidden = true; }
   elements.loudnessRefControl.hidden = !isLoudness;
   elements.loudnessYAxisControl.hidden = !isLoudness;

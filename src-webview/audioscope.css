@@ -1259,34 +1259,6 @@ body {
   padding-bottom: 3px;
 }
 
-.spectrogram-loudness-legend {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  z-index: 5;
-  pointer-events: none;
-  background: rgba(0, 0, 0, 0.55);
-  padding: 4px 8px;
-  border-radius: 3px;
-  font: 11px / 1.5 var(--monospace-font, monospace);
-  color: rgba(255, 255, 255, 0.9);
-}
-
-.spectrogram-loudness-legend-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.spectrogram-loudness-legend-swatch {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  flex-shrink: 0;
-  border-radius: 1px;
-}
-
 .spectrogram-guide {
   position: absolute;
   left: 0;

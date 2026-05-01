@@ -311,24 +311,6 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             <div id="spectrogram-loop-end" class="waveform-loop-handle spectrogram-loop-handle" aria-hidden="true"></div>
             <div id="spectrogram-guides" class="spectrogram-guides" aria-hidden="true"></div>
             <div id="spectrogram-loudness-ref-label" class="spectrogram-loudness-ref-label" aria-hidden="true" hidden></div>
-            <div id="spectrogram-loudness-legend" class="spectrogram-loudness-legend" aria-hidden="true" hidden>
-              <div id="spectrogram-loudness-legend-momentary" class="spectrogram-loudness-legend-row">
-                <span class="spectrogram-loudness-legend-swatch" style="background:rgba(0,230,120,1)"></span>
-                <span>Momentary (400ms)</span>
-              </div>
-              <div id="spectrogram-loudness-legend-shortterm" class="spectrogram-loudness-legend-row">
-                <span class="spectrogram-loudness-legend-swatch" style="background:rgba(90,150,255,1)"></span>
-                <span>Short-term (3s)</span>
-              </div>
-              <div id="spectrogram-loudness-legend-peak" class="spectrogram-loudness-legend-row" hidden>
-                <span class="spectrogram-loudness-legend-swatch" style="background:rgba(255,80,80,1)"></span>
-                <span id="spectrogram-loudness-legend-peak-text">Peak</span>
-              </div>
-              <div class="spectrogram-loudness-legend-row">
-                <span class="spectrogram-loudness-legend-swatch" style="background:rgba(255,220,130,1)"></span>
-                <span id="spectrogram-loudness-legend-integrated-text">Integrated</span>
-              </div>
-            </div>
             <div id="spectrogram-hit-target" class="spectrogram-hit-target" aria-hidden="true"></div>
           </div>
         </div>

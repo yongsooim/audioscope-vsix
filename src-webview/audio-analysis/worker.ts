@@ -2501,15 +2501,10 @@ function paintLoudnessDisplay(context: OffscreenCanvasRenderingContext2D): void 
     );
   }
 
-  // Post legend data to main thread (rendered as DOM, not on canvas).
+  // Post reference-label data to main thread (DOM-rendered overlay).
   self.postMessage({
     type: 'loudnessLegend',
     body: {
-      integratedLufs: loudness.integratedLufs,
-      peakTruePeakDb: loudness.peakTruePeakDb,
-      showMomentary,
-      showShortTerm,
-      showPeak: cfg.showPeak,
       refLevel: cfg.refLevel,
       minLufs,
       maxLufs,
