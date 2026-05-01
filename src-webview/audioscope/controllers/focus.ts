@@ -52,18 +52,10 @@ export function createAudioscopeFocusController() {
     return target.closest('textarea') instanceof HTMLTextAreaElement;
   }
 
-  function preventPointerFocus(event: PointerEvent): void {
-    if (event.pointerType === 'mouse' && event.button !== 0) {
-      return;
-    }
-
-    event.preventDefault();
-  }
-
   return {
+    focusKeyboardSurface,
     initializeKeyboardSurfaceFocus,
     isTextEditableTarget,
-    preventPointerFocus,
     scheduleKeyboardSurfaceFocus,
   };
 }

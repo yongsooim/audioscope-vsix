@@ -415,9 +415,9 @@ const state = {
 };
 
 const {
+  focusKeyboardSurface,
   initializeKeyboardSurfaceFocus,
   isTextEditableTarget,
-  preventPointerFocus,
   scheduleKeyboardSurfaceFocus,
 } = createAudioscopeFocusController();
 
@@ -2449,7 +2449,6 @@ function beginSelectionDrag(event: PointerEvent, target: HTMLElement, surface: S
   if (event.pointerType === 'mouse' && event.button !== 0) {
     return;
   }
-  event.preventDefault();
   target.setPointerCapture(event.pointerId);
   state.selectionDrag = { pointerId: event.pointerId, target };
   sendViewportIntent({
@@ -2457,6 +2456,7 @@ function beginSelectionDrag(event: PointerEvent, target: HTMLElement, surface: S
     pointerRatioX: pointerRatioForEvent(target, event),
     surface,
   });
+  scheduleKeyboardSurfaceFocus();
 }
 
 function updateSelectionDrag(event: PointerEvent, target: HTMLElement, surface: SurfaceKind): void {
@@ -3112,7 +3112,9 @@ function attachUiEvents(): void {
   ];
 
   for (const control of nonFocusableClickControls) {
-    control?.addEventListener('pointerdown', preventPointerFocus);
+    control?.addEventListener('click', () => {
+      focusKeyboardSurface();
+    });
   }
 
   elements.mediaMetadataPanel.addEventListener('mouseenter', () => setMediaMetadataDetailOpen(true));
