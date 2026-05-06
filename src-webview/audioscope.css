@@ -1796,6 +1796,7 @@ body {
   .wave-toolbar-actions {
     justify-content: flex-start;
     flex-wrap: nowrap;
+    min-width: 0;
   }
 
   .wave-toolbar-group {
@@ -1808,7 +1809,7 @@ body {
   }
 
   .transport {
-    grid-template-columns: auto auto auto auto auto minmax(240px, 1fr) auto;
+    grid-template-columns: auto auto auto auto auto minmax(180px, 1fr) auto;
     row-gap: 0;
   }
 
@@ -1831,8 +1832,12 @@ body {
     --viewport-splitter-size: 14px;
   }
 
-  .wave-toolbar-row {
-    gap: 6px;
+  .wave-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: 7px;
+    overflow: visible;
   }
 
   .wave-toolbar-pill,
@@ -1840,32 +1845,64 @@ body {
     font-size: 10px;
   }
 
+  .wave-toolbar-info {
+    width: 100%;
+    overflow: visible;
+  }
+
   .media-metadata-panel {
-    max-width: min(100%, 220px);
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .media-metadata-summary {
+    width: 100%;
   }
 
   .wave-toolbar-actions {
-    width: auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 208px), 1fr));
+    width: 100%;
+    min-width: 0;
+    gap: 6px;
   }
 
   .wave-toolbar-group {
-    width: auto;
+    width: 100%;
+    max-width: 100%;
     justify-content: flex-start;
   }
 
   .wave-toolbar-group-zoom,
   .wave-toolbar-group-follow {
-    width: auto;
+    width: 100%;
+    min-width: 0;
     justify-content: flex-start;
   }
 
+  .wave-toolbar-pill-zoom {
+    flex: 1 1 74px;
+    width: auto;
+  }
+
+  .wave-follow-toggle,
+  .wave-follow-toggle-button {
+    width: 100%;
+  }
+
+  .wave-follow-toggle-button {
+    justify-content: center;
+  }
+
   .wave-toolbar-group-loop {
+    min-width: 0;
     flex-wrap: nowrap;
   }
 
   .wave-toolbar-group-loop #wave-loop-label {
     width: auto;
-    max-width: 112px;
+    max-width: none;
+    flex: 1 1 auto;
   }
 
   .spectrogram-panel {
@@ -1877,6 +1914,117 @@ body {
     width: 44px;
   }
 
+  .transport {
+    grid-template-columns: auto auto auto minmax(0, 1fr);
+    grid-template-areas:
+      "back play forward time"
+      "rate timeline timeline timeline"
+      "loudness loudness loudness loudness";
+    gap: 8px;
+    overflow-x: hidden;
+  }
+
+  #seek-backward {
+    grid-area: back;
+  }
+
+  #play-toggle {
+    grid-area: play;
+  }
+
+  #seek-forward {
+    grid-area: forward;
+  }
+
+  .transport-rate {
+    grid-area: rate;
+    margin-left: 0;
+    justify-self: start;
+  }
+
+  #time-readout {
+    grid-area: time;
+    min-width: 0;
+    justify-self: end;
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  #waveform-overview {
+    grid-area: timeline;
+    grid-column: auto;
+    min-width: 0;
+  }
+
+  #loudness-summary,
+  #analysis-status {
+    grid-area: loudness;
+    grid-column: auto;
+  }
+
+  #loudness-summary {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .loudness-chip {
+    flex: 1 1 92px;
+    min-width: 92px;
+  }
+}
+
+@media (max-width: 420px) {
+  :root {
+    --surface-inline-padding: 8px;
+  }
+
+  .wave-toolbar-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wave-toolbar-group {
+    gap: 4px;
+    padding: 3px 4px;
+  }
+
+  .wave-toolbar-pill {
+    padding-inline: 9px;
+  }
+
+  .wave-tool-button {
+    min-width: 24px;
+    padding-inline: 8px;
+  }
+
+  .wave-tool-button-wide {
+    min-width: 44px;
+  }
+
+  .transport {
+    grid-template-columns: auto auto auto minmax(70px, 1fr);
+    gap: 7px 6px;
+  }
+
+  .transport-button {
+    min-width: 40px;
+    padding-inline: 9px;
+  }
+
+  .play-toggle {
+    min-width: 64px;
+    padding-inline: 14px;
+  }
+
+  .transport-rate {
+    gap: 6px;
+  }
+
+  .transport-rate-button,
+  .transport-rate-select {
+    min-width: 52px;
+    padding-inline: 12px;
+  }
 }
 
 .status-overlay {
