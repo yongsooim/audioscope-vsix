@@ -1,0 +1,15 @@
+{
+  "folders": [
+    {
+      "name": "wave-preview",
+      "path": ".."
+    },
+    {
+      "name": "exampleFiles",
+      "path": "../exampleFiles"
+    }
+  ],
+  "settings": {
+    "audioscope.openSampleOnStartupInDevelopment": true
+  }
+}

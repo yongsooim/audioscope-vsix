@@ -2374,16 +2374,22 @@ function updateTimelineHoverTooltip(event: PointerEvent): void {
     return;
   }
 
-  const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+  const localX = event.clientX - rect.left;
+  const ratio = clamp(localX / rect.width, 0, 1);
   const frame = Math.round(ratio * durationFrames);
-  const tooltipX = clamp(event.clientX - rect.left, 18, Math.max(18, rect.width - 18));
   elements.timelineHoverTooltip.textContent = formatAxisLabel(frame / sampleRate);
-  elements.timelineHoverTooltip.style.left = `${tooltipX}px`;
   elements.timelineHoverTooltip.classList.add('visible');
+  elements.timelineHoverTooltip.setAttribute('aria-hidden', 'false');
+
+  const halfTooltipWidth = (elements.timelineHoverTooltip.offsetWidth || 0) / 2;
+  const edgePadding = Math.max(8, halfTooltipWidth);
+  const tooltipX = clamp(localX, edgePadding, Math.max(edgePadding, rect.width - edgePadding));
+  elements.timelineHoverTooltip.style.left = `${tooltipX}px`;
 }
 
 function hideTimelineHoverTooltip(): void {
   elements.timelineHoverTooltip.classList.remove('visible');
+  elements.timelineHoverTooltip.setAttribute('aria-hidden', 'true');
 }
 
 function getWaveformViewportSize(): { height: number; width: number } {
@@ -2633,7 +2639,6 @@ function handleWaveformSurfaceReady(): void {
   }
 
   state.initialWaveformReadyLoadToken = loadToken;
-  startDeferredLoudnessLoad(loadToken, state.activeFile);
   void startDeferredAnalysisSession(loadToken)
     .catch((error) => {
       if (loadToken !== state.loadToken) {
@@ -2940,7 +2945,6 @@ const {
   acceptDecodeFallbackResult,
   loadAudioFile,
   rejectDecodeFallbackRequest,
-  startDeferredLoudnessLoad,
 } = createAudioscopeLoadController({
   audioTransportProcessorScriptUri,
   createModuleWorker,

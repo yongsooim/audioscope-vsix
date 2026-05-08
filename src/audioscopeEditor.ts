@@ -6,15 +6,13 @@ import {
   getExternalToolStatus,
   getLoudnessSummary,
   getMediaMetadata,
-  startDecodeAndSummarizeWithFfmpeg,
   type AudioscopePayload,
 } from './externalAudioTools';
+import { prewarmEmbeddedDirectDecodeModule } from './embeddedMediaTools';
 import {
   getCachedDecodeFallback,
-  getCachedHostDecodeLoudnessPipeline,
   getCachedLoudnessSummary,
   getCachedMediaMetadata,
-  peekCachedHostDecodeLoudnessPipeline,
 } from './mediaHostCache';
 import { DEFAULT_SPECTROGRAM_DEFAULTS } from './audioscope-editor/constants';
 import { AudioscopeDocument } from './audioscope-editor/document';
@@ -106,6 +104,9 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
       return externalToolStatusPromise;
     };
     void getOrStartExternalToolStatus();
+    if (shouldUseSharedHostDecodeLoudness(document.uri)) {
+      void prewarmEmbeddedDirectDecodeModule().catch(() => {});
+    }
 
     const postAudioPayload = async (): Promise<void> => {
       const payload = await this.buildPayload(document, webviewPanel.webview);
@@ -173,21 +174,10 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         const loadToken = Number(message.body?.loadToken) || 0;
 
         try {
-          let fallback;
-
-          try {
-            const sharedAnalysis = await getCachedHostDecodeLoudnessPipeline(
-              document.uri,
-              () => startDecodeAndSummarizeWithFfmpeg(document.uri),
-            );
-            fallback = sharedAnalysis.decodeFallback;
-            void sharedAnalysis.loudnessSummaryPromise.catch(() => {});
-          } catch {
-            fallback = await getCachedDecodeFallback(
-              document.uri,
-              () => decodeWithFfmpeg(document.uri),
-            );
-          }
+          const fallback = await getCachedDecodeFallback(
+            document.uri,
+            () => decodeWithFfmpeg(document.uri),
+          );
 
           await webviewPanel.webview.postMessage({
             type: 'decodeFallbackReady',
@@ -214,18 +204,10 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         const loadToken = Number(message.body?.loadToken) || 0;
 
         try {
-          const sharedAnalysis = await peekCachedHostDecodeLoudnessPipeline(document.uri);
-          const summary = sharedAnalysis
-            ? await sharedAnalysis.loudnessSummaryPromise
-            : shouldUseSharedHostDecodeLoudness(document.uri)
-              ? await (await getCachedHostDecodeLoudnessPipeline(
-                  document.uri,
-                  () => startDecodeAndSummarizeWithFfmpeg(document.uri),
-                )).loudnessSummaryPromise
-              : await getCachedLoudnessSummary(
-                  document.uri,
-                  () => getLoudnessSummary(document.uri),
-                );
+          const summary = await getCachedLoudnessSummary(
+            document.uri,
+            () => getLoudnessSummary(document.uri),
+          );
           await webviewPanel.webview.postMessage({
             type: 'loudnessSummaryReady',
             body: {

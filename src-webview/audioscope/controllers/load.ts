@@ -834,8 +834,11 @@ export function createAudioscopeLoadController({
     state.waveformSurfaceReadyPromise = initializeWaveformSurface(loadToken);
     resetSpectrogramCanvasElement();
     state.spectrogramSurfaceReadyPromise = null;
-    prewarmDecodeWorker(loadToken);
+    if (!shouldPreferHostDecodeBeforeFetch(payload)) {
+      prewarmDecodeWorker(loadToken);
+    }
     startMediaMetadataLoad(loadToken, payload);
+    startDeferredLoudnessLoad(loadToken, payload);
     syncTransport();
     renderWaveformUi();
     renderSpectrogramScale();
@@ -851,6 +854,5 @@ export function createAudioscopeLoadController({
     prewarmDecodeWorker,
     rejectDecodeFallbackRequest,
     requestDecodeFallback,
-    startDeferredLoudnessLoad,
   };
 }

@@ -267,10 +267,21 @@ async function loadDirectDecodeModule(): Promise<DirectDecodeModule> {
       printErr: (message: unknown) => {
         directDecodeLogMessages.push(String(message ?? ''));
       },
+    }).catch((error) => {
+      directDecodeModulePromise = null;
+      throw error;
     });
   }
 
   return directDecodeModulePromise;
+}
+
+export async function prewarmEmbeddedDirectDecodeModule(): Promise<void> {
+  if (!hasDirectDecodeModule()) {
+    return;
+  }
+
+  await loadDirectDecodeModule();
 }
 
 function allocateUtf8(module: DirectDecodeModule, value: string): number {
@@ -292,6 +303,12 @@ function enqueueDirectDecodeTask<T>(task: () => Promise<T>): Promise<T> {
   const nextTask = directDecodeQueue.then(task, task);
   directDecodeQueue = nextTask.then(() => undefined, () => undefined);
   return nextTask;
+}
+
+function yieldToHostEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 function copyToArrayBuffer(bytes: Uint8Array | Buffer): ArrayBuffer {
@@ -554,6 +571,7 @@ export async function startEmbeddedFfmpegDecodeToPcmWithDeferredLoudness(
       const decode = readDirectDecodePayload(module);
       decodeResolved = true;
       resolveDecode?.(decode);
+      await yieldToHostEventLoop();
 
       directDecodeLogMessages = [];
       const loudnessResult = module._wave_measure_loudness_from_decoded_output();

@@ -3,8 +3,6 @@ import {
   type EmbeddedExecutableStatus,
   getEmbeddedExecutableStatusSync,
   runEmbeddedFfmpegDecodeToPcm,
-  runEmbeddedFfmpegDecodeToPcmWithLoudness,
-  startEmbeddedFfmpegDecodeToPcmWithDeferredLoudness,
   runEmbeddedFfmpegMeasureLoudness,
   runEmbeddedFfmpegDecodeToWav,
   runEmbeddedFfprobe,
@@ -695,14 +693,14 @@ export async function startDecodeAndSummarizeWithFfmpeg(resource: vscode.Uri): P
   }
 
   try {
-    const result = await startEmbeddedFfmpegDecodeToPcmWithDeferredLoudness(resource);
+    const result = await runEmbeddedFfmpegDecodeToPcm(resource);
 
     return {
       decodeFallback: {
-        ...result.decode,
+        ...result,
         kind: 'pcm',
       },
-      loudnessSummaryPromise: result.loudnessPromise.then((summary) => normalizeLoudnessSummary(summary)),
+      loudnessSummaryPromise: getLoudnessSummary(resource),
     };
   } catch {
     const decodeFallback = await decodeWithFfmpeg(resource);
