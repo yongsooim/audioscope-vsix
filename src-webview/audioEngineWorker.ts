@@ -38,6 +38,7 @@ import {
   loadWaveCoreRuntime,
   type WaveCoreModule,
   type WaveCoreRuntime,
+  type WaveCoreWasmBytes,
 } from './waveCoreRuntime';
 import { normalizeSpectrogramWindowFunction, WINDOW_FUNCTION_CODES } from './windowShared';
 import {
@@ -260,6 +261,9 @@ interface EngineState {
     colormapDistribution: SpectrogramColormapDistribution;
     fftSize: number;
     frequencyScale: SpectrogramFrequencyScale;
+    loudnessYAxisMax: number;
+    loudnessYAxisMin: number;
+    loudnessYAxisMode: 'auto' | 'fixed';
     maxDecibels: number;
     melBandCount: number;
     mfccCoefficientCount: number;
@@ -333,6 +337,9 @@ const state: EngineState = {
     colormapDistribution: 'balanced',
     fftSize: 4096,
     frequencyScale: 'log',
+    loudnessYAxisMax: 0,
+    loudnessYAxisMin: -60,
+    loudnessYAxisMode: 'auto',
     maxDecibels: 0,
     melBandCount: LIBROSA_DEFAULT_MEL_BAND_COUNT,
     mfccCoefficientCount: DEFAULT_MFCC_COEFFICIENT_COUNT,
@@ -371,6 +378,12 @@ self.onmessage = (event: MessageEvent<EngineMainToWorkerMessage>) => {
 
   switch (message.type) {
     case 'bootstrapRuntime':
+      if (message.body?.wasmBytes) {
+        pendingWasmBytes = {
+          fallback: message.body.wasmBytes.fallback ?? null,
+          simd: message.body.wasmBytes.simd ?? null,
+        };
+      }
       enqueueRequest(async () => {
         await getRuntime();
       });
@@ -473,9 +486,11 @@ function enqueueRequest(task: () => Promise<void>): void {
     });
 }
 
+let pendingWasmBytes: WaveCoreWasmBytes | null = null;
+
 async function getRuntime(): Promise<WaveCoreRuntime> {
   if (!runtimePromise) {
-    runtimePromise = loadWaveCoreRuntime();
+    runtimePromise = loadWaveCoreRuntime(pendingWasmBytes);
   }
 
   return runtimePromise;
@@ -622,6 +637,9 @@ function handleSpectrogramConfig(config: {
   colormapDistribution: SpectrogramColormapDistribution;
   fftSize: number;
   frequencyScale: SpectrogramFrequencyScale;
+  loudnessYAxisMax?: number;
+  loudnessYAxisMin?: number;
+  loudnessYAxisMode?: 'auto' | 'fixed';
   maxDecibels: number;
   melBandCount: number;
   mfccCoefficientCount: number;
@@ -671,6 +689,11 @@ function handleSpectrogramConfig(config: {
     config.maxDecibels,
     nextAnalysisType,
   );
+  const nextLoudnessYAxisMode: 'auto' | 'fixed' = config.loudnessYAxisMode === 'fixed' ? 'fixed' : 'auto';
+  const rawLoudnessMin = Number.isFinite(Number(config.loudnessYAxisMin)) ? Number(config.loudnessYAxisMin) : -60;
+  const rawLoudnessMax = Number.isFinite(Number(config.loudnessYAxisMax)) ? Number(config.loudnessYAxisMax) : 0;
+  const nextLoudnessYAxisMin = Math.min(rawLoudnessMin, rawLoudnessMax - 1);
+  const nextLoudnessYAxisMax = rawLoudnessMax;
 
   const changed =
     nextAnalysisType !== state.spectrogramConfig.analysisType
@@ -688,7 +711,10 @@ function handleSpectrogramConfig(config: {
     || Math.abs(nextScalogramOmega0 - state.spectrogramConfig.scalogramOmega0) > 1e-9
     || Math.abs(nextScalogramRowDensity - state.spectrogramConfig.scalogramRowDensity) > 1e-9
     || Math.abs(nextOverlapRatio - state.spectrogramConfig.overlapRatio) > 1e-9
-    || nextFrequencyScale !== state.spectrogramConfig.frequencyScale;
+    || nextFrequencyScale !== state.spectrogramConfig.frequencyScale
+    || nextLoudnessYAxisMode !== state.spectrogramConfig.loudnessYAxisMode
+    || nextLoudnessYAxisMin !== state.spectrogramConfig.loudnessYAxisMin
+    || nextLoudnessYAxisMax !== state.spectrogramConfig.loudnessYAxisMax;
 
   if (!changed) {
     emitUiState();
@@ -700,6 +726,9 @@ function handleSpectrogramConfig(config: {
     colormapDistribution: nextColormapDistribution,
     fftSize: nextFftSize,
     frequencyScale: nextFrequencyScale,
+    loudnessYAxisMax: nextLoudnessYAxisMax,
+    loudnessYAxisMin: nextLoudnessYAxisMin,
+    loudnessYAxisMode: nextLoudnessYAxisMode,
     maxDecibels: nextDbWindow.maxDecibels,
     melBandCount: nextMelBandCount,
     mfccCoefficientCount: nextMfccCoefficientCount,
@@ -2425,6 +2454,9 @@ function buildFrequencyTicks(): FrequencyTickUi[] {
     minFrequency,
     maxFrequency,
     getActiveMfccCoefficientCount(),
+    state.spectrogramConfig.loudnessYAxisMode,
+    state.spectrogramConfig.loudnessYAxisMin,
+    state.spectrogramConfig.loudnessYAxisMax,
   ].join(':');
   if (cachedFrequencyTickKey === cacheKey) {
     return cachedFrequencyTicks;
@@ -2432,10 +2464,18 @@ function buildFrequencyTicks(): FrequencyTickUi[] {
 
   let ticks: FrequencyTickUi[];
   if (state.spectrogramConfig.analysisType === 'loudness') {
-    const loudness = ensureLoudnessCache();
-    const yRange = loudness
-      ? computeLoudnessYRange(loudness)
-      : { minLufs: -60, maxLufs: 0 };
+    let yRange: { minLufs: number; maxLufs: number };
+    if (state.spectrogramConfig.loudnessYAxisMode === 'fixed') {
+      yRange = {
+        minLufs: state.spectrogramConfig.loudnessYAxisMin,
+        maxLufs: state.spectrogramConfig.loudnessYAxisMax,
+      };
+    } else {
+      const loudness = ensureLoudnessCache();
+      yRange = loudness
+        ? computeLoudnessYRange(loudness)
+        : { minLufs: -60, maxLufs: 0 };
+    }
     const lufsRange = Math.max(1, yRange.maxLufs - yRange.minLufs);
     const gridStep = getLoudnessGridStep(lufsRange);
     const steps: number[] = [];

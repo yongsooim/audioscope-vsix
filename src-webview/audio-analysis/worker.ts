@@ -1,4 +1,4 @@
-import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from '../waveCoreRuntime';
+import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime, type WaveCoreWasmBytes } from '../waveCoreRuntime';
 import {
   TILE_COLUMN_COUNT,
 } from '../sharedBuffers';
@@ -494,6 +494,12 @@ self.onmessage = (event) => {
 
   switch (message.type) {
     case 'bootstrapRuntime':
+      if (message.body?.wasmBytes) {
+        pendingWasmBytes = {
+          fallback: message.body.wasmBytes.fallback ?? null,
+          simd: message.body.wasmBytes.simd ?? null,
+        };
+      }
       enqueueRequest(async () => {
         const runtime = await getRuntime();
         self.postMessage({
@@ -729,9 +735,11 @@ function enqueueRequest(task: () => Promise<void>): void {
     });
 }
 
+let pendingWasmBytes: WaveCoreWasmBytes | null = null;
+
 function getRuntime(): Promise<WaveCoreRuntime> {
   if (!runtimePromise) {
-    runtimePromise = loadWaveCoreRuntime();
+    runtimePromise = loadWaveCoreRuntime(pendingWasmBytes);
   }
 
   return runtimePromise;

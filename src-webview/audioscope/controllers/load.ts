@@ -15,7 +15,7 @@ export type AudioscopeWorkerBootstrapStateKey =
 
 interface AudioscopeLoadControllerDeps {
   audioTransportProcessorScriptUri?: string;
-  createModuleWorker: (moduleUrl: string, bootstrapStateKey: AudioscopeWorkerBootstrapStateKey) => Worker;
+  createModuleWorker: (moduleUrl: string, bootstrapStateKey: AudioscopeWorkerBootstrapStateKey) => Promise<Worker>;
   createPlaybackAnalysisDataFromPlaybackSession: typeof createPlaybackAnalysisDataFromPlaybackSession;
   createPlaybackSessionFromPcmFallback: typeof createPlaybackSessionFromPcmFallback;
   createMediaMetadataState: typeof createMediaMetadataState;
@@ -316,7 +316,7 @@ export function createAudioscopeLoadController({
       return null;
     }
 
-    const worker = createModuleWorker(decodeWorkerScriptUri, 'decodeWorkerBootstrapUrl');
+    const worker = await createModuleWorker(decodeWorkerScriptUri, 'decodeWorkerBootstrapUrl');
     state.decodeWorker = worker;
     state.decodeWorkerReady = false;
     state.decodeWorkerPrewarmed = false;

@@ -524,13 +524,12 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
     sizeText: formatSizeText(parseNumberValue(formatSection?.size)),
   };
 
+  // Compact summary pill: codec + sample rate only. Channels, bit depth,
+  // bitrate and duration remain available through the expanded detail panel
+  // (and duration is already shown by the transport time readout).
   summary.segments = [
     summary.codecText ?? summary.containerText,
     summary.sampleRateText,
-    summary.bitDepthText,
-    summary.channelText,
-    summary.bitrateText,
-    summary.durationText,
   ].filter((segment): segment is string => Boolean(segment && segment.trim().length > 0));
 
   return {

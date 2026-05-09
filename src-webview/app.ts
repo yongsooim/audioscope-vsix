@@ -56,6 +56,51 @@ const decodeBrowserModuleWasmUri = document.body.dataset.decodeModuleWasmSrc;
 const decodeWorkerScriptUri = document.body.dataset.decodeWorkerSrc;
 const audioTransportProcessorScriptUri = document.body.dataset.audioTransportProcessorSrc;
 const stretchProcessorScriptUri = document.body.dataset.stretchProcessorSrc;
+const wasmCoreSimdScriptUri = document.body.dataset.wasmCoreSimdSrc || '';
+const wasmCoreFallbackScriptUri = document.body.dataset.wasmCoreFallbackSrc || '';
+
+let wasmCoreBytesPromise: Promise<{ fallback: ArrayBuffer | null; simd: ArrayBuffer | null }> | null = null;
+
+function fetchWasmCoreBytes(): Promise<{ fallback: ArrayBuffer | null; simd: ArrayBuffer | null }> {
+  if (!wasmCoreBytesPromise) {
+    const fetchOne = async (url: string): Promise<ArrayBuffer | null> => {
+      if (!url) {
+        return null;
+      }
+      try {
+        const response = await fetch(url, { credentials: 'same-origin' });
+        if (!response.ok) {
+          return null;
+        }
+        return await response.arrayBuffer();
+      } catch {
+        return null;
+      }
+    };
+    wasmCoreBytesPromise = (async () => ({
+      simd: await fetchOne(wasmCoreSimdScriptUri),
+      fallback: await fetchOne(wasmCoreFallbackScriptUri),
+    }))();
+  }
+  return wasmCoreBytesPromise;
+}
+
+const workerSourceTextCache = new Map<string, Promise<string>>();
+
+function fetchWorkerSourceText(moduleUrl: string): Promise<string> {
+  let cached = workerSourceTextCache.get(moduleUrl);
+  if (!cached) {
+    cached = (async () => {
+      const response = await fetch(moduleUrl, { credentials: 'same-origin' });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch worker source ${moduleUrl}: ${response.status}`);
+      }
+      return await response.text();
+    })();
+    workerSourceTextCache.set(moduleUrl, cached);
+  }
+  return cached;
+}
 
 const DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
 const DEFAULT_VIEWPORT_SPLIT_RATIO = 0.5;
@@ -857,12 +902,20 @@ function frameToSeconds(frame: number): number {
   return sampleRate > 0 ? clamp(frame, 0, getDurationFrames()) / sampleRate : 0;
 }
 
-function createModuleWorker(
+async function createModuleWorker(
   moduleUrl: string,
   bootstrapStateKey: AudioscopeWorkerBootstrapStateKey,
-): Worker {
-  const bootstrapSource = `import ${JSON.stringify(moduleUrl)};`;
-  const bootstrapBlob = new Blob([bootstrapSource], { type: 'text/javascript' });
+): Promise<Worker> {
+  // VS Code 1.119's webview service worker (PR microsoft/vscode#311844) does
+  // not handle resource fetches that originate from blob workers, so any
+  // cross-origin module import inside a worker hangs. Workaround: fetch the
+  // worker bundle on the main thread (where the service worker still serves
+  // requests correctly) and inline the source into the bootstrap blob. The
+  // worker bundles are built as self-contained single files (see
+  // scripts/build-webview.mts) so once the source is in the blob the worker
+  // has no further imports to resolve.
+  const sourceText = await fetchWorkerSourceText(moduleUrl);
+  const bootstrapBlob = new Blob([sourceText], { type: 'text/javascript' });
   const bootstrapUrl = URL.createObjectURL(bootstrapBlob);
   state[bootstrapStateKey] = bootstrapUrl;
   return new Worker(bootstrapUrl, { type: 'module' });
@@ -904,7 +957,11 @@ async function ensureEngineWorker(loadToken: number): Promise<Worker | null> {
     return null;
   }
 
-  const worker = createModuleWorker(engineWorkerScriptUri, 'engineWorkerBootstrapUrl');
+  const worker = await createModuleWorker(engineWorkerScriptUri, 'engineWorkerBootstrapUrl');
+  if (loadToken !== state.loadToken) {
+    worker.terminate();
+    return null;
+  }
   state.engineWorker = worker;
   worker.addEventListener('message', (event: MessageEvent<EngineWorkerToMainMessage>) => {
     handleEngineWorkerMessage(event.data);
@@ -915,7 +972,11 @@ async function ensureEngineWorker(loadToken: number): Promise<Worker | null> {
     }
     setFatalStatus(`Audio engine worker failed: ${event.message || 'Unknown worker error.'}`);
   });
-  worker.postMessage({ type: 'bootstrapRuntime' });
+  const wasmBytes = await fetchWasmCoreBytes();
+  if (loadToken !== state.loadToken) {
+    return null;
+  }
+  worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
   postInitSurfaces();
   return worker;
 }
@@ -929,7 +990,11 @@ async function ensureWaveformWorker(loadToken: number): Promise<Worker | null> {
     return null;
   }
 
-  const worker = createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl');
+  const worker = await createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl');
+  if (loadToken !== state.loadToken) {
+    worker.terminate();
+    return null;
+  }
   state.waveformWorker = worker;
   worker.addEventListener('message', (event: MessageEvent<WaveformWorkerToMainMessage>) => {
     handleWaveformWorkerMessage(state.loadToken, event.data);
@@ -941,7 +1006,11 @@ async function ensureWaveformWorker(loadToken: number): Promise<Worker | null> {
     disposeWaveformWorker();
     setFatalStatus(`Waveform worker failed: ${event.message || 'Unknown worker error.'}`);
   });
-  worker.postMessage({ type: 'bootstrapRuntime' });
+  const wasmBytes = await fetchWasmCoreBytes();
+  if (loadToken !== state.loadToken) {
+    return null;
+  }
+  worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
   return worker;
 }
 
@@ -954,7 +1023,11 @@ async function ensureAnalysisWorker(loadToken: number): Promise<Worker | null> {
     return null;
   }
 
-  const worker = createModuleWorker(analysisWorkerScriptUri, 'analysisWorkerBootstrapUrl');
+  const worker = await createModuleWorker(analysisWorkerScriptUri, 'analysisWorkerBootstrapUrl');
+  if (loadToken !== state.loadToken) {
+    worker.terminate();
+    return null;
+  }
   state.analysisRuntimeReadyPromise = new Promise((resolve) => {
     state.resolveAnalysisRuntimeReady = resolve;
   });
@@ -969,7 +1042,11 @@ async function ensureAnalysisWorker(loadToken: number): Promise<Worker | null> {
     disposeAnalysisWorker();
     setAnalysisStatus(`Spectrogram failed: ${event.message || 'Unknown worker error.'}`, true);
   });
-  worker.postMessage({ type: 'bootstrapRuntime' });
+  const wasmBytes = await fetchWasmCoreBytes();
+  if (loadToken !== state.loadToken) {
+    return null;
+  }
+  worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
   return worker;
 }
 
@@ -1308,7 +1385,6 @@ function positionLoopHandle(element: HTMLElement, widthPx: number, percent: numb
 function renderTransportOverview(uiState: ViewportUiState | null): void {
   if (!uiState) {
     elements.timeline.value = '0';
-    elements.timeline.style.setProperty('--seek-progress', '0%');
     elements.waveformOverviewThumb.style.left = '0%';
     elements.waveformOverviewThumb.style.width = '0%';
     elements.timelineCurrentMarker.hidden = true;
@@ -1319,7 +1395,6 @@ function renderTransportOverview(uiState: ViewportUiState | null): void {
   const currentPercent = uiState.overview.currentPercent;
   elements.timeline.disabled = !hasPlaybackTransport();
   elements.timeline.value = String(currentPercent / 100);
-  elements.timeline.style.setProperty('--seek-progress', `${currentPercent.toFixed(4)}%`);
   elements.waveformOverviewThumb.style.left = `${uiState.overview.viewportLeftPercent.toFixed(6)}%`;
   elements.waveformOverviewThumb.style.width = `${uiState.overview.viewportWidthPercent.toFixed(6)}%`;
 

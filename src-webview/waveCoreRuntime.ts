@@ -134,43 +134,76 @@ export interface WaveCoreRuntime {
   variant: string;
 }
 
-const wasmCandidates = [
-  {
-    url: new URL('../wasm/wasm_core_simd.wasm', import.meta.url),
-    variant: 'wasm-core-wasm-simd',
-  },
-  {
-    url: new URL('../wasm/wasm_core_fallback.wasm', import.meta.url),
-    variant: 'wasm-core-wasm-fallback',
-  },
+export interface WaveCoreWasmBytes {
+  simd?: ArrayBuffer | Uint8Array | null;
+  fallback?: ArrayBuffer | Uint8Array | null;
+}
+
+// Build the URL lazily so the module can still be evaluated when
+// import.meta.url is a blob: URL (which cannot resolve a relative path).
+// In that case the bytes-based loading path is used instead and these URLs
+// are never constructed.
+function resolveWasmUrl(relativePath: string): URL | null {
+  try {
+    return new URL(relativePath, import.meta.url);
+  } catch {
+    return null;
+  }
+}
+
+const wasmCandidateSpecs: Array<{ relativePath: string; variant: string }> = [
+  { relativePath: '../wasm/wasm_core_simd.wasm', variant: 'wasm-core-wasm-simd' },
+  { relativePath: '../wasm/wasm_core_fallback.wasm', variant: 'wasm-core-wasm-fallback' },
 ];
 
 let runtimePromise: Promise<WaveCoreRuntime> | null = null;
 
-export async function loadWaveCoreRuntime() {
+// Workers cannot fetch webview resources directly under VS Code 1.119+ (the
+// service worker no longer serves blob-worker-originated fetches). When the
+// host pre-fetches the wasm bytes and forwards them, we instantiate from the
+// bytes in-process; otherwise we fall back to the legacy URL-based path.
+export async function loadWaveCoreRuntime(bytes?: WaveCoreWasmBytes | null) {
   if (!runtimePromise) {
-    runtimePromise = instantiateWaveCoreRuntime();
+    runtimePromise = instantiateWaveCoreRuntime(bytes ?? null);
   }
 
   return runtimePromise;
 }
 
-async function instantiateWaveCoreRuntime() {
+async function instantiateWaveCoreRuntime(bytes: WaveCoreWasmBytes | null): Promise<WaveCoreRuntime> {
   const errors: string[] = [];
 
-  for (const candidate of wasmCandidates) {
+  for (const spec of wasmCandidateSpecs) {
+    const wasmBytes = spec.variant === 'wasm-core-wasm-simd' ? bytes?.simd ?? null : bytes?.fallback ?? null;
     try {
-      const instance = await instantiateWasm(candidate.url);
+      let instance: WebAssembly.Instance;
+      if (wasmBytes) {
+        instance = await instantiateWasmFromBytes(wasmBytes);
+      } else {
+        const url = resolveWasmUrl(spec.relativePath);
+        if (!url) {
+          throw new Error('No wasm bytes provided and import.meta.url cannot resolve the wasm asset path.');
+        }
+        instance = await instantiateWasm(url);
+      }
       return {
         module: createModuleFacade(instance.exports as WaveCoreWasmExports),
-        variant: candidate.variant,
+        variant: spec.variant,
       };
     } catch (error) {
-      errors.push(`${candidate.variant}: ${error instanceof Error ? error.message : String(error)}`);
+      errors.push(`${spec.variant}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   throw new Error(`Failed to load wave core runtime. ${errors.join(' | ')}`);
+}
+
+async function instantiateWasmFromBytes(bytes: ArrayBuffer | Uint8Array): Promise<WebAssembly.Instance> {
+  const source = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const copy = new Uint8Array(source.byteLength);
+  copy.set(source);
+  const result = await WebAssembly.instantiate(copy, {});
+  return result.instance;
 }
 
 async function instantiateWasm(url: URL): Promise<WebAssembly.Instance> {

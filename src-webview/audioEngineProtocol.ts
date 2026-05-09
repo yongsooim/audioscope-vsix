@@ -140,6 +140,12 @@ export interface LoadAnalysisSessionMessage {
 }
 
 export interface EngineBootstrapRuntimeMessage {
+  body?: {
+    wasmBytes?: {
+      fallback?: ArrayBuffer | null;
+      simd?: ArrayBuffer | null;
+    };
+  };
   type: 'bootstrapRuntime';
 }
 
@@ -239,6 +245,9 @@ export interface SetSpectrogramConfigMessage {
     colormapDistribution: SpectrogramColormapDistribution;
     fftSize: number;
     frequencyScale: SpectrogramFrequencyScale;
+    loudnessYAxisMax?: number;
+    loudnessYAxisMin?: number;
+    loudnessYAxisMode?: 'auto' | 'fixed';
     maxDecibels: number;
     melBandCount: number;
     mfccCoefficientCount: number;

@@ -1,4 +1,4 @@
-import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime } from '../waveCoreRuntime';
+import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime, type WaveCoreWasmBytes } from '../waveCoreRuntime';
 import {
   RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL,
   drawWaveformPathPlot,
@@ -78,7 +78,7 @@ interface AnalysisState {
 
 type WorkerMessage =
   | { type: 'attachAudioSession'; body?: AudioSessionOptions }
-  | { type: 'bootstrapRuntime' }
+  | { type: 'bootstrapRuntime'; body?: { wasmBytes?: { fallback?: ArrayBuffer | null; simd?: ArrayBuffer | null } } }
   | { type: 'buildWaveformPyramid' }
   | { type: 'dispose' }
   | { type: 'disposeSession' }
@@ -115,6 +115,12 @@ self.onmessage = (event: MessageEvent<WorkerMessage | undefined>): void => {
 
   switch (message.type) {
     case 'bootstrapRuntime':
+      if (message.body?.wasmBytes) {
+        pendingWasmBytes = {
+          fallback: message.body.wasmBytes.fallback ?? null,
+          simd: message.body.wasmBytes.simd ?? null,
+        };
+      }
       enqueueRequest(async () => {
         const runtime = await getRuntime();
         self.postMessage({
@@ -660,9 +666,11 @@ function disposeSession(runtime: WaveCoreRuntime) {
   analysisState = createEmptyAnalysisState();
 }
 
+let pendingWasmBytes: WaveCoreWasmBytes | null = null;
+
 function getRuntime(): Promise<WaveCoreRuntime> {
   if (!runtimePromise) {
-    runtimePromise = loadWaveCoreRuntime();
+    runtimePromise = loadWaveCoreRuntime(pendingWasmBytes);
   }
 
   return runtimePromise;

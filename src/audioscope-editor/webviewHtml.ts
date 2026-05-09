@@ -11,6 +11,8 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     const decodeBrowserModuleWasmUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_module.wasm'));
     const audioTransportProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioTransportProcessor.js'));
     const stretchProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'src-webview', 'vendor', 'SignalsmithStretch.mjs'));
+    const wasmCoreSimdUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'wasm', 'wasm_core_simd.wasm'));
+    const wasmCoreFallbackUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'wasm', 'wasm_core_fallback.wasm'));
 
     return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -24,7 +26,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     <link rel="stylesheet" href="${styleUri}" />
     <title>audioscope</title>
   </head>
-  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-decode-module-src="${decodeBrowserModuleUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}">
+  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-decode-module-src="${decodeBrowserModuleUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}" data-wasm-core-simd-src="${wasmCoreSimdUri}" data-wasm-core-fallback-src="${wasmCoreFallbackUri}">
     <main class="app-shell">
       <section id="audioscope-viewport" class="viewport" aria-label="audioscope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">
