@@ -349,6 +349,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
         <div id="time-readout" class="time-readout">0:00.00 / --:--.--</div>
         <div id="waveform-overview" class="timeline-shell">
           <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>
+          <div id="timeline-loop-range" class="timeline-loop-range" aria-hidden="true" hidden></div>
           <div id="timeline-current-marker" class="timeline-current-marker" aria-hidden="true" hidden></div>
           <div id="timeline-hover-tooltip" class="timeline-hover-tooltip" aria-hidden="true"></div>
           <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.00001" value="0" disabled />

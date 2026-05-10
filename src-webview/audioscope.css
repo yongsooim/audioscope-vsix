@@ -1565,7 +1565,7 @@ body {
 .timeline {
   --seek-track: rgba(255, 255, 255, 0.06);
   position: relative;
-  z-index: 2;
+  z-index: 1;
   width: 100%;
   margin: 0;
   height: 26px;
@@ -1586,21 +1586,48 @@ body {
 
 .timeline-viewport {
   position: absolute;
-  inset-block: 6px;
+  top: 50%;
   inset-inline-start: 0;
-  z-index: 1;
+  z-index: 2;
+  height: 16px;
   min-width: 1px;
   border-radius: 1px;
-  background: transparent;
-  border: 0;
+  background: rgba(125, 211, 252, 0.18);
+  border: 1px solid rgba(125, 211, 252, 0.42);
+  box-shadow:
+    inset 0 0 0 1px rgba(240, 246, 255, 0.06),
+    0 0 10px rgba(14, 165, 233, 0.12);
   pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.timeline-loop-range {
+  position: absolute;
+  top: 50%;
+  inset-inline-start: 0;
+  z-index: 3;
+  height: 10px;
+  min-width: 2px;
+  border: 1px solid rgba(251, 191, 36, 0.6);
+  border-radius: 1px;
+  background: rgba(251, 191, 36, 0.24);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 0 10px rgba(251, 191, 36, 0.12);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.timeline-loop-range[data-state="draft"] {
+  border-style: dashed;
+  background: rgba(251, 191, 36, 0.16);
 }
 
 .timeline-current-marker {
   position: absolute;
   top: 50%;
   left: 0;
-  z-index: 3;
+  z-index: 4;
   width: 2px;
   height: 24px;
   border: 0;

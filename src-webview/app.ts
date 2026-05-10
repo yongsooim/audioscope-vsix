@@ -1385,8 +1385,12 @@ function positionLoopHandle(element: HTMLElement, widthPx: number, percent: numb
 function renderTransportOverview(uiState: ViewportUiState | null): void {
   if (!uiState) {
     elements.timeline.value = '0';
+    elements.waveformOverviewThumb.hidden = true;
     elements.waveformOverviewThumb.style.left = '0%';
     elements.waveformOverviewThumb.style.width = '0%';
+    elements.timelineLoopRange.hidden = true;
+    elements.timelineLoopRange.style.left = '0%';
+    elements.timelineLoopRange.style.width = '0%';
     elements.timelineCurrentMarker.hidden = true;
     elements.timelineCurrentMarker.style.left = '0%';
     return;
@@ -1395,8 +1399,30 @@ function renderTransportOverview(uiState: ViewportUiState | null): void {
   const currentPercent = uiState.overview.currentPercent;
   elements.timeline.disabled = !hasPlaybackTransport();
   elements.timeline.value = String(currentPercent / 100);
+  elements.waveformOverviewThumb.hidden = uiState.overview.viewportWidthPercent <= 0;
   elements.waveformOverviewThumb.style.left = `${uiState.overview.viewportLeftPercent.toFixed(6)}%`;
   elements.waveformOverviewThumb.style.width = `${uiState.overview.viewportWidthPercent.toFixed(6)}%`;
+
+  const selection = uiState.selection;
+  const durationFrames = Math.max(0, uiState.playback.durationFrames || getDurationFrames());
+  const hasTimelineLoop = typeof selection.startFrame === 'number'
+    && typeof selection.endFrame === 'number'
+    && durationFrames > 0;
+
+  if (!hasTimelineLoop) {
+    elements.timelineLoopRange.hidden = true;
+    elements.timelineLoopRange.style.left = '0%';
+    elements.timelineLoopRange.style.width = '0%';
+  } else {
+    const startFrame = clamp(Math.min(selection.startFrame ?? 0, selection.endFrame ?? 0), 0, durationFrames);
+    const endFrame = clamp(Math.max(selection.startFrame ?? 0, selection.endFrame ?? 0), 0, durationFrames);
+    const leftPercent = (startFrame / durationFrames) * 100;
+    const widthPercent = ((endFrame - startFrame) / durationFrames) * 100;
+    elements.timelineLoopRange.hidden = widthPercent <= 0;
+    elements.timelineLoopRange.dataset.state = selection.committed ? 'committed' : 'draft';
+    elements.timelineLoopRange.style.left = `${leftPercent.toFixed(6)}%`;
+    elements.timelineLoopRange.style.width = `${widthPercent.toFixed(6)}%`;
+  }
 
   if (!uiState.overview.currentVisible) {
     elements.timelineCurrentMarker.hidden = true;

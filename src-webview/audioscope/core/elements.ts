@@ -30,6 +30,7 @@ export function createAudioscopeElements() {
     waveformAxis: requireElement<HTMLElement>('waveform-axis'),
     waveformOverview: requireElement<HTMLElement>('waveform-overview'),
     waveformOverviewThumb: requireElement<HTMLElement>('waveform-overview-thumb'),
+    timelineLoopRange: requireElement<HTMLElement>('timeline-loop-range'),
     waveLoopLabel: requireElement<HTMLElement>('wave-loop-label'),
     waveZoomChip: requireElement<HTMLElement>('wave-zoom-chip'),
     waveClearLoop: requireElement<HTMLButtonElement>('wave-clear-loop'),
