@@ -3,31 +3,37 @@ import * as vscode from 'vscode';
 import { probeAudioOpen } from '../externalAudioTools';
 import { KNOWN_AUDIO_EXTENSIONS } from './constants';
 
-export async function canOpenInAudioscope(target: vscode.Uri): Promise<boolean> {
+export type AudioscopeOpenDecision =
+  | { kind: 'allow' }
+  | { kind: 'deny'; reason: 'not-audio' | 'unsupported'; message: string }
+  | { kind: 'error'; message: string };
+
+export async function evaluateAudioscopeTarget(
+  target: vscode.Uri,
+): Promise<AudioscopeOpenDecision> {
   const fileExtension = path.posix.extname(target.path).replace(/^\./, '').toLowerCase();
 
   if (KNOWN_AUDIO_EXTENSIONS.has(fileExtension)) {
-    return true;
+    return { kind: 'allow' };
   }
 
   try {
     const result = await probeAudioOpen(target);
 
     if (result.kind === 'audio') {
-      return true;
+      return { kind: 'allow' };
     }
 
-    const severity = result.kind === 'not-audio' ? 'warning' : 'info';
-    const showMessage = severity === 'warning'
-      ? vscode.window.showWarningMessage
-      : vscode.window.showInformationMessage;
-
-    void showMessage(result.message);
-    return false;
+    return {
+      kind: 'deny',
+      reason: result.kind === 'not-audio' ? 'not-audio' : 'unsupported',
+      message: result.message,
+    };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    void vscode.window.showErrorMessage(`audioscope could not inspect this file: ${message}`);
-    return false;
+    return {
+      kind: 'error',
+      message: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 

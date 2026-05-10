@@ -13,6 +13,71 @@ export type SurfaceKind = 'spectrogram' | 'waveform';
 export type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
 export type AnalysisSurfaceResetReason = 'device-lost' | 'surface-invalid';
 
+// Canonical analysis-type lookup. The legacy `chroma_cqt` alias is folded into
+// `chroma` here so downstream code never observes it.
+export function canonicalizeSpectrogramAnalysisType(value: unknown): SpectrogramAnalysisType {
+  if (value === 'chroma_cqt') {
+    return 'chroma';
+  }
+  if (
+    value === 'chroma'
+    || value === 'loudness'
+    || value === 'mel'
+    || value === 'mfcc'
+    || value === 'scalogram'
+    || value === 'spectrogram'
+  ) {
+    return value;
+  }
+  return 'spectrogram';
+}
+
+export function canonicalizeColormapDistribution(value: unknown): SpectrogramColormapDistribution {
+  return value === 'contrast' || value === 'soft' ? value : 'balanced';
+}
+
+export function canonicalizeFrequencyScale(value: unknown): SpectrogramFrequencyScale {
+  return value === 'linear' || value === 'mixed' ? value : 'log';
+}
+
+export function canonicalizeWindowFunction(value: unknown): SpectrogramWindowFunction {
+  if (value === 'blackman' || value === 'hamming' || value === 'rectangular') {
+    return value;
+  }
+  return 'hann';
+}
+
+export interface ValidatedFrameRange {
+  startFrame: number;
+  endFrame: number;
+}
+
+// Parse a raw start/end pair into a validated, non-empty frame range or null.
+// Guarantees: 0 <= startFrame < endFrame <= durationFrames.
+export function parseFrameRange(
+  startFrame: unknown,
+  endFrame: unknown,
+  durationFrames: number,
+): ValidatedFrameRange | null {
+  if (!Number.isFinite(startFrame) || !Number.isFinite(endFrame)) {
+    return null;
+  }
+  const safeDuration = Math.max(0, Math.round(durationFrames));
+  const rawStart = Math.round(Number(startFrame));
+  const rawEnd = Math.round(Number(endFrame));
+  const start = Math.max(0, Math.min(rawStart, safeDuration));
+  const end = Math.max(start + 1, Math.min(rawEnd, Math.max(start + 1, safeDuration)));
+  return end > start ? { startFrame: start, endFrame: end } : null;
+}
+
+export function clampFrameToDuration(value: unknown, durationFrames: number): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const safeDuration = Math.max(0, Math.round(durationFrames));
+  return Math.max(0, Math.min(Math.round(Number(value)), safeDuration));
+}
+
 export interface PlaybackClockState {
   currentFrameFloat: number;
   durationFrames: number;

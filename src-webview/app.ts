@@ -26,19 +26,22 @@ import {
   createAudioscopeLoadController,
   type AudioscopeWorkerBootstrapStateKey,
 } from './audioscope/controllers/load';
-import type {
-  AnalysisRenderBackend,
-  AnalysisSurfaceResetReason,
-  EngineWorkerToMainMessage,
-  SampleInfoPayload,
-  SetViewportIntentMessage,
-  SpectrogramAnalysisType,
-  SpectrogramColormapDistribution,
-  SpectrogramFrequencyScale,
-  SpectrogramWindowFunction,
-  SurfaceKind,
-  TransportCommand,
-  ViewportUiState,
+import {
+  canonicalizeColormapDistribution,
+  canonicalizeFrequencyScale,
+  canonicalizeSpectrogramAnalysisType,
+  type AnalysisRenderBackend,
+  type AnalysisSurfaceResetReason,
+  type EngineWorkerToMainMessage,
+  type SampleInfoPayload,
+  type SetViewportIntentMessage,
+  type SpectrogramAnalysisType,
+  type SpectrogramColormapDistribution,
+  type SpectrogramFrequencyScale,
+  type SpectrogramWindowFunction,
+  type SurfaceKind,
+  type TransportCommand,
+  type ViewportUiState,
 } from './audioEngineProtocol';
 import {
   WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
@@ -46,8 +49,18 @@ import {
   WAVEFORM_TOP_PADDING_PX,
 } from './interactive-waveform/geometry';
 import { normalizeSpectrogramWindowFunction } from './windowShared';
+import type {
+  HostToWebviewMessage,
+  WebviewToHostMessage,
+} from '../src/hostWebviewProtocol';
 
-const vscode = acquireVsCodeApi();
+const rawVscode = acquireVsCodeApi();
+const vscode = {
+  ...rawVscode,
+  postMessage: (message: WebviewToHostMessage): void => {
+    rawVscode.postMessage(message);
+  },
+};
 const engineWorkerScriptUri = document.body.dataset.engineWorkerSrc || '';
 const analysisWorkerScriptUri = document.body.dataset.analysisWorkerSrc || '';
 const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc || '';
@@ -565,16 +578,7 @@ function clearFatalStatus(): void {
   elements.status.classList.remove('error');
 }
 
-function normalizeSpectrogramAnalysisType(value: unknown): SpectrogramAnalysisType {
-  return value === 'chroma'
-    || value === 'chroma_cqt'
-    || value === 'loudness'
-    || value === 'mel'
-    || value === 'mfcc'
-    || value === 'scalogram'
-    ? (value === 'chroma_cqt' ? 'chroma' : value)
-    : 'spectrogram';
-}
+const normalizeSpectrogramAnalysisType = canonicalizeSpectrogramAnalysisType;
 
 function normalizeLoudnessRefPreset(value: unknown): LoudnessRefPreset {
   return value === 'off'
@@ -661,9 +665,7 @@ function applyLoudnessRefLevel(refLevel: unknown): void {
   state.spectrogramConfig.loudnessRefCustom = normalizedRefLevel;
 }
 
-function normalizeSpectrogramColormapDistribution(value: unknown): SpectrogramColormapDistribution {
-  return value === 'contrast' || value === 'soft' ? value : 'balanced';
-}
+const normalizeSpectrogramColormapDistribution = canonicalizeColormapDistribution;
 
 function getSpectrogramAnalysisTypeLabel(analysisType: SpectrogramAnalysisType): string {
   switch (analysisType) {
@@ -873,9 +875,7 @@ function normalizeSpectrogramScalogramFrequencyRange(minValue: unknown, maxValue
   return { minFrequency, maxFrequency };
 }
 
-function normalizeSpectrogramFrequencyScale(value: unknown): SpectrogramFrequencyScale {
-  return value === 'linear' || value === 'mixed' ? value : 'log';
-}
+const normalizeSpectrogramFrequencyScale = canonicalizeFrequencyScale;
 
 function normalizeSpectrogramOverlapRatio(value: unknown): number {
   const numericValue = Number(value);
@@ -3078,7 +3078,7 @@ const {
   vscode,
 });
 
-window.addEventListener('message', (event) => {
+window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) => {
   const message = event.data;
 
   if (message?.type === 'loadAudio') {

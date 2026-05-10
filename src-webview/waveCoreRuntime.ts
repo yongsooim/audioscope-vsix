@@ -134,6 +134,29 @@ export interface WaveCoreRuntime {
   variant: string;
 }
 
+function assertHeapRange(bufferByteLength: number, byteOffset: number, byteLength: number): void {
+  if (byteOffset < 0 || byteLength < 0 || byteOffset + byteLength > bufferByteLength) {
+    throw new RangeError(
+      `WaveCore heap view out of bounds: offset=${byteOffset} length=${byteLength} bufferBytes=${bufferByteLength}`,
+    );
+  }
+}
+
+export function heapF32View(module: WaveCoreModule, pointer: number, length: number): Float32Array {
+  assertHeapRange(module.HEAPF32.buffer.byteLength, pointer, length * Float32Array.BYTES_PER_ELEMENT);
+  return new Float32Array(module.HEAPF32.buffer, pointer, length);
+}
+
+export function heapF64View(module: WaveCoreModule, pointer: number, length: number): Float64Array {
+  assertHeapRange(module.HEAPF64.buffer.byteLength, pointer, length * Float64Array.BYTES_PER_ELEMENT);
+  return new Float64Array(module.HEAPF64.buffer, pointer, length);
+}
+
+export function heapU8View(module: WaveCoreModule, pointer: number, length: number): Uint8Array {
+  assertHeapRange(module.HEAPU8.buffer.byteLength, pointer, length);
+  return new Uint8Array(module.HEAPU8.buffer, pointer, length);
+}
+
 export interface WaveCoreWasmBytes {
   simd?: ArrayBuffer | Uint8Array | null;
   fallback?: ArrayBuffer | Uint8Array | null;

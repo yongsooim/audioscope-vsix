@@ -3,6 +3,7 @@ const core = @import("./core.zig");
 const chroma_analysis = @import("./chroma_analysis.zig");
 const mel_analysis = @import("./mel_analysis.zig");
 const mfcc = @import("./mfcc.zig");
+const resource_pool = @import("./resource_pool.zig");
 
 const palette_lut_size: usize = 1024;
 const palette_lut = buildPaletteLut();
@@ -12,58 +13,23 @@ const scalogram_display_min_db: f32 = -72.0;
 const scalogram_display_gamma: f32 = 1.08;
 
 pub fn freeFftResources() void {
-    var current = core.g_session.fft_resources;
-    while (current) |node| {
-        const next = node.next;
-        node.deinit();
-        core.allocator.destroy(node);
-        current = next;
-    }
-    core.g_session.fft_resources = null;
+    resource_pool.disposeAll(core.FftResource, &core.g_session.fft_resources);
 }
 
 pub fn freeBandLayoutResources() void {
-    var current = core.g_session.band_layout_resources;
-    while (current) |node| {
-        const next = node.next;
-        node.deinit();
-        core.allocator.destroy(node);
-        current = next;
-    }
-    core.g_session.band_layout_resources = null;
+    resource_pool.disposeAll(core.BandLayoutResource, &core.g_session.band_layout_resources);
 }
 
 pub fn freeChromaLayoutResources() void {
-    var current = core.g_session.chroma_layout_resources;
-    while (current) |node| {
-        const next = node.next;
-        node.deinit();
-        core.allocator.destroy(node);
-        current = next;
-    }
-    core.g_session.chroma_layout_resources = null;
+    resource_pool.disposeAll(core.ChromaLayoutResource, &core.g_session.chroma_layout_resources);
 }
 
 pub fn freeScalogramResources() void {
-    var current = core.g_session.scalogram_resources;
-    while (current) |node| {
-        const next = node.next;
-        node.deinit();
-        core.allocator.destroy(node);
-        current = next;
-    }
-    core.g_session.scalogram_resources = null;
+    resource_pool.disposeAll(core.ScalogramResource, &core.g_session.scalogram_resources);
 }
 
 pub fn freeConstantQResources() void {
-    var current = core.g_session.constant_q_resources;
-    while (current) |node| {
-        const next = node.next;
-        node.deinit();
-        core.allocator.destroy(node);
-        current = next;
-    }
-    core.g_session.constant_q_resources = null;
+    resource_pool.disposeAll(core.ConstantQResource, &core.g_session.constant_q_resources);
 }
 
 fn getFftResource(fft_size_i32: i32, window_function: core.WindowFunction) ?*core.FftResource {

@@ -35,6 +35,9 @@ import {
   quantizeCeil,
 } from './sharedBuffers';
 import {
+  heapF32View,
+  heapF64View,
+  heapU8View,
   loadWaveCoreRuntime,
   type WaveCoreModule,
   type WaveCoreRuntime,
@@ -75,15 +78,23 @@ import {
   normalizeSpectrogramDbWindow,
   OVERLAP_RATIO_OPTIONS,
 } from './audio-engine-worker/spectrogramConfig';
+import {
+  ANALYSIS_TYPE_CODES,
+  COLORMAP_DISTRIBUTION_GAMMAS,
+  FREQUENCY_SCALE_CODES,
+  MAX_FREQUENCY,
+  MAX_TILE_CACHE_BYTES,
+  MAX_TILE_CACHE_ENTRIES,
+  MIN_FREQUENCY,
+  QUALITY_PRESETS,
+  ROW_BUCKET_SIZE,
+  SCALOGRAM_COLUMN_CHUNK_SIZE,
+  SCALOGRAM_ROW_BLOCK_SIZE,
+  SPECTROGRAM_COLUMN_CHUNK_SIZE,
+} from './audio-analysis/constants';
 
 const LOOP_HANDLE_MIN_SECONDS = 0.05;
 const LOOP_SELECTION_MIN_PIXELS = 6;
-const MAX_FREQUENCY = 20000;
-const MIN_FREQUENCY = 20;
-const ROW_BUCKET_SIZE = 16;
-const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;
-const SCALOGRAM_ROW_BLOCK_SIZE = 32;
-const SPECTROGRAM_COLUMN_CHUNK_SIZE = 32;
 const SPECTROGRAM_LINEAR_TICK_COUNT = 6;
 const VISIBLE_ROW_OVERSAMPLE = 1.35;
 const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
@@ -92,47 +103,6 @@ const WAVEFORM_FOLLOW_RATIO = 0.5;
 const WAVEFORM_MAX_ZOOM_PIXELS_PER_SAMPLE = 8;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 const HOVER_SAMPLE_VALUE_MAX_SAMPLES_PER_PIXEL = 32;
-const MAX_TILE_CACHE_ENTRIES = 24;
-const MAX_TILE_CACHE_BYTES = 96 * 1024 * 1024;
-
-const ANALYSIS_TYPE_CODES: Record<SpectrogramAnalysisType, number> = {
-  spectrogram: 0,
-  mel: 1,
-  scalogram: 2,
-  mfcc: 3,
-  chroma: 5,
-  loudness: 6,
-};
-
-const FREQUENCY_SCALE_CODES: Record<SpectrogramFrequencyScale, number> = {
-  log: 0,
-  linear: 1,
-  mixed: 2,
-};
-
-const QUALITY_PRESETS = {
-  balanced: {
-    colsMultiplier: 2.5,
-    lowFrequencyDecimationFactor: 2,
-    rowsMultiplier: 1.5,
-  },
-  high: {
-    colsMultiplier: 4,
-    lowFrequencyDecimationFactor: 4,
-    rowsMultiplier: 2.5,
-  },
-  max: {
-    colsMultiplier: 6,
-    lowFrequencyDecimationFactor: 4,
-    rowsMultiplier: 4,
-  },
-} as const;
-
-const COLORMAP_DISTRIBUTION_GAMMAS: Record<SpectrogramColormapDistribution, number> = {
-  balanced: 1,
-  contrast: 1.18,
-  soft: 0.84,
-};
 
 interface WaveformSurfaceState {
   canvas: OffscreenCanvas | null;
@@ -2862,17 +2832,9 @@ function disposeWasmSession(module: WaveCoreModule): void {
   state.session.initialized = false;
 }
 
-function getHeapF32View(module: WaveCoreModule, pointer: number, length: number): Float32Array {
-  return new Float32Array(module.HEAPF32.buffer, pointer, length);
-}
-
-function getHeapF64View(module: WaveCoreModule, pointer: number, length: number): Float64Array {
-  return new Float64Array(module.HEAPF64.buffer, pointer, length);
-}
-
-function getHeapU8View(module: WaveCoreModule, pointer: number, length: number): Uint8Array {
-  return new Uint8Array(module.HEAPU8.buffer, pointer, length);
-}
+const getHeapF32View = heapF32View;
+const getHeapF64View = heapF64View;
+const getHeapU8View = heapU8View;
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => {

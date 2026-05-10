@@ -6,8 +6,12 @@ import {
   getExternalToolStatus,
   getLoudnessSummary,
   getMediaMetadata,
-  type AudioscopePayload,
 } from './externalAudioTools';
+import type {
+  AudioscopePayload,
+  HostToWebviewMessage,
+  WebviewToHostMessage,
+} from './hostWebviewProtocol';
 import { prewarmEmbeddedDirectDecodeModule } from './embeddedMediaTools';
 import {
   getCachedDecodeFallback,
@@ -16,10 +20,14 @@ import {
 } from './mediaHostCache';
 import { DEFAULT_SPECTROGRAM_DEFAULTS } from './audioscope-editor/constants';
 import { AudioscopeDocument } from './audioscope-editor/document';
-import { canOpenInAudioscope, getActiveResource } from './audioscope-editor/editorTarget';
+import { evaluateAudioscopeTarget, getActiveResource } from './audioscope-editor/editorTarget';
 import { cloneDecodeFallbackPayload } from './audioscope-editor/payloadClone';
 import { normalizeSpectrogramDefaults } from './audioscope-editor/spectrogramDefaults';
 import { getAudioscopeWebviewHtml } from './audioscope-editor/webviewHtml';
+
+function postToWebview(webview: vscode.Webview, message: HostToWebviewMessage): Thenable<boolean> {
+  return webview.postMessage(message);
+}
 
 const HOST_SHARED_LOUDNESS_EXTENSIONS = new Set([
   'aac',
@@ -57,7 +65,18 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           return;
         }
 
-        if (!(await canOpenInAudioscope(target))) {
+        const decision = await evaluateAudioscopeTarget(target);
+
+        if (decision.kind === 'deny') {
+          const showMessage = decision.reason === 'not-audio'
+            ? vscode.window.showWarningMessage
+            : vscode.window.showInformationMessage;
+          void showMessage(decision.message);
+          return;
+        }
+
+        if (decision.kind === 'error') {
+          void vscode.window.showErrorMessage(`audioscope could not inspect this file: ${decision.message}`);
           return;
         }
 
@@ -110,15 +129,12 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
 
     const postAudioPayload = async (): Promise<void> => {
       const payload = await this.buildPayload(document, webviewPanel.webview);
-      await webviewPanel.webview.postMessage({
-        type: 'loadAudio',
-        body: payload,
-      });
+      await postToWebview(webviewPanel.webview, { type: 'loadAudio', body: payload });
 
       if (!payload.externalTools.resolved) {
         void getOrStartExternalToolStatus()
           .then(async (externalTools) => {
-            await webviewPanel.webview.postMessage({
+            await postToWebview(webviewPanel.webview, {
               type: 'externalToolStatus',
               body: externalTools,
             });
@@ -127,121 +143,113 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
       }
     };
 
-    webviewPanel.webview.onDidReceiveMessage(async (message) => {
-      if (message?.type === 'ready' || message?.type === 'reload') {
-        await postAudioPayload();
+    webviewPanel.webview.onDidReceiveMessage(async (raw: unknown) => {
+      const message = raw as WebviewToHostMessage | null | undefined;
+      if (!message) {
         return;
       }
 
-      if (message?.type === 'persistSpectrogramDefaults') {
-        const nextDefaults = normalizeSpectrogramDefaults(message.body);
-        await vscode.workspace
-          .getConfiguration('audioscope')
-          .update('spectrogramDefaults', nextDefaults, vscode.ConfigurationTarget.Global);
-        return;
-      }
+      switch (message.type) {
+        case 'ready':
+        case 'reload':
+          await postAudioPayload();
+          return;
 
-      if (message?.type === 'requestMediaMetadata') {
-        const loadToken = Number(message.body?.loadToken) || 0;
-
-        try {
-          const metadata = await getCachedMediaMetadata(
-            document.uri,
-            () => getMediaMetadata(document.uri),
-          );
-          await webviewPanel.webview.postMessage({
-            type: 'mediaMetadataReady',
-            body: {
-              loadToken,
-              metadata,
-            },
-          });
-        } catch (error) {
-          const toolStatus = await getExternalToolStatus(document.uri);
-          await webviewPanel.webview.postMessage({
-            type: 'mediaMetadataError',
-            body: {
-              loadToken,
-              message: error instanceof Error ? error.message : String(error),
-              toolStatus,
-            },
-          });
-        }
-        return;
-      }
-
-      if (message?.type === 'requestDecodeFallback') {
-        const loadToken = Number(message.body?.loadToken) || 0;
-
-        try {
-          const fallback = await getCachedDecodeFallback(
-            document.uri,
-            () => decodeWithFfmpeg(document.uri),
-          );
-
-          await webviewPanel.webview.postMessage({
-            type: 'decodeFallbackReady',
-            body: {
-              ...cloneDecodeFallbackPayload(fallback),
-              loadToken,
-            },
-          });
-        } catch (error) {
-          const toolStatus = await getExternalToolStatus(document.uri);
-          await webviewPanel.webview.postMessage({
-            type: 'decodeFallbackError',
-            body: {
-              loadToken,
-              message: error instanceof Error ? error.message : String(error),
-              toolStatus,
-            },
-          });
-        }
-        return;
-      }
-
-      if (message?.type === 'requestLoudnessSummary') {
-        const loadToken = Number(message.body?.loadToken) || 0;
-
-        try {
-          const summary = await getCachedLoudnessSummary(
-            document.uri,
-            () => getLoudnessSummary(document.uri),
-          );
-          await webviewPanel.webview.postMessage({
-            type: 'loudnessSummaryReady',
-            body: {
-              ...summary,
-              loadToken,
-            },
-          });
-        } catch (error) {
-          await webviewPanel.webview.postMessage({
-            type: 'loudnessSummaryError',
-            body: {
-              loadToken,
-              message: error instanceof Error ? error.message : String(error),
-            },
-          });
-        }
-        return;
-      }
-
-      if (message?.type === 'openExternal') {
-        const url = typeof message.body?.url === 'string' ? message.body.url.trim() : '';
-
-        if (!url) {
+        case 'persistSpectrogramDefaults': {
+          const nextDefaults = normalizeSpectrogramDefaults(message.body);
+          await vscode.workspace
+            .getConfiguration('audioscope')
+            .update('spectrogramDefaults', nextDefaults, vscode.ConfigurationTarget.Global);
           return;
         }
 
-        try {
-          const uri = vscode.Uri.parse(url);
-
-          if (uri.scheme === 'https' || uri.scheme === 'http') {
-            await vscode.env.openExternal(uri);
+        case 'requestMediaMetadata': {
+          const loadToken = Number(message.body?.loadToken) || 0;
+          try {
+            const metadata = await getCachedMediaMetadata(
+              document.uri,
+              () => getMediaMetadata(document.uri),
+            );
+            await postToWebview(webviewPanel.webview, {
+              type: 'mediaMetadataReady',
+              body: { loadToken, metadata },
+            });
+          } catch (error) {
+            const toolStatus = await getExternalToolStatus(document.uri);
+            await postToWebview(webviewPanel.webview, {
+              type: 'mediaMetadataError',
+              body: {
+                loadToken,
+                message: error instanceof Error ? error.message : String(error),
+                toolStatus,
+              },
+            });
           }
-        } catch {
-          // Ignore malformed external URLs from the webview.
+          return;
+        }
+
+        case 'requestDecodeFallback': {
+          const loadToken = Number(message.body?.loadToken) || 0;
+          try {
+            const fallback = await getCachedDecodeFallback(
+              document.uri,
+              () => decodeWithFfmpeg(document.uri),
+            );
+            await postToWebview(webviewPanel.webview, {
+              type: 'decodeFallbackReady',
+              body: { ...cloneDecodeFallbackPayload(fallback), loadToken },
+            });
+          } catch (error) {
+            const toolStatus = await getExternalToolStatus(document.uri);
+            await postToWebview(webviewPanel.webview, {
+              type: 'decodeFallbackError',
+              body: {
+                loadToken,
+                message: error instanceof Error ? error.message : String(error),
+                toolStatus,
+              },
+            });
+          }
+          return;
+        }
+
+        case 'requestLoudnessSummary': {
+          const loadToken = Number(message.body?.loadToken) || 0;
+          try {
+            const summary = await getCachedLoudnessSummary(
+              document.uri,
+              () => getLoudnessSummary(document.uri),
+            );
+            await postToWebview(webviewPanel.webview, {
+              type: 'loudnessSummaryReady',
+              body: { ...summary, loadToken },
+            });
+          } catch (error) {
+            await postToWebview(webviewPanel.webview, {
+              type: 'loudnessSummaryError',
+              body: {
+                loadToken,
+                message: error instanceof Error ? error.message : String(error),
+              },
+            });
+          }
+          return;
+        }
+
+        case 'openExternal': {
+          const url = typeof message.body?.url === 'string' ? message.body.url.trim() : '';
+          if (!url) {
+            return;
+          }
+          try {
+            const uri = vscode.Uri.parse(url);
+            if (uri.scheme === 'https' || uri.scheme === 'http') {
+              await vscode.env.openExternal(uri);
+            }
+          } catch {
+            // Ignore malformed external URLs from the webview.
+          }
+          return;
         }
       }
     });

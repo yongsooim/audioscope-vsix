@@ -1,4 +1,4 @@
-import { loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime, type WaveCoreWasmBytes } from '../waveCoreRuntime';
+import { heapF32View, heapU8View, loadWaveCoreRuntime, type WaveCoreModule, type WaveCoreRuntime, type WaveCoreWasmBytes } from '../waveCoreRuntime';
 import {
   TILE_COLUMN_COUNT,
 } from '../sharedBuffers';
@@ -6232,20 +6232,15 @@ function ensureSpectrogramOutputCapacity(module: WaveCoreModule, byteLength: num
   analysisState.spectrogramOutputCapacity = byteLength;
 }
 
-function getHeapF32View(module: WaveCoreModule, pointer: number, length: number): Float32Array {
-  return new Float32Array(module.HEAPF32.buffer, pointer, length);
-}
+const getHeapF32View = heapF32View;
+const getHeapU8View = heapU8View;
 
 function getSessionPcmData(): Float32Array | null {
   if (!analysisState.module || !analysisState.pcmPointer || analysisState.sampleCount <= 0) {
     return null;
   }
 
-  return getHeapF32View(analysisState.module, analysisState.pcmPointer, analysisState.sampleCount);
-}
-
-function getHeapU8View(module: WaveCoreModule, pointer: number, length: number): Uint8Array {
-  return new Uint8Array(module.HEAPU8.buffer, pointer, length);
+  return heapF32View(analysisState.module, analysisState.pcmPointer, analysisState.sampleCount);
 }
 
 function disposeWasmSession(module: WaveCoreModule): void {

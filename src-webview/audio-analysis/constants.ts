@@ -1,4 +1,18 @@
 // Shared analysis configuration and option constants.
+import type {
+  SpectrogramAnalysisType,
+  SpectrogramColormapDistribution,
+  SpectrogramFrequencyScale,
+} from '../audioEngineProtocol';
+
+export type AnalysisQualityPreset = 'balanced' | 'high' | 'max';
+
+export interface AnalysisQualityPresetConfig {
+  rowsMultiplier: number;
+  colsMultiplier: number;
+  lowFrequencyDecimationFactor: number;
+}
+
 export const MIN_FREQUENCY = 20;
 export const MAX_FREQUENCY = 20000;
 export const ROW_BUCKET_SIZE = 16;
@@ -10,12 +24,14 @@ export const MEL_BAND_COUNT_OPTIONS = [128, 256, 512];
 export const DEFAULT_SCALOGRAM_OMEGA0 = 6;
 export const DEFAULT_SCALOGRAM_ROW_DENSITY = 1;
 export const DEFAULT_SCALOGRAM_HOP_SAMPLES = 1024;
+export const DEFAULT_SCALOGRAM_MIN_FREQUENCY = 20;
+export const DEFAULT_SCALOGRAM_MAX_FREQUENCY = 20_000;
 export const MEL_DISPLAY_GAMMA = 0.92;
 export const SCALOGRAM_DISPLAY_GAMMA = 1.08;
 export const SCALOGRAM_OMEGA_OPTIONS = [4, 5, 6, 7, 8, 10, 12];
 export const SCALOGRAM_ROW_DENSITY_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 3, 4];
 
-export const QUALITY_PRESETS = {
+export const QUALITY_PRESETS: Record<AnalysisQualityPreset, AnalysisQualityPresetConfig> = {
   balanced: {
     rowsMultiplier: 1.5,
     colsMultiplier: 2.5,
@@ -60,7 +76,7 @@ export const SPECTROGRAM_DB_WINDOW_LIMITS = {
   min: -120,
   minimumSpan: 6,
 } as const;
-export const ANALYSIS_TYPE_CODES = {
+export const ANALYSIS_TYPE_CODES: Record<SpectrogramAnalysisType, number> & { chroma_cqt: number } = {
   spectrogram: 0,
   mel: 1,
   scalogram: 2,
@@ -69,16 +85,16 @@ export const ANALYSIS_TYPE_CODES = {
   chroma_cqt: 5,
   loudness: 6,
 };
-export const FREQUENCY_SCALE_CODES = {
+export const FREQUENCY_SCALE_CODES: Record<SpectrogramFrequencyScale, number> = {
   log: 0,
   linear: 1,
   mixed: 2,
 };
-export const COLORMAP_DISTRIBUTION_GAMMAS = {
+export const COLORMAP_DISTRIBUTION_GAMMAS: Record<SpectrogramColormapDistribution, number> = {
   balanced: 1,
   contrast: 1.18,
   soft: 0.84,
-} as const;
+};
 
 export const SLANEY_MEL_FREQUENCY_MIN = 0;
 export const SLANEY_MEL_FREQUENCY_STEP = 200 / 3;

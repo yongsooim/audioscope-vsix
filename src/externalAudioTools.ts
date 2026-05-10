@@ -7,158 +7,31 @@ import {
   runEmbeddedFfmpegDecodeToWav,
   runEmbeddedFfprobe,
 } from './embeddedMediaTools';
+import type {
+  AudioscopePayload,
+  DecodeFallbackPayload,
+  ExternalToolStatusPayload,
+  LoudnessSummaryPayload,
+  MediaMetadataChapterPayload,
+  MediaMetadataPayload,
+  MediaMetadataStreamPayload,
+  MediaMetadataSummaryPayload,
+  MediaMetadataTagPayload,
+  SpectrogramDefaultsPayload,
+} from './hostWebviewProtocol';
 
-export interface ExternalToolStatusPayload {
-  resolved: boolean;
-  canDecodeFallback: boolean;
-  canReadMetadata: boolean;
-  ffmpegAvailable: boolean;
-  ffmpegCommand: string;
-  ffmpegVersion: string | null;
-  ffprobeAvailable: boolean;
-  ffprobeCommand: string;
-  ffprobeVersion: string | null;
-  fileBacked: boolean;
-  guidance: string;
-}
-
-export interface AudioscopePayload {
-  audioBytes: ArrayBuffer | null;
-  documentUri: string;
-  externalTools: ExternalToolStatusPayload;
-  fileBacked: boolean;
-  fileExtension: string;
-  fileName: string;
-  fileSize: number | null;
-  spectrogramDefaults: SpectrogramDefaultsPayload;
-  spectrogramQuality: 'balanced' | 'high' | 'max';
-  sourceUri: string;
-}
-
-export interface SpectrogramDefaultsPayload {
-  analysisType: 'chroma' | 'loudness' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
-  colormapDistribution: 'balanced' | 'contrast' | 'soft';
-  fftSize: number;
-  frequencyScale: 'linear' | 'log' | 'mixed';
-  loudnessCurves: 'both' | 'momentary' | 'shortTerm';
-  loudnessRefLevel: number | null;
-  loudnessShowPeak: boolean;
-  loudnessYAxisMax: number;
-  loudnessYAxisMin: number;
-  loudnessYAxisMode: 'auto' | 'fixed';
-  maxDecibels: number;
-  melBandCount: number;
-  mfccCoefficientCount: number;
-  mfccMelBandCount: number;
-  minDecibels: number;
-  overlapRatio: number;
-  scalogramHopSamples: number;
-  scalogramMaxFrequency: number;
-  scalogramMinFrequency: number;
-  scalogramOmega0: number;
-  scalogramRowDensity: number;
-  windowFunction: 'blackman' | 'hamming' | 'hann' | 'rectangular';
-}
-
-export interface MediaMetadataSummaryPayload {
-  bitrateText: string | null;
-  bitDepthText: string | null;
-  channelText: string | null;
-  codecText: string | null;
-  containerText: string | null;
-  durationText: string | null;
-  profileText: string | null;
-  sampleRateText: string | null;
-  segments: string[];
-  sizeText: string | null;
-}
-
-export interface MediaMetadataStreamPayload {
-  bitRateText: string | null;
-  bitDepthText: string | null;
-  channelLayout: string | null;
-  channels: number | null;
-  codecLongName: string | null;
-  codecName: string | null;
-  codecType: string | null;
-  dispositionDefault: boolean;
-  durationText: string | null;
-  index: number | null;
-  profileText: string | null;
-  sampleFormat: string | null;
-  sampleRateText: string | null;
-}
-
-export interface MediaMetadataTagPayload {
-  key: string;
-  value: string;
-}
-
-export interface MediaMetadataChapterPayload {
-  endText: string | null;
-  id: number | null;
-  startText: string | null;
-  title: string | null;
-}
-
-export interface MediaMetadataPayload {
-  audioStreamCount: number;
-  chapters: MediaMetadataChapterPayload[];
-  chaptersCount: number;
-  fileBacked: boolean;
-  formatLongName: string | null;
-  formatName: string | null;
-  guidance: string;
-  hasAudioStream: boolean;
-  probeSource: 'ffprobe';
-  streams: MediaMetadataStreamPayload[];
-  summary: MediaMetadataSummaryPayload;
-  tags: MediaMetadataTagPayload[];
-  toolStatus: ExternalToolStatusPayload;
-}
-
-export interface LoudnessSummaryPayload {
-  channelCount: number | null;
-  channelLayout: string | null;
-  channelMode: string;
-  integratedLufs: number | null;
-  integratedThresholdLufs: number | null;
-  loudnessRangeLu: number | null;
-  lraHighLufs: number | null;
-  lraLowLufs: number | null;
-  rangeThresholdLufs: number | null;
-  samplePeakDbfs: number | null;
-  source: 'FFmpeg ebur128';
-  truePeakDbtp: number | null;
-}
-
-export type DecodeFallbackPayload =
-  | {
-      audioBuffer: ArrayBuffer;
-      byteLength: number;
-      kind: 'wav';
-      mimeType: string;
-      source: 'ffmpeg';
-    }
-  | {
-      byteLength: number;
-      channelBuffers: ArrayBuffer[];
-      frameCount: number;
-      kind: 'pcm';
-      numberOfChannels: number;
-      sampleRate: number;
-      source: 'ffmpeg';
-    };
-
-export interface HostDecodeLoudnessPayload {
-  decodeFallback: DecodeFallbackPayload;
-  loudnessSummary: LoudnessSummaryPayload;
-}
-
-export interface HostDecodeLoudnessPipeline {
-  decodeFallback: DecodeFallbackPayload;
-  loudnessSummaryPromise: Promise<LoudnessSummaryPayload>;
-}
+export type {
+  AudioscopePayload,
+  DecodeFallbackPayload,
+  ExternalToolStatusPayload,
+  LoudnessSummaryPayload,
+  MediaMetadataChapterPayload,
+  MediaMetadataPayload,
+  MediaMetadataStreamPayload,
+  MediaMetadataSummaryPayload,
+  MediaMetadataTagPayload,
+  SpectrogramDefaultsPayload,
+};
 
 export type ProbeOpenResult =
   | { kind: 'audio'; metadata: MediaMetadataPayload; toolStatus: ExternalToolStatusPayload }
@@ -304,6 +177,31 @@ export function createInitialExternalToolStatus(resource: vscode.Uri): ExternalT
 
 export async function getExternalToolStatus(resource: vscode.Uri): Promise<ExternalToolStatusPayload> {
   return createToolStatusPayload(true, await resolvePreferredTools(resource));
+}
+
+type ToolRequirement = 'metadata' | 'decode';
+
+async function ensureToolStatusFor(
+  resource: vscode.Uri,
+  requirement: ToolRequirement,
+): Promise<ExternalToolStatusPayload> {
+  const toolStatus = createToolStatusPayload(true, await resolvePreferredTools(resource));
+
+  if (!toolStatus.fileBacked) {
+    throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
+  }
+
+  if (requirement === 'metadata') {
+    if (!toolStatus.ffprobeAvailable || !toolStatus.canReadMetadata) {
+      throw new Error(EMBEDDED_FFPROBE_UNAVAILABLE_GUIDANCE);
+    }
+  } else {
+    if (!toolStatus.ffmpegAvailable || !toolStatus.canDecodeFallback) {
+      throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
+    }
+  }
+
+  return toolStatus;
 }
 
 function parseNumberValue(value: unknown): number | null {
@@ -576,20 +474,7 @@ async function runFfprobe(
   resource: vscode.Uri,
   _signal?: AbortSignal,
 ): Promise<{ metadata: MediaMetadataPayload; rawPayload: FfprobeJsonPayload; toolStatus: ExternalToolStatusPayload }> {
-  const preferredTools = await resolvePreferredTools(resource);
-  const toolStatus = createToolStatusPayload(true, preferredTools);
-
-  if (!toolStatus.fileBacked) {
-    throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
-  }
-
-  if (!toolStatus.ffprobeAvailable) {
-    throw new Error(EMBEDDED_FFPROBE_UNAVAILABLE_GUIDANCE);
-  }
-
-  if (!toolStatus.canReadMetadata) {
-    throw new Error(EMBEDDED_FFPROBE_UNAVAILABLE_GUIDANCE);
-  }
+  const toolStatus = await ensureToolStatusFor(resource, 'metadata');
 
   const stdout = await runEmbeddedFfprobe(resource, EXTERNAL_TOOL_TIMEOUT_MS);
 
@@ -614,20 +499,7 @@ export async function getMediaMetadata(resource: vscode.Uri): Promise<MediaMetad
 }
 
 export async function getLoudnessSummary(resource: vscode.Uri): Promise<LoudnessSummaryPayload> {
-  const preferredTools = await resolvePreferredTools(resource);
-  const toolStatus = createToolStatusPayload(true, preferredTools);
-
-  if (!toolStatus.fileBacked) {
-    throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
-  }
-
-  if (!toolStatus.ffmpegAvailable) {
-    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
-  }
-
-  if (!toolStatus.canDecodeFallback) {
-    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
-  }
+  await ensureToolStatusFor(resource, 'decode');
 
   const summary = await runEmbeddedFfmpegMeasureLoudness(resource, FFMPEG_DECODE_TIMEOUT_MS);
 
@@ -667,50 +539,6 @@ function normalizeLoudnessSummary(summary: {
   };
 }
 
-export async function decodeAndSummarizeWithFfmpeg(resource: vscode.Uri): Promise<HostDecodeLoudnessPayload> {
-  const pipeline = await startDecodeAndSummarizeWithFfmpeg(resource);
-  return {
-    decodeFallback: pipeline.decodeFallback,
-    loudnessSummary: await pipeline.loudnessSummaryPromise,
-  };
-}
-
-export async function startDecodeAndSummarizeWithFfmpeg(resource: vscode.Uri): Promise<HostDecodeLoudnessPipeline> {
-  const preferredTools = await resolvePreferredTools(resource);
-  const toolStatus = createToolStatusPayload(true, preferredTools);
-
-  if (!toolStatus.fileBacked) {
-    throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
-  }
-
-  if (!toolStatus.ffmpegAvailable) {
-    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
-  }
-
-  if (!toolStatus.canDecodeFallback) {
-    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
-  }
-
-  try {
-    const result = await runEmbeddedFfmpegDecodeToPcm(resource);
-
-    return {
-      decodeFallback: {
-        ...result,
-        kind: 'pcm',
-      },
-      loudnessSummaryPromise: getLoudnessSummary(resource),
-    };
-  } catch {
-    const decodeFallback = await decodeWithFfmpeg(resource);
-
-    return {
-      decodeFallback,
-      loudnessSummaryPromise: getLoudnessSummary(resource),
-    };
-  }
-}
-
 export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenResult> {
   const toolStatus = await getExternalToolStatus(resource);
 
@@ -748,20 +576,7 @@ export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenRes
 }
 
 export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFallbackPayload> {
-  const preferredTools = await resolvePreferredTools(resource);
-  const toolStatus = createToolStatusPayload(true, preferredTools);
-
-  if (!toolStatus.fileBacked) {
-    throw new Error(EMBEDDED_TOOL_UNAVAILABLE_GUIDANCE);
-  }
-
-  if (!toolStatus.ffmpegAvailable) {
-    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
-  }
-
-  if (!toolStatus.canDecodeFallback) {
-    throw new Error(EMBEDDED_FFMPEG_UNAVAILABLE_GUIDANCE);
-  }
+  await ensureToolStatusFor(resource, 'decode');
 
   try {
     const result = await runEmbeddedFfmpegDecodeToPcm(resource);

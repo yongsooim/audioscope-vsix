@@ -4,6 +4,14 @@ import {
   type SpectrogramWindowFunction,
 } from '../windowShared';
 import {
+  canonicalizeColormapDistribution,
+  canonicalizeFrequencyScale,
+  canonicalizeSpectrogramAnalysisType,
+  type SpectrogramAnalysisType,
+  type SpectrogramColormapDistribution,
+  type SpectrogramFrequencyScale,
+} from '../audioEngineProtocol';
+import {
   CHROMA_BIN_COUNT,
   CQT_DEFAULT_FMIN,
 } from './chromaShared';
@@ -31,9 +39,9 @@ import {
 } from './constants';
 
 export type QualityPreset = 'balanced' | 'high' | 'max';
-export type AnalysisType = 'chroma' | 'loudness' | 'mel' | 'mfcc' | 'scalogram' | 'spectrogram';
-export type ColormapDistribution = 'balanced' | 'contrast' | 'soft';
-export type FrequencyScale = 'linear' | 'log' | 'mixed';
+export type AnalysisType = SpectrogramAnalysisType;
+export type ColormapDistribution = SpectrogramColormapDistribution;
+export type FrequencyScale = SpectrogramFrequencyScale;
 export type WindowFunction = SpectrogramWindowFunction;
 export type LayerKind = 'overview' | 'visible';
 
@@ -129,20 +137,9 @@ export function normalizeQualityPreset(value: unknown): QualityPreset {
   return value === 'balanced' || value === 'max' ? value : 'high';
 }
 
-export function normalizeAnalysisType(value: unknown): AnalysisType {
-  return value === 'chroma'
-    || value === 'chroma_cqt'
-    || value === 'loudness'
-    || value === 'mel'
-    || value === 'mfcc'
-    || value === 'scalogram'
-    ? (value === 'chroma_cqt' ? 'chroma' : value)
-    : 'spectrogram';
-}
+export const normalizeAnalysisType = canonicalizeSpectrogramAnalysisType;
 
-export function normalizeColormapDistribution(value: unknown): ColormapDistribution {
-  return value === 'contrast' || value === 'soft' ? value : 'balanced';
-}
+export const normalizeColormapDistribution = canonicalizeColormapDistribution;
 
 export function getDefaultDbWindowForAnalysisType(analysisType: AnalysisType): {
   maxDecibels: number;
@@ -197,9 +194,7 @@ export function normalizeDbWindow(
   return { minDecibels, maxDecibels };
 }
 
-export function normalizeFrequencyScale(value: unknown): FrequencyScale {
-  return value === 'linear' || value === 'mixed' ? value : 'log';
-}
+export const normalizeFrequencyScale = canonicalizeFrequencyScale;
 
 export function getEffectiveFrequencyScale(analysisType: AnalysisType, value: unknown): FrequencyScale {
   return analysisType === 'spectrogram' ? normalizeFrequencyScale(value) : 'log';
