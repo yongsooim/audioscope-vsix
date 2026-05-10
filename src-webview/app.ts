@@ -1202,6 +1202,7 @@ function applyTransportCommand(command: TransportCommand | null): void {
 }
 
 function applyViewportUiState(uiState: ViewportUiState): void {
+  const previousUiState = state.engineUiState;
   const previousPresentedRange = state.waveformViewport.presentedRange;
   state.engineUiState = uiState;
   state.followPlayback = uiState.viewport.followEnabled;
@@ -1226,16 +1227,65 @@ function applyViewportUiState(uiState: ViewportUiState): void {
     state.waveformViewport.renderWidthPx = Math.max(1, uiState.viewport.renderWidthPx);
   }
 
-  renderWaveformUi();
   syncWaveformCanvasPresentation(uiState);
   requestWaveformRender(uiState);
-  renderSpectrogramScale();
   if (nextPresentedRange && !areTimeRangesEqual(previousPresentedRange, nextPresentedRange)) {
     syncPresentedSpectrogramRange(nextPresentedRange);
     scheduleSpectrogramRender();
     refreshHoveredSampleInfos();
   }
+
+  if (shouldUseLightweightFollowUi(previousUiState, uiState)) {
+    renderFollowPlaybackUi(previousUiState, uiState);
+    applyTransportCommand(uiState.transportCommand);
+    return;
+  }
+
+  renderWaveformUi();
+  renderSpectrogramScale();
   applyTransportCommand(uiState.transportCommand);
+}
+
+function shouldUseLightweightFollowUi(
+  previousUiState: ViewportUiState | null,
+  nextUiState: ViewportUiState,
+): boolean {
+  if (
+    !previousUiState
+    || previousUiState.viewport.followEnabled !== true
+    || nextUiState.viewport.followEnabled !== true
+    || nextUiState.playback.playing !== true
+    || nextUiState.transportCommand !== null
+    || (state.renderedFrequencyTicks === null && nextUiState.frequencyTicks.length > 0)
+  ) {
+    return false;
+  }
+
+  return previousUiState.viewport.plotMode === nextUiState.viewport.plotMode
+    && Math.abs(previousUiState.zoomFactor - nextUiState.zoomFactor) <= 1e-6
+    && areFrequencyTicksEqual(previousUiState.frequencyTicks, nextUiState.frequencyTicks)
+    && areSelectionAnchorsEqual(previousUiState.selection, nextUiState.selection);
+}
+
+function areSelectionAnchorsEqual(
+  previousSelection: ViewportUiState['selection'],
+  nextSelection: ViewportUiState['selection'],
+): boolean {
+  return previousSelection.committed === nextSelection.committed
+    && previousSelection.startFrame === nextSelection.startFrame
+    && previousSelection.endFrame === nextSelection.endFrame;
+}
+
+function renderFollowPlaybackUi(
+  previousUiState: ViewportUiState,
+  nextUiState: ViewportUiState,
+): void {
+  elements.waveFollow.checked = nextUiState.viewport.followEnabled;
+  if (previousUiState.selection.active || nextUiState.selection.active) {
+    renderSelectionAndLoop(nextUiState);
+  }
+  renderWaveformAxis();
+  renderPlaybackIndicators(nextUiState);
 }
 
 function areFrequencyTicksEqual(
@@ -1933,6 +1983,24 @@ function areWaveformRenderRequestsEqual(
     && Math.abs(Math.round(leftWidthPx) - Math.round(rightWidthPx)) <= 1;
 }
 
+function doesRangeCoverVisibleRange(range: TimeRange, visibleStart: number, visibleEnd: number, epsilon: number): boolean {
+  return visibleStart >= range.start - epsilon && visibleEnd <= range.end + epsilon;
+}
+
+function areWaveformRenderGeometriesCompatible(
+  activeRenderRange: TimeRange,
+  activeRenderWidthPx: number,
+  expectedRenderRange: TimeRange,
+  expectedRenderWidthPx: number,
+  epsilon: number,
+): boolean {
+  const activeSpan = activeRenderRange.end - activeRenderRange.start;
+  const expectedSpan = expectedRenderRange.end - expectedRenderRange.start;
+  return expectedSpan > 0
+    && Math.abs(activeSpan - expectedSpan) <= epsilon
+    && Math.abs(Math.round(activeRenderWidthPx) - Math.round(expectedRenderWidthPx)) <= 1;
+}
+
 function syncWaveformCanvasPresentation(uiState: ViewportUiState | null = state.engineUiState): void {
   const canvas = state.waveformCanvas;
   if (!canvas || !uiState) {
@@ -1949,6 +2017,11 @@ function syncWaveformCanvasPresentation(uiState: ViewportUiState | null = state.
 
   const visibleStart = uiState.presentedStartFrame / sampleRate;
   const visibleEnd = uiState.presentedEndFrame / sampleRate;
+  const expectedRenderRange = {
+    start: uiState.viewport.renderedStartFrame / sampleRate,
+    end: uiState.viewport.renderedEndFrame / sampleRate,
+  };
+  const expectedRenderWidthPx = Math.max(1, uiState.viewport.renderWidthPx || viewportWidthPx);
   const activeRenderRange = state.waveformViewport.activeRenderRange;
   const activeRenderWidthPx = Math.max(1, state.waveformViewport.activeRenderWidthPx);
 
@@ -1960,6 +2033,21 @@ function syncWaveformCanvasPresentation(uiState: ViewportUiState | null = state.
 
   const renderSpan = activeRenderRange.end - activeRenderRange.start;
   const visibleSpan = Math.max(0, visibleEnd - visibleStart);
+  const rangeEpsilon = Math.max(1 / sampleRate, 1e-6);
+
+  if (
+    !areWaveformRenderGeometriesCompatible(
+      activeRenderRange,
+      activeRenderWidthPx,
+      expectedRenderRange,
+      expectedRenderWidthPx,
+      rangeEpsilon,
+    )
+    || !doesRangeCoverVisibleRange(activeRenderRange, visibleStart, visibleEnd, rangeEpsilon)
+  ) {
+    return;
+  }
+
   const widthPx = Math.max(viewportWidthPx, activeRenderWidthPx);
   const visibleOffsetRatio = renderSpan > 0
     ? clamp((visibleStart - activeRenderRange.start) / renderSpan, 0, 1)
