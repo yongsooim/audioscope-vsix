@@ -16,7 +16,7 @@
 
 1. Install the extension.
 2. Open a supported audio file.
-3. If needed, run **`audioscope: Open Active Audio File in audioscope`**.
+3. If needed, right-click the file and choose **Open in audioscope**, or run **`audioscope: Open in audioscope`**.
 
 ## What it does
 

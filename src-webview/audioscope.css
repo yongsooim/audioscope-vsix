@@ -1821,10 +1821,26 @@ body {
 }
 
 .analysis-status {
-  display: none;
+  justify-self: end;
+  min-width: 0;
+  max-width: min(34vw, 280px);
+  padding: 4px 8px;
+  overflow: hidden;
+  border: 1px solid var(--chrome-border);
+  border-radius: var(--chrome-radius);
+  background: var(--chrome-surface);
+  color: var(--chrome-text-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .analysis-status.error {
+  border-color: rgba(248, 113, 113, 0.36);
   color: var(--status-error);
 }
 
@@ -1832,6 +1848,7 @@ body {
   position: absolute;
   inset: 0;
   display: grid;
+  gap: 14px;
   place-items: center;
   padding: 24px;
   background: var(--status-bg);
@@ -1849,6 +1866,29 @@ body {
 
 .status-overlay.error {
   color: var(--status-error);
+}
+
+.status-overlay-message {
+  max-width: min(680px, 100%);
+}
+
+.status-overlay-button {
+  padding: 6px 14px;
+  border: 1px solid var(--chrome-border-strong);
+  border-radius: var(--chrome-radius);
+  background: var(--chrome-surface);
+  color: var(--chrome-text-strong);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.status-overlay-button:hover {
+  border-color: var(--chrome-border-accent);
+  background: var(--chrome-surface-hover);
 }
 
 :where(
@@ -1877,4 +1917,9 @@ body {
 ):focus-visible {
   outline: none !important;
   box-shadow: none !important;
+}
+
+.status-overlay-button:focus-visible {
+  outline: 1px solid var(--chrome-border-accent) !important;
+  outline-offset: 2px !important;
 }

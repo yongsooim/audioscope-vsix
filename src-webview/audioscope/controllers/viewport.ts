@@ -71,11 +71,24 @@ export function createAudioscopeViewportController({
     );
   }
 
+  function syncViewportSplitterAria(): void {
+    const wavePercent = Math.round(normalizeViewportSplitRatio(state.viewportSplitRatio) * 100);
+    const spectrogramPercent = 100 - wavePercent;
+
+    elements.viewportSplitter.setAttribute('aria-valuenow', String(wavePercent));
+    elements.viewportSplitter.setAttribute(
+      'aria-valuetext',
+      `Waveform ${wavePercent}%, spectrogram ${spectrogramPercent}%`,
+    );
+  }
+
   function getWavePanelChromeHeight(): number {
     return Math.max(0, elements.waveToolbar?.offsetHeight || 0) + Math.max(0, elements.waveformAxis?.offsetHeight || 0);
   }
 
   function applyViewportSplit(force = false): void {
+    syncViewportSplitterAria();
+
     const splitterSize = getViewportSplitterSize();
     const wavePanelChromeHeight = getWavePanelChromeHeight();
     const availableHeight = Math.max(0, elements.viewport.clientHeight - splitterSize - wavePanelChromeHeight);

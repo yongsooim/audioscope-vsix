@@ -563,18 +563,40 @@ const {
 
 function setAnalysisStatus(message: string, isError = false): void {
   elements.analysisStatus.textContent = message;
+  elements.analysisStatus.title = message;
   elements.analysisStatus.classList.toggle('error', isError);
 }
 
 function setFatalStatus(message: string): void {
   elements.status.hidden = false;
-  elements.status.textContent = message;
   elements.status.classList.add('error');
+  elements.status.replaceChildren();
+
+  const messageElement = document.createElement('div');
+  messageElement.id = 'status-overlay-message';
+  messageElement.className = 'status-overlay-message';
+  messageElement.textContent = message;
+
+  const retryButton = document.createElement('button');
+  retryButton.className = 'status-overlay-button';
+  retryButton.type = 'button';
+  retryButton.textContent = 'Retry';
+  retryButton.addEventListener('click', () => {
+    setAnalysisStatus('Retrying…');
+    vscode.postMessage({ type: 'reload' });
+  });
+
+  elements.status.append(messageElement, retryButton);
+  elements.status.setAttribute('aria-describedby', messageElement.id);
+  window.requestAnimationFrame(() => {
+    retryButton.focus({ preventScroll: true });
+  });
 }
 
 function clearFatalStatus(): void {
   elements.status.hidden = true;
-  elements.status.textContent = '';
+  elements.status.replaceChildren();
+  elements.status.removeAttribute('aria-describedby');
   elements.status.classList.remove('error');
 }
 

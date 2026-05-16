@@ -372,12 +372,12 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             <span id="loudness-true-peak" class="loudness-chip-value">--</span>
           </div>
         </div>
-        <div id="analysis-status" class="analysis-status">Preparing audioscope…</div>
+        <div id="analysis-status" class="analysis-status" role="status" aria-live="polite" aria-atomic="true">Preparing audioscope…</div>
       </footer>
       <div id="playback-rate-layer" class="transport-rate-layer" hidden>
         <div id="playback-rate-menu" class="transport-rate-menu" role="listbox" aria-label="Playback speed"></div>
       </div>
-      <div id="status" class="status-overlay" hidden></div>
+      <div id="status" class="status-overlay" role="alertdialog" aria-modal="true" aria-label="audioscope error" hidden></div>
     </main>
 
     <script type="module" src="${scriptUri}"></script>

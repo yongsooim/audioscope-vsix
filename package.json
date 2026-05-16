@@ -233,10 +233,26 @@
     "commands": [
       {
         "command": "audioscope.openActiveFileInAudioscope",
-        "title": "Open Active Audio File in audioscope",
+        "title": "Open in audioscope",
         "category": "audioscope"
       }
     ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "audioscope.openActiveFileInAudioscope",
+          "when": "resourceExtname =~ /\\.(wav|wave|mp3|ogg|oga|flac|m4a|aac|opus|aif|aiff)$/i",
+          "group": "navigation@45"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "audioscope.openActiveFileInAudioscope",
+          "when": "resourceExtname =~ /\\.(wav|wave|mp3|ogg|oga|flac|m4a|aac|opus|aif|aiff)$/i",
+          "group": "navigation@45"
+        }
+      ]
+    },
     "customEditors": [
       {
         "viewType": "audioscope.editor",
