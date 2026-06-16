@@ -510,10 +510,6 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
   const sessionRevision = Math.max(0, Math.round(Number(body.sessionRevision) || 0));
   const quality = body.quality === 'balanced' || body.quality === 'max' ? body.quality : 'high';
 
-  if (!(body.monoSamplesBuffer instanceof ArrayBuffer)) {
-    throw new Error('LoadAnalysisSession is missing mono PCM.');
-  }
-
   if (sampleRate <= 0 || durationFrames <= 0) {
     throw new Error('LoadAnalysisSession provided invalid audio metadata.');
   }
@@ -522,21 +518,24 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
   clearTileCache();
 
   const durationSeconds = durationFrames / sampleRate;
-  if (!runtime.module._wave_prepare_session(durationFrames, sampleRate, durationSeconds)) {
-    throw new Error('Failed to allocate audio engine session.');
-  }
+  let pcmPointer = 0;
+  if (body.monoSamplesBuffer instanceof ArrayBuffer) {
+    if (!runtime.module._wave_prepare_session(durationFrames, sampleRate, durationSeconds)) {
+      throw new Error('Failed to allocate audio engine session.');
+    }
 
-  const pcmPointer = runtime.module._wave_get_pcm_ptr();
-  if (!pcmPointer) {
-    throw new Error('Audio engine PCM allocation failed.');
-  }
+    pcmPointer = runtime.module._wave_get_pcm_ptr();
+    if (!pcmPointer) {
+      throw new Error('Audio engine PCM allocation failed.');
+    }
 
-  const monoSamples = new Float32Array(body.monoSamplesBuffer);
-  if (monoSamples.length !== durationFrames) {
-    throw new Error('LoadAnalysisSession PCM length did not match durationFrames.');
-  }
+    const monoSamples = new Float32Array(body.monoSamplesBuffer);
+    if (monoSamples.length !== durationFrames) {
+      throw new Error('LoadAnalysisSession PCM length did not match durationFrames.');
+    }
 
-  getHeapF32View(runtime.module, pcmPointer, durationFrames).set(monoSamples);
+    getHeapF32View(runtime.module, pcmPointer, durationFrames).set(monoSamples);
+  }
 
   state.session = {
     ...createEmptySessionState(),
@@ -1420,7 +1419,8 @@ function canRender(): boolean {
 function canRenderSpectrogram(): boolean {
   return Boolean(
     state.spectrogramSurface.canvas
-    && state.spectrogramSurface.context,
+    && state.spectrogramSurface.context
+    && state.session.waveformPcmPointer,
   );
 }
 
@@ -2298,7 +2298,7 @@ function getMfccCoefficientAtPosition(positionRatio: number): number {
 
 function sampleMfccValueAtFrame(frame: number, coefficient: number): number | null {
   const module = state.session.module;
-  if (!module || !state.session.initialized || state.spectrogramConfig.analysisType !== 'mfcc') {
+  if (!module || !state.session.initialized || !state.session.waveformPcmPointer || state.spectrogramConfig.analysisType !== 'mfcc') {
     return null;
   }
 
@@ -2328,7 +2328,7 @@ function sampleSpectrogramAnalysisValue(
   plan: SpectrogramPlan,
 ): { frequencyEnd: number; frequencyStart: number; valueDb: number } | null {
   const module = state.session.module;
-  if (!module || !state.session.initialized || rowIndex < 0 || rowIndex >= plan.rowCount) {
+  if (!module || !state.session.initialized || !state.session.waveformPcmPointer || rowIndex < 0 || rowIndex >= plan.rowCount) {
     return null;
   }
 

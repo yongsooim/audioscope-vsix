@@ -3090,20 +3090,18 @@ async function initializePlaybackFromPreparedData(
   }
 
   state.engineSessionRevision += 1;
-  const engineMono = monoSamples.slice();
   const waveformMono = monoSamples.slice();
   engineWorker.postMessage({
     type: 'LoadAnalysisSession',
     body: {
       durationFrames: playbackSession.sourceLength,
-      monoSamplesBuffer: engineMono.buffer,
       quality: payload?.spectrogramQuality === 'balanced' || payload?.spectrogramQuality === 'max'
         ? payload.spectrogramQuality
         : 'high',
       sampleRate: playbackSession.sourceSampleRate,
       sessionRevision: state.engineSessionRevision,
     },
-  }, [engineMono.buffer]);
+  });
   waveformWorker.postMessage({
     type: 'attachAudioSession',
     body: {

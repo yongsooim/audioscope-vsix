@@ -92,6 +92,8 @@ type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
 type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
 type SurfaceResetReason = 'device-lost' | 'surface-invalid';
 
+const WEBGPU_ENABLED = false;
+
 interface CanvasInitOptions {
   offscreenCanvas?: OffscreenCanvas;
   pixelHeight?: number;
@@ -1227,6 +1229,12 @@ async function initializeWebGpuCompositor(): Promise<void> {
     || surfaceState.webGpuInitPromise
     || !surfaceState.canvas
   ) {
+    return;
+  }
+
+  if (!WEBGPU_ENABLED) {
+    initialize2dSurface('WebGPU disabled.');
+    paintSpectrogramDisplayNow();
     return;
   }
 

@@ -67,7 +67,8 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onCustomEditor:audioscope.audioEditor"
+    "onCustomEditor:audioscope.audioEditor",
+    "onCommand:audioscope.openActiveFileInAudioscope"
   ],
   "contributes": {
     "languages": [

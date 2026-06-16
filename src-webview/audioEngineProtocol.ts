@@ -196,7 +196,7 @@ export interface InitSurfacesMessage {
 export interface LoadAnalysisSessionMessage {
   body: {
     durationFrames: number;
-    monoSamplesBuffer: ArrayBuffer;
+    monoSamplesBuffer?: ArrayBuffer;
     quality: 'balanced' | 'high' | 'max';
     sampleRate: number;
     sessionRevision: number;

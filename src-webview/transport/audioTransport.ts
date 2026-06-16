@@ -226,6 +226,7 @@ class AudioWorkletCopyTransport {
     this.ended = false;
     this.snapshotState = null;
     this.updateControlState();
+    this.suspendAudioContextWhilePaused();
     this.notifyStateChange();
   }
 
@@ -633,6 +634,7 @@ class AudioWorkletCopyTransport {
       this.ended = true;
       this.pausedAtSeconds = this.getEndedPauseTime();
       this.transportKind = 'audio-worklet-copy';
+      this.suspendAudioContextWhilePaused();
       this.notifyStateChange();
     }
   }
@@ -682,7 +684,20 @@ class AudioWorkletCopyTransport {
     this.ended = false;
     this.pausedAtSeconds = this.normalizePausedTime(currentTime);
     this.disposeWorkletNode();
+    this.suspendAudioContextWhilePaused();
     this.notifyStateChange();
+  }
+
+  suspendAudioContextWhilePaused(): void {
+    const context = this.audioContext;
+
+    if (!context || this.playing) {
+      return;
+    }
+
+    if (context.state === 'running') {
+      void context.suspend().catch(() => {});
+    }
   }
 
   getSourceSampleRate(): number {
@@ -967,6 +982,7 @@ class StretchAudioTransport implements AudioTransport {
       active: false,
       input: currentTime,
     });
+    this.suspendAudioContextWhilePaused();
     this.notifyStateChange();
   }
 
@@ -1264,6 +1280,7 @@ class StretchAudioTransport implements AudioTransport {
       this.ended = true;
       this.pausedAtSeconds = this.getEndedPauseTime();
       this.inputTimeSeconds = this.pausedAtSeconds;
+      this.suspendAudioContextWhilePaused();
     }
 
     this.notifyStateChange();
@@ -1366,7 +1383,20 @@ class StretchAudioTransport implements AudioTransport {
     this.pausedAtSeconds = this.normalizePausedTime(currentTime);
     this.inputTimeSeconds = this.pausedAtSeconds;
     this.disposeStretchNode();
+    this.suspendAudioContextWhilePaused();
     this.notifyStateChange();
+  }
+
+  private suspendAudioContextWhilePaused(): void {
+    const context = this.audioContext;
+
+    if (!context || this.playing) {
+      return;
+    }
+
+    if (context.state === 'running') {
+      void context.suspend().catch(() => {});
+    }
   }
 
   private notifyStateChange(): void {
