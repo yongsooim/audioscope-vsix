@@ -92,9 +92,10 @@ type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
 type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
 type SurfaceResetReason = 'device-lost' | 'surface-invalid';
 
-const WEBGPU_ENABLED = false;
+let WEBGPU_ENABLED = false;
 
 interface CanvasInitOptions {
+  enableWebGpu?: boolean;
   offscreenCanvas?: OffscreenCanvas;
   pixelHeight?: number;
   pixelWidth?: number;
@@ -563,6 +564,19 @@ self.onmessage = (event) => {
       return;
     case 'cancelGeneration':
       cancelGeneration(message.body?.generation);
+      return;
+    case 'requestChannelSampleValue':
+      self.postMessage({
+        type: 'channelSampleValue',
+        body: {
+          channelIndex: Number(message.body?.channelIndex) || 0,
+          requestId: Number(message.body?.requestId) || 0,
+          result: computeChannelSampleValue(
+            Number(message.body?.pointerRatioX) || 0,
+            Number(message.body?.pointerRatioY) || 0,
+          ),
+        },
+      });
       return;
     case 'disposeSession':
       enqueueRequest(async () => {
@@ -1479,6 +1493,10 @@ function resizeWebGpuSurface(): void {
 }
 
 function initializeCanvas(options: CanvasInitOptions | undefined): void {
+  if (typeof options?.enableWebGpu === 'boolean') {
+    WEBGPU_ENABLED = options.enableWebGpu;
+  }
+
   if (options?.offscreenCanvas && options.offscreenCanvas !== surfaceState.canvas) {
     destroyWebGpuCompositor();
     surfaceState.context = null;
@@ -6299,4 +6317,87 @@ function postError(error: unknown): void {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+// --- Per-channel hover value sampling -------------------------------------
+// Each analysis worker holds its own channel's PCM + plan, so it can report the
+// analysis value at a hovered (time, frequency) for that channel.
+
+interface ChannelSampleValue {
+  frequencyEndHz: number | null;
+  frequencyStartHz: number | null;
+  timeSeconds: number;
+  valueDb: number | null;
+}
+
+let analysisSampleScratchPointer = 0;
+
+function getAnalysisRowIndexFromRatio(positionRatio: number, rowCount: number): number {
+  return clamp(
+    Math.floor((1 - clamp(positionRatio, 0, 1)) * Math.max(1, rowCount)),
+    0,
+    Math.max(0, rowCount - 1),
+  );
+}
+
+function computeChannelSampleValue(pointerRatioX: number, pointerRatioY: number): ChannelSampleValue | null {
+  const module = analysisState.module;
+  const plan = analysisState.visible.plan ?? analysisState.overview.plan;
+  if (!module || !analysisState.initialized || !analysisState.pcmPointer || !plan) {
+    return null;
+  }
+
+  const sampleRate = analysisState.sampleRate;
+  if (!(sampleRate > 0)) {
+    return null;
+  }
+
+  const range = analysisState.currentDisplayRange;
+  const start = range.end > range.start ? range.start : 0;
+  const end = range.end > range.start ? range.end : analysisState.duration;
+  const timeSeconds = start + clamp(pointerRatioX, 0, 1) * Math.max(0, end - start);
+  const frame = clamp(Math.round(timeSeconds * sampleRate), 0, Math.max(0, analysisState.sampleCount - 1));
+
+  // Per-channel values are reported for the dB-valued analyses; mfcc/loudness
+  // keep the single shared readout handled on the main thread.
+  if (plan.analysisType === 'mfcc' || (plan.analysisType as string) === 'loudness') {
+    return { frequencyEndHz: null, frequencyStartHz: null, timeSeconds, valueDb: null };
+  }
+
+  if (!analysisSampleScratchPointer) {
+    analysisSampleScratchPointer = module._malloc(3 * Float32Array.BYTES_PER_ELEMENT);
+  }
+  if (!analysisSampleScratchPointer) {
+    return { frequencyEndHz: null, frequencyStartHz: null, timeSeconds, valueDb: null };
+  }
+
+  const rowIndex = getAnalysisRowIndexFromRatio(pointerRatioY, plan.rowCount);
+  const ok = module._wave_sample_analysis_value_at_frame(
+    frame,
+    rowIndex,
+    plan.rowCount,
+    plan.melBandCount,
+    plan.fftSize,
+    plan.decimationFactor,
+    plan.minFrequency,
+    plan.maxFrequency,
+    ANALYSIS_TYPE_CODES[plan.analysisType] ?? 0,
+    FREQUENCY_SCALE_CODES[plan.frequencyScale] ?? 0,
+    plan.scalogramOmega0,
+    WINDOW_FUNCTION_CODES[plan.windowFunction] ?? 0,
+    analysisSampleScratchPointer,
+  );
+
+  if (!ok) {
+    return { frequencyEndHz: null, frequencyStartHz: null, timeSeconds, valueDb: null };
+  }
+
+  const output = getHeapF32View(module, analysisSampleScratchPointer, 3);
+  const valueDb = Number(output[0]);
+  return {
+    frequencyEndHz: Number(output[2]),
+    frequencyStartHz: Number(output[1]),
+    timeSeconds,
+    valueDb: Number.isFinite(valueDb) ? valueDb : null,
+  };
 }

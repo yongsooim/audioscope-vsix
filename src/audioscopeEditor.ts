@@ -163,6 +163,20 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           return;
         }
 
+        case 'persistWebGpuRendering': {
+          await vscode.workspace
+            .getConfiguration('audioscope')
+            .update('experimental.enableWebGpuRendering', Boolean(message.body?.enabled), vscode.ConfigurationTarget.Global);
+          return;
+        }
+
+        case 'persistSplitChannels': {
+          await vscode.workspace
+            .getConfiguration('audioscope')
+            .update('experimental.splitChannels', Boolean(message.body?.enabled), vscode.ConfigurationTarget.Global);
+          return;
+        }
+
         case 'requestMediaMetadata': {
           const loadToken = Number(message.body?.loadToken) || 0;
           try {
@@ -271,11 +285,19 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     const spectrogramDefaults = normalizeSpectrogramDefaults(
       vscode.workspace.getConfiguration('audioscope').get('spectrogramDefaults', DEFAULT_SPECTROGRAM_DEFAULTS),
     );
+    const enableWebGpuRendering = vscode.workspace
+      .getConfiguration('audioscope', document.uri)
+      .get<boolean>('experimental.enableWebGpuRendering', false);
+    const splitChannels = vscode.workspace
+      .getConfiguration('audioscope', document.uri)
+      .get<boolean>('experimental.splitChannels', false);
     const externalTools = createInitialExternalToolStatus(document.uri);
 
     return {
       audioBytes: null,
       documentUri: document.uri.toString(),
+      enableWebGpuRendering,
+      splitChannels,
       externalTools,
       fileExtension: path.posix.extname(document.uri.path).replace(/^\./, '').toLowerCase(),
       fileBacked: externalTools.fileBacked,

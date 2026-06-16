@@ -3,6 +3,7 @@ import SignalsmithStretch from '../vendor/SignalsmithStretch.mjs';
 
 const DEFAULT_SAMPLE_RATE = 48000;
 const DEFAULT_PLAYBACK_RATE = 1;
+const AUDIO_CONTEXT_SUSPEND_DELAY_MS = 3000;
 const STRETCH_TIME_UPDATE_INTERVAL_SECONDS = 1 / 30;
 
 export type PlaybackLoopRange = {
@@ -141,6 +142,7 @@ class AudioWorkletCopyTransport {
   private playing: boolean;
   private seekSerial: number;
   private snapshotState: PlaybackSnapshotState | null;
+  private suspendTimer: ReturnType<typeof setTimeout> | null;
   private transportKind: TransportKind;
   private workletModuleReadyPromise: Promise<void> | null;
   private workletModuleUrl: string;
@@ -160,6 +162,7 @@ class AudioWorkletCopyTransport {
     this.loopRange = null;
     this.playing = false;
     this.ended = false;
+    this.suspendTimer = null;
     this.transportKind = 'unavailable';
     this.lastFallbackReason = null;
     this.onStateChange = typeof options.onStateChange === 'function'
@@ -197,6 +200,8 @@ class AudioWorkletCopyTransport {
 
     try {
       const context = await this.ensureAudioContext();
+
+      this.cancelScheduledSuspend();
 
       if (context.state !== 'running') {
         await context.resume();
@@ -329,6 +334,7 @@ class AudioWorkletCopyTransport {
   }
 
   async dispose() {
+    this.cancelScheduledSuspend();
     this.disposeWorkletNode();
 
     this.playbackSession = null;
@@ -363,7 +369,7 @@ class AudioWorkletCopyTransport {
 
     this.audioContext = new AudioContextConstructor();
     return this.audioContext;
-  }
+  }ㅎ
 
   async ensureWorkletNode(initialTimeSeconds = this.pausedAtSeconds): Promise<AudioWorkletNode> {
     if (this.workletNode) {
@@ -689,14 +695,30 @@ class AudioWorkletCopyTransport {
   }
 
   suspendAudioContextWhilePaused(): void {
-    const context = this.audioContext;
-
-    if (!context || this.playing) {
+    if (!this.audioContext || this.playing) {
       return;
     }
 
-    if (context.state === 'running') {
-      void context.suspend().catch(() => {});
+    this.cancelScheduledSuspend();
+    this.suspendTimer = setTimeout(() => {
+      this.suspendTimer = null;
+
+      const context = this.audioContext;
+
+      if (!context || this.playing) {
+        return;
+      }
+
+      if (context.state === 'running') {
+        void context.suspend().catch(() => {});
+      }
+    }, AUDIO_CONTEXT_SUSPEND_DELAY_MS);
+  }
+
+  cancelScheduledSuspend(): void {
+    if (this.suspendTimer !== null) {
+      clearTimeout(this.suspendTimer);
+      this.suspendTimer = null;
     }
   }
 
@@ -896,6 +918,7 @@ class StretchAudioTransport implements AudioTransport {
   private playing: boolean;
   private stretchModuleUrl: string;
   private stretchNode: StretchNode | null;
+  private suspendTimer: ReturnType<typeof setTimeout> | null;
   private transportKind: TransportKind;
 
   constructor(options: AudioTransportOptions = {}) {
@@ -916,6 +939,7 @@ class StretchAudioTransport implements AudioTransport {
       ? options.stretchModuleUrl
       : '';
     this.stretchNode = null;
+    this.suspendTimer = null;
     this.transportKind = 'unavailable';
   }
 
@@ -946,6 +970,8 @@ class StretchAudioTransport implements AudioTransport {
 
     try {
       const context = await this.ensureAudioContext();
+
+      this.cancelScheduledSuspend();
 
       if (context.state !== 'running') {
         await context.resume();
@@ -1096,6 +1122,7 @@ class StretchAudioTransport implements AudioTransport {
   }
 
   async dispose(): Promise<void> {
+    this.cancelScheduledSuspend();
     this.disposeStretchNode();
 
     this.playbackSession = null;
@@ -1388,14 +1415,30 @@ class StretchAudioTransport implements AudioTransport {
   }
 
   private suspendAudioContextWhilePaused(): void {
-    const context = this.audioContext;
-
-    if (!context || this.playing) {
+    if (!this.audioContext || this.playing) {
       return;
     }
 
-    if (context.state === 'running') {
-      void context.suspend().catch(() => {});
+    this.cancelScheduledSuspend();
+    this.suspendTimer = setTimeout(() => {
+      this.suspendTimer = null;
+
+      const context = this.audioContext;
+
+      if (!context || this.playing) {
+        return;
+      }
+
+      if (context.state === 'running') {
+        void context.suspend().catch(() => {});
+      }
+    }, AUDIO_CONTEXT_SUSPEND_DELAY_MS);
+  }
+
+  private cancelScheduledSuspend(): void {
+    if (this.suspendTimer !== null) {
+      clearTimeout(this.suspendTimer);
+      this.suspendTimer = null;
     }
   }
 

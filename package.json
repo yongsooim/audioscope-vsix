@@ -105,6 +105,24 @@
           "default": true,
           "description": "Automatically open the bundled sample audio file in audioscope when the extension runs in development mode."
         },
+        "audioscope.experimental.enableWebGpuRendering": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "tags": [
+            "experimental"
+          ],
+          "markdownDescription": "(Experimental) Render the spectrogram with WebGPU compute when available, falling back to the CPU/WASM path otherwise. WebGPU is several times faster but allocates a few hundred MB of GPU memory per session. Reopen audio files for changes to take effect."
+        },
+        "audioscope.experimental.splitChannels": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "tags": [
+            "experimental"
+          ],
+          "markdownDescription": "(Experimental) Visualize each audio channel as its own stacked lane in the waveform and spectrogram instead of a single mono downmix. Increases compute and memory roughly in proportion to the channel count."
+        },
         "audioscope.spectrogramQuality": {
           "type": "string",
           "enum": [
@@ -312,5 +330,6 @@
     "rolldown": "^1.0.0-rc.12",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
+    
   }
 }

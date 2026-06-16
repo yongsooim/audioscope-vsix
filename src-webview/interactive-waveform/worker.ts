@@ -147,11 +147,13 @@ self.onmessage = (event: MessageEvent<WorkerMessage | undefined>): void => {
       });
       return;
     case 'buildWaveformPyramid':
+      // Kick off the build behind the request queue (so the session is attached),
+      // but run it as a detached background loop so it doesn't block rendering.
       enqueueRequest(async () => {
         const runtime = await getRuntime();
-        buildWaveformPyramid(runtime);
-        void pumpRenderLoop();
+        void buildWaveformPyramidProgressive(runtime);
       });
+      void pumpRenderLoop();
       return;
     case 'renderWaveformView':
       pendingRenderRequest = message.body ?? null;
@@ -416,22 +418,60 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
   });
 }
 
-function buildWaveformPyramid(runtime: WaveCoreRuntime): void {
-  assertInitialized();
+// How many pyramid blocks to build per step before yielding. Small enough to
+// keep the worker responsive (so renders interleave), large enough to finish
+// quickly. Coarser levels finish last, refining repeated renders/zoom.
+const WAVEFORM_PYRAMID_STEP_BLOCKS = 8192;
+let waveformPyramidBuildActive = false;
 
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    self.setTimeout(resolve, 0);
+  });
+}
+
+async function buildWaveformPyramidProgressive(runtime: WaveCoreRuntime): Promise<void> {
+  if (!analysisState.initialized) {
+    return;
+  }
   if (analysisState.waveformBuilt) {
-    self.postMessage({
-      type: 'waveformPyramidReady',
-    });
+    self.postMessage({ type: 'waveformPyramidReady' });
+    return;
+  }
+  if (waveformPyramidBuildActive) {
     return;
   }
 
-  runtime.module._wave_build_waveform_pyramid();
-  analysisState.waveformBuilt = true;
+  waveformPyramidBuildActive = true;
+  const buildToken = analysisState.attachedSessionVersion;
+  try {
+    const levelCount = runtime.module._wave_begin_waveform_pyramid_build();
+    if (levelCount <= 0) {
+      analysisState.waveformBuilt = true;
+      self.postMessage({ type: 'waveformPyramidReady' });
+      return;
+    }
 
-  self.postMessage({
-    type: 'waveformPyramidReady',
-  });
+    while (true) {
+      // Abort if the session was replaced while building.
+      if (buildToken !== analysisState.attachedSessionVersion) {
+        return;
+      }
+      const done = runtime.module._wave_build_waveform_pyramid_step(WAVEFORM_PYRAMID_STEP_BLOCKS) === 1;
+      if (done) {
+        break;
+      }
+      await yieldToEventLoop();
+    }
+
+    analysisState.waveformBuilt = true;
+    // One final render now that the full pyramid is available (fast path).
+    self.postMessage({ type: 'waveformPyramidReady' });
+  } catch (error) {
+    postError(error);
+  } finally {
+    waveformPyramidBuildActive = false;
+  }
 }
 async function pumpRenderLoop() {
   if (renderLoopActive) {
@@ -534,12 +574,9 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     return;
   }
 
-  if (!analysisState.waveformBuilt && !rawSamplePlotMode) {
-    renderSurface.context.setTransform(1, 0, 0, 1, 0, 0);
-    renderSurface.context.clearRect(0, 0, renderSurface.canvas.width, renderSurface.canvas.height);
-    return;
-  }
-
+  // The pyramid builds incrementally in the background; until it's ready the
+  // WASM path extractor falls back to already-built levels / raw samples, so the
+  // waveform can render immediately instead of waiting for the full build.
   const pathPoints = ensureWaveformSliceCapacity(module, columnCount * WAVEFORM_PATH_VALUES_PER_COLUMN);
   if (!module._wave_extract_waveform_path_points(
     renderViewStart,

@@ -205,12 +205,21 @@ type HoverContext = {
   clientX: number;
   clientY: number;
   requestId: number;
+  laneCount: number;
+  laneIndex: number;
 };
 
 type HoverRequestPoint = {
   clientX: number;
   clientY: number;
 };
+
+type ChannelSampleValueResult = {
+  frequencyEndHz: number | null;
+  frequencyStartHz: number | null;
+  timeSeconds: number;
+  valueDb: number | null;
+} | null;
 
 type TimeRange = {
   end: number;
@@ -340,10 +349,22 @@ type WaveformWorkerToMainMessage =
 
 const state = {
   activeFile: null,
+  splitChannels: false,
   analysis: null as SpectrogramAnalysisState | null,
   analysisSourceKind: 'native',
   analysisRuntimeReadyPromise: null as Promise<void> | null,
   analysisWorker: null as Worker | null,
+  analysisLaneWorkers: [] as Worker[],
+  spectrogramLaneCanvases: [] as HTMLCanvasElement[],
+  spectrogramLaneLabels: [] as HTMLElement[],
+  spectrogramSessionRevision: 0,
+  waveformLaneWorkers: [] as Worker[],
+  waveformLaneCanvases: [] as HTMLCanvasElement[],
+  waveformLaneLabels: [] as HTMLElement[],
+  waveformSessionRevision: 0,
+  lastSpectrogramOverviewMessage: null as unknown,
+  lastSpectrogramVisibleMessage: null as unknown,
+  lastWaveformRenderMessage: null as unknown,
   analysisWorkerBootstrapUrl: null as string | null,
   audioTransport: null as AudioTransport | null,
   decodeAudioContext: null as AudioContext | null,
@@ -384,6 +405,11 @@ const state = {
     spectrogram: null as HoverContext | null,
     waveform: null as HoverContext | null,
   },
+  spectrogramChannelHover: null as {
+    requestId: number;
+    laneCount: number;
+    results: (ChannelSampleValueResult | null)[];
+  } | null,
   lastAppliedTransportCommandSerial: 0,
   loadToken: 0,
   loudness: createLoudnessSummaryState('idle'),
@@ -404,6 +430,7 @@ const state = {
     start: number;
   } | null,
   renderedFrequencyTicks: null as ViewportUiState['frequencyTicks'] | null,
+  renderedFrequencyLaneCount: 1,
   renderedWaveformAxisTicks: null as ViewportUiState['waveformAxisTicks'] | null,
   renderedWaveformAxisWidthPx: 0,
   playbackFrame: 0,
@@ -565,6 +592,11 @@ function setAnalysisStatus(message: string, isError = false): void {
   elements.analysisStatus.textContent = message;
   elements.analysisStatus.title = message;
   elements.analysisStatus.classList.toggle('error', isError);
+}
+
+function setSurfaceLoading(surface: 'spectrogram' | 'waveform', loading: boolean): void {
+  const element = surface === 'waveform' ? elements.waveformLoading : elements.spectrogramLoading;
+  element.hidden = !loading;
 }
 
 function setFatalStatus(message: string): void {
@@ -1105,7 +1137,430 @@ function resetSpectrogramCanvasElement(): HTMLCanvasElement {
   return canvas;
 }
 
+function channelLaneLabel(channelIndex: number, channelCount: number): string {
+  if (channelCount === 2) {
+    return channelIndex === 0 ? 'L' : 'R';
+  }
+  return `Ch ${channelIndex + 1}`;
+}
+
+// Tears down per-channel satellite spectrogram workers, their lane canvases and
+// labels, and restores the primary canvas to its full-stage (mono) layout.
+function teardownSpectrogramLanes(): void {
+  for (const worker of state.analysisLaneWorkers) {
+    try {
+      worker.terminate();
+    } catch {
+      // Ignore termination failures for already-dead workers.
+    }
+  }
+  state.analysisLaneWorkers = [];
+  for (const canvas of state.spectrogramLaneCanvases) {
+    canvas.remove();
+  }
+  state.spectrogramLaneCanvases = [];
+  for (const label of state.spectrogramLaneLabels) {
+    label.remove();
+  }
+  state.spectrogramLaneLabels = [];
+  elements.spectrogramStage.classList.remove('split-channels');
+  elements.spectrogram.style.removeProperty('top');
+  elements.spectrogram.style.removeProperty('bottom');
+  elements.spectrogram.style.removeProperty('height');
+}
+
+function layoutSpectrogramLanePrimary(laneCount: number): void {
+  elements.spectrogramStage.classList.toggle('split-channels', laneCount > 1);
+  if (laneCount <= 1) {
+    elements.spectrogram.style.removeProperty('top');
+    elements.spectrogram.style.removeProperty('bottom');
+    elements.spectrogram.style.removeProperty('height');
+    return;
+  }
+  elements.spectrogram.style.top = '0';
+  elements.spectrogram.style.bottom = 'auto';
+  elements.spectrogram.style.height = `${100 / laneCount}%`;
+}
+
+function addSpectrogramLaneLabel(channelIndex: number, channelCount: number): void {
+  const label = document.createElement('div');
+  label.className = 'spectrogram-lane-label';
+  label.textContent = channelLaneLabel(channelIndex, channelCount);
+  label.style.top = `${(channelIndex / channelCount) * 100}%`;
+  elements.spectrogramStage.appendChild(label);
+  state.spectrogramLaneLabels.push(label);
+}
+
+// Posts a render-affecting message to every satellite lane worker. Used to
+// mirror the primary worker's render/cancel/display-range messages; the
+// per-channel PCM attach is handled per-lane at setup, never broadcast.
+function broadcastSpectrogramLaneMessage(message: unknown): void {
+  for (const worker of state.analysisLaneWorkers) {
+    worker.postMessage(message);
+  }
+}
+
+async function createSpectrogramSatellite(
+  loadToken: number,
+  channelIndex: number,
+  laneCount: number,
+  channelPcm: Float32Array,
+  sampleRate: number,
+  duration: number,
+  quality: 'balanced' | 'high' | 'max',
+): Promise<void> {
+  if (!analysisWorkerScriptUri || loadToken !== state.loadToken) {
+    return;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'spectrogram-canvas spectrogram-lane-canvas';
+  canvas.setAttribute('aria-hidden', 'true');
+  canvas.style.top = `${(channelIndex / laneCount) * 100}%`;
+  canvas.style.height = `${100 / laneCount}%`;
+  elements.spectrogram.insertAdjacentElement('afterend', canvas);
+  state.spectrogramLaneCanvases.push(canvas);
+
+  const worker = await createModuleWorker(analysisWorkerScriptUri, 'analysisWorkerBootstrapUrl');
+  if (loadToken !== state.loadToken) {
+    worker.terminate();
+    canvas.remove();
+    return;
+  }
+  worker.addEventListener('error', () => {
+    // Satellite lanes are best-effort; the primary lane drives status/state.
+  });
+  // Per-channel hover value responses from this lane's worker.
+  worker.addEventListener('message', (event: MessageEvent) => {
+    const data = event.data as { type?: string; body?: { channelIndex: number; requestId: number; result: ChannelSampleValueResult } };
+    if (data?.type === 'channelSampleValue' && data.body) {
+      applyChannelSampleValue(data.body);
+    }
+  });
+
+  const runtimeReady = new Promise<void>((resolve) => {
+    const handler = (event: MessageEvent) => {
+      if ((event.data as { type?: string })?.type === 'runtimeReady') {
+        worker.removeEventListener('message', handler);
+        resolve();
+      }
+    };
+    worker.addEventListener('message', handler);
+  });
+
+  const wasmBytes = await fetchWasmCoreBytes();
+  if (loadToken !== state.loadToken) {
+    worker.terminate();
+    return;
+  }
+  worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
+  await runtimeReady;
+  if (loadToken !== state.loadToken) {
+    worker.terminate();
+    return;
+  }
+
+  const offscreenCanvas = canvas.transferControlToOffscreen();
+  const enableWebGpu = Boolean((state.activeFile as { enableWebGpuRendering?: boolean } | null)?.enableWebGpuRendering);
+  const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
+  worker.postMessage({
+    type: 'initCanvas',
+    body: { offscreenCanvas, pixelHeight, pixelWidth, enableWebGpu },
+  }, [offscreenCanvas]);
+  worker.postMessage({
+    type: 'attachAudioSession',
+    body: {
+      duration,
+      quality,
+      sampleCount: channelPcm.length,
+      sampleRate,
+      samplesBuffer: channelPcm.buffer,
+      sessionVersion: state.spectrogramSessionRevision,
+    },
+  }, [channelPcm.buffer]);
+  // Replay the current overview + visible render so this lane paints the view
+  // that the primary already rendered (instead of waiting for the next render).
+  if (state.lastSpectrogramOverviewMessage) {
+    worker.postMessage(state.lastSpectrogramOverviewMessage);
+  }
+  if (state.lastSpectrogramVisibleMessage) {
+    worker.postMessage(state.lastSpectrogramVisibleMessage);
+  }
+  // Only join the broadcast list after init+attach are queued, so the next
+  // render broadcast can't reach the worker before its session is set up.
+  state.analysisLaneWorkers.push(worker);
+}
+
+async function setupSpectrogramSatellites(
+  loadToken: number,
+  laneCount: number,
+  sampleRate: number,
+  duration: number,
+  quality: 'balanced' | 'high' | 'max',
+): Promise<void> {
+  const session = state.playbackSession;
+  if (!session || laneCount <= 1) {
+    return;
+  }
+
+  addSpectrogramLaneLabel(0, laneCount);
+  // Spawn every satellite lane concurrently so all channels load together
+  // (left + right filling at the same time) instead of one-lane-then-the-next.
+  const tasks: Promise<void>[] = [];
+  for (let channelIndex = 1; channelIndex < laneCount; channelIndex += 1) {
+    const buffer = session.channelBuffers[channelIndex];
+    if (!(buffer instanceof ArrayBuffer)) {
+      continue;
+    }
+    const channelPcm = new Float32Array(buffer.slice(0));
+    addSpectrogramLaneLabel(channelIndex, laneCount);
+    tasks.push(createSpectrogramSatellite(loadToken, channelIndex, laneCount, channelPcm, sampleRate, duration, quality));
+  }
+  await Promise.all(tasks);
+
+  if (loadToken === state.loadToken) {
+    scheduleSpectrogramRender({ force: true });
+  }
+}
+
+// --- Per-channel waveform lanes (mirrors the spectrogram satellite model) ----
+
+function teardownWaveformLanes(): void {
+  for (const worker of state.waveformLaneWorkers) {
+    try {
+      worker.terminate();
+    } catch {
+      // Ignore termination failures.
+    }
+  }
+  state.waveformLaneWorkers = [];
+  for (const canvas of state.waveformLaneCanvases) {
+    canvas.remove();
+  }
+  state.waveformLaneCanvases = [];
+  for (const label of state.waveformLaneLabels) {
+    label.remove();
+  }
+  state.waveformLaneLabels = [];
+  elements.waveformCanvasHost.classList.remove('split-channels');
+  elements.waveformViewport.classList.remove('split-channels');
+}
+
+function layoutWaveformLanePrimary(laneCount: number): void {
+  elements.waveformCanvasHost.classList.toggle('split-channels', laneCount > 1);
+  elements.waveformViewport.classList.toggle('split-channels', laneCount > 1);
+  const primary = state.waveformCanvas;
+  if (!primary) {
+    return;
+  }
+  if (laneCount <= 1) {
+    primary.classList.remove('waveform-canvas-lane');
+    primary.style.removeProperty('position');
+    primary.style.removeProperty('top');
+    primary.style.removeProperty('height');
+    primary.style.removeProperty('left');
+    return;
+  }
+  primary.classList.add('waveform-canvas-lane');
+  primary.style.position = 'absolute';
+  primary.style.left = '0';
+  primary.style.top = '0';
+  primary.style.height = `${100 / laneCount}%`;
+}
+
+function addWaveformLaneLabel(channelIndex: number, channelCount: number): void {
+  const label = document.createElement('div');
+  label.className = 'waveform-lane-label';
+  label.textContent = channelLaneLabel(channelIndex, channelCount);
+  label.style.top = `${(channelIndex / channelCount) * 100}%`;
+  elements.waveformCanvasHost.appendChild(label);
+  state.waveformLaneLabels.push(label);
+}
+
+// Copies the primary waveform canvas' horizontal presentation (width + transform
+// set by syncWaveformCanvasPresentation) onto every satellite lane canvas.
+function mirrorWaveformLaneStyles(): void {
+  const primary = state.waveformCanvas;
+  if (!primary) {
+    return;
+  }
+  for (const canvas of state.waveformLaneCanvases) {
+    canvas.style.width = primary.style.width;
+    canvas.style.transform = primary.style.transform;
+  }
+}
+
+function broadcastWaveformLaneMessage(message: unknown): void {
+  for (const worker of state.waveformLaneWorkers) {
+    worker.postMessage(message);
+  }
+}
+
+async function createWaveformSatellite(
+  loadToken: number,
+  channelIndex: number,
+  laneCount: number,
+  channelPcm: Float32Array,
+  sampleRate: number,
+  duration: number,
+): Promise<void> {
+  if (!waveformWorkerScriptUri || loadToken !== state.loadToken) {
+    return;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'waveform-canvas waveform-canvas-lane';
+  canvas.setAttribute('aria-hidden', 'true');
+  canvas.style.position = 'absolute';
+  canvas.style.left = '0';
+  canvas.style.top = `${(channelIndex / laneCount) * 100}%`;
+  canvas.style.height = `${100 / laneCount}%`;
+  elements.waveformCanvasHost.appendChild(canvas);
+  state.waveformLaneCanvases.push(canvas);
+
+  const worker = await createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl');
+  if (loadToken !== state.loadToken) {
+    worker.terminate();
+    canvas.remove();
+    return;
+  }
+  worker.addEventListener('error', () => {
+    // Satellite lanes are best-effort; the primary lane drives status/state.
+  });
+
+  const runtimeReady = new Promise<void>((resolve) => {
+    const handler = (event: MessageEvent) => {
+      if ((event.data as { type?: string })?.type === 'runtimeReady') {
+        worker.removeEventListener('message', handler);
+        resolve();
+      }
+    };
+    worker.addEventListener('message', handler);
+  });
+
+  const wasmBytes = await fetchWasmCoreBytes();
+  if (loadToken !== state.loadToken) {
+    worker.terminate();
+    return;
+  }
+  worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
+  await runtimeReady;
+  if (loadToken !== state.loadToken) {
+    worker.terminate();
+    return;
+  }
+
+  const offscreenCanvas = canvas.transferControlToOffscreen();
+  const size = getWaveformViewportSize();
+  worker.postMessage({
+    type: 'initCanvas',
+    body: {
+      height: Math.max(1, Math.round(size.height / laneCount)),
+      offscreenCanvas,
+      renderScale: DISPLAY_PIXEL_RATIO,
+      width: size.width,
+    },
+  }, [offscreenCanvas]);
+  worker.postMessage({
+    type: 'attachAudioSession',
+    body: {
+      duration,
+      sampleCount: channelPcm.length,
+      sampleRate,
+      samplesBuffer: channelPcm.buffer,
+      sessionVersion: state.waveformSessionRevision,
+    },
+  }, [channelPcm.buffer]);
+  worker.postMessage({ type: 'buildWaveformPyramid' });
+  // Replay the current view so this lane paints immediately after its pyramid is
+  // built, instead of waiting for the next render broadcast.
+  if (state.lastWaveformRenderMessage) {
+    worker.postMessage(state.lastWaveformRenderMessage);
+  }
+  // Join the broadcast list only after setup is queued (see spectrogram note).
+  state.waveformLaneWorkers.push(worker);
+}
+
+// Sets up the waveform for the current channel mode: reshapes the primary lane,
+// re-attaches the primary worker's PCM (channel 0 in split, mono otherwise) and
+// spawns satellite workers for the remaining channels.
+async function setupWaveformChannels(
+  loadToken: number,
+  monoSamples: Float32Array,
+  playbackSession: PlaybackSession,
+): Promise<void> {
+  const waveformWorker = state.waveformWorker;
+  if (!waveformWorker || loadToken !== state.loadToken) {
+    return;
+  }
+
+  teardownWaveformLanes();
+  const laneCount = getSpectrogramLaneCount();
+  layoutWaveformLanePrimary(laneCount);
+
+  state.waveformSessionRevision += 1;
+  const primaryPcm = laneCount > 1 && playbackSession.channelBuffers[0] instanceof ArrayBuffer
+    ? new Float32Array(playbackSession.channelBuffers[0].slice(0))
+    : monoSamples;
+
+  if (laneCount > 1) {
+    waveformWorker.postMessage({
+      type: 'resizeCanvas',
+      body: {
+        height: Math.max(1, Math.round(getWaveformViewportSize().height / laneCount)),
+        renderScale: DISPLAY_PIXEL_RATIO,
+        width: getWaveformViewportSize().width,
+      },
+    });
+  }
+
+  waveformWorker.postMessage({
+    type: 'attachAudioSession',
+    body: {
+      duration: playbackSession.durationSeconds,
+      sampleCount: primaryPcm.length,
+      sampleRate: playbackSession.sourceSampleRate,
+      samplesBuffer: primaryPcm.buffer,
+      sessionVersion: state.waveformSessionRevision,
+    },
+  }, [primaryPcm.buffer]);
+  waveformWorker.postMessage({ type: 'buildWaveformPyramid' });
+
+  await setupWaveformSatellites(loadToken, laneCount, playbackSession.sourceSampleRate, playbackSession.durationSeconds);
+}
+
+async function setupWaveformSatellites(
+  loadToken: number,
+  laneCount: number,
+  sampleRate: number,
+  duration: number,
+): Promise<void> {
+  const session = state.playbackSession;
+  if (!session || laneCount <= 1) {
+    return;
+  }
+
+  addWaveformLaneLabel(0, laneCount);
+  // Spawn every satellite lane concurrently so all channels load together.
+  const tasks: Promise<void>[] = [];
+  for (let channelIndex = 1; channelIndex < laneCount; channelIndex += 1) {
+    const buffer = session.channelBuffers[channelIndex];
+    if (!(buffer instanceof ArrayBuffer)) {
+      continue;
+    }
+    const channelPcm = new Float32Array(buffer.slice(0));
+    addWaveformLaneLabel(channelIndex, laneCount);
+    tasks.push(createWaveformSatellite(loadToken, channelIndex, laneCount, channelPcm, sampleRate, duration));
+  }
+  await Promise.all(tasks);
+
+  if (loadToken === state.loadToken) {
+    requestWaveformRender();
+  }
+}
+
 async function initializeWaveformSurface(loadToken: number): Promise<void> {
+  setSurfaceLoading('waveform', true);
   elements.waveformCanvasHost.replaceChildren();
   state.waveformViewport = createInitialWaveformViewportState();
 
@@ -1147,6 +1602,7 @@ async function initializeWaveformSurface(loadToken: number): Promise<void> {
 }
 
 async function initializeSpectrogramSurface(loadToken: number): Promise<void> {
+  setSurfaceLoading('spectrogram', true);
   const canvas = state.spectrogramCanvas ?? resetSpectrogramCanvasElement();
   state.spectrogramSurfaceReadyPromise = Promise.resolve();
 
@@ -1161,9 +1617,11 @@ async function initializeSpectrogramSurface(loadToken: number): Promise<void> {
 
   const offscreenCanvas = canvas.transferControlToOffscreen();
   const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
+  const enableWebGpu = Boolean((state.activeFile as { enableWebGpuRendering?: boolean } | null)?.enableWebGpuRendering);
   worker.postMessage({
     type: 'initCanvas',
     body: {
+      enableWebGpu,
       offscreenCanvas,
       pixelHeight,
       pixelWidth,
@@ -1190,6 +1648,84 @@ async function resetSpectrogramSurface(loadToken: number, reason: AnalysisSurfac
     });
 
   return state.spectrogramSurfaceResetPromise;
+}
+
+// Re-initializes the spectrogram surface so the worker re-reads the WebGPU flag
+// from initCanvas, switching the render backend without reopening the file.
+function applyWebGpuRenderingChange(): void {
+  if (!state.analysis?.initialized) {
+    return;
+  }
+
+  const loadToken = state.loadToken;
+  // The live canvas already transferred its control to the worker, so swap in a
+  // fresh element before re-initializing the surface.
+  resetSpectrogramCanvasElement();
+  void resetSpectrogramSurface(loadToken, 'surface-invalid')
+    .then(() => {
+      if (loadToken !== state.loadToken) {
+        return;
+      }
+      scheduleSpectrogramRender({ force: true });
+    })
+    .catch((error) => {
+      if (loadToken !== state.loadToken) {
+        return;
+      }
+      setAnalysisStatus(
+        `Spectrogram failed to switch renderer: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      );
+    });
+}
+
+function syncWebGpuToggleFromActiveFile(): void {
+  elements.spectrogramWebGpuToggle.checked = Boolean(
+    (state.activeFile as { enableWebGpuRendering?: boolean } | null)?.enableWebGpuRendering,
+  );
+}
+
+function syncSplitChannelsToggleFromActiveFile(): void {
+  state.splitChannels = Boolean(
+    (state.activeFile as { splitChannels?: boolean } | null)?.splitChannels,
+  );
+  elements.spectrogramSplitChannelsToggle.checked = state.splitChannels;
+}
+
+// Rebuilds the spectrogram for the current channel mode (mono downmix vs
+// per-channel lanes) from the retained playback session, without re-decoding or
+// disturbing playback. Tears down satellite lanes, swaps in a fresh primary
+// canvas, and re-runs the deferred analysis session setup.
+function applyChannelModeChange(): void {
+  if (!state.playbackSession || !state.analysis) {
+    return;
+  }
+  const loadToken = state.loadToken;
+  if (loadToken <= 0) {
+    return;
+  }
+
+  teardownSpectrogramLanes();
+  resetSpectrogramCanvasElement();
+  renderSpectrogramScale();
+  const prepared = createPlaybackAnalysisDataFromPlaybackSession(state.playbackSession);
+  state.pendingAnalysisSession = {
+    loadToken,
+    monoSamples: prepared.monoSamples,
+    playbackSession: state.playbackSession,
+    quality: state.analysis.quality,
+  };
+  void startDeferredAnalysisSession(loadToken).catch((error) => {
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+    setAnalysisStatus(
+      `Spectrogram failed to switch channels: ${error instanceof Error ? error.message : String(error)}`,
+      true,
+    );
+  });
+
+  void setupWaveformChannels(loadToken, prepared.monoSamples.slice(), state.playbackSession);
 }
 
 function applyTransportCommand(command: TransportCommand | null): void {
@@ -1551,39 +2087,55 @@ function renderSpectrogramScale(): void {
     return;
   }
 
-  if (areFrequencyTicksEqual(state.renderedFrequencyTicks, frequencyTicks)) {
+  const laneCount = getSpectrogramLaneCount();
+  if (
+    laneCount === state.renderedFrequencyLaneCount
+    && areFrequencyTicksEqual(state.renderedFrequencyTicks, frequencyTicks)
+  ) {
     return;
   }
 
   const axisFragment = document.createDocumentFragment();
   const guideFragment = document.createDocumentFragment();
 
-  for (const tick of frequencyTicks) {
-    const axisTick = document.createElement('div');
-    axisTick.className = 'spectrogram-tick';
-    if (tick.edge === 'top') {
-      axisTick.classList.add('spectrogram-tick-edge-top');
-    } else if (tick.edge === 'bottom') {
-      axisTick.classList.add('spectrogram-tick-edge-bottom');
+  // Each channel lane spans the full frequency range within its own vertical
+  // band, so the ticks/guides repeat once per lane.
+  for (let lane = 0; lane < laneCount; lane += 1) {
+    for (const tick of frequencyTicks) {
+      // The lowest-frequency (bottom-edge) label of an interior lane sits at the
+      // same y as the next lane's top label, so drop it to avoid the collision.
+      if (tick.edge === 'bottom' && lane < laneCount - 1) {
+        continue;
+      }
+      const positionRatio = (lane + tick.positionRatio) / laneCount;
+
+      const axisTick = document.createElement('div');
+      axisTick.className = 'spectrogram-tick';
+      if (tick.edge === 'top' && lane === 0) {
+        axisTick.classList.add('spectrogram-tick-edge-top');
+      } else if (tick.edge === 'bottom' && lane === laneCount - 1) {
+        axisTick.classList.add('spectrogram-tick-edge-bottom');
+      }
+      axisTick.style.top = `${positionRatio * 100}%`;
+
+      const label = document.createElement('span');
+      label.className = 'spectrogram-tick-label';
+      label.textContent = tick.label;
+      axisTick.append(label);
+
+      const guide = document.createElement('div');
+      guide.className = 'spectrogram-guide';
+      guide.style.top = `${positionRatio * 100}%`;
+
+      axisFragment.append(axisTick);
+      guideFragment.append(guide);
     }
-    axisTick.style.top = `${tick.positionRatio * 100}%`;
-
-    const label = document.createElement('span');
-    label.className = 'spectrogram-tick-label';
-    label.textContent = tick.label;
-    axisTick.append(label);
-
-    const guide = document.createElement('div');
-    guide.className = 'spectrogram-guide';
-    guide.style.top = `${tick.positionRatio * 100}%`;
-
-    axisFragment.append(axisTick);
-    guideFragment.append(guide);
   }
 
   elements.spectrogramAxis.replaceChildren(axisFragment);
   elements.spectrogramGuides.replaceChildren(guideFragment);
   state.renderedFrequencyTicks = frequencyTicks;
+  state.renderedFrequencyLaneCount = laneCount;
 }
 
 function updateLoudnessLegendDom(body: {
@@ -1918,10 +2470,9 @@ function cancelActiveSpectrogramRender(): void {
     return;
   }
 
-  state.analysisWorker.postMessage({
-    type: 'cancelGeneration',
-    body: { generation },
-  });
+  const message = { type: 'cancelGeneration', body: { generation } };
+  state.analysisWorker.postMessage(message);
+  broadcastSpectrogramLaneMessage(message);
 }
 
 function scheduleSpectrogramConfigRefresh({ persist = true } = {}): void {
@@ -1940,6 +2491,11 @@ function scheduleSpectrogramConfigRefresh({ persist = true } = {}): void {
   }, SPECTROGRAM_CONFIG_APPLY_DELAY_MS);
 }
 
+function getSpectrogramLaneCount(): number {
+  const channels = state.playbackSession?.numberOfChannels ?? 1;
+  return state.splitChannels && channels > 1 ? channels : 1;
+}
+
 function getSpectrogramRenderPixelHeight(): number {
   const renderHeight = Math.max(
     1,
@@ -1951,7 +2507,10 @@ function getSpectrogramRenderPixelHeight(): number {
     1,
   );
 
-  return Math.max(1, Math.round(renderHeight * DISPLAY_PIXEL_RATIO));
+  // Each channel lane occupies an equal vertical slice, so the per-lane render
+  // height (used for every lane worker's canvas + render plan) is divided down.
+  const laneCount = getSpectrogramLaneCount();
+  return Math.max(1, Math.round((renderHeight * DISPLAY_PIXEL_RATIO) / laneCount));
 }
 
 function refreshSpectrogramAnalysisConfig({ persist = true } = {}): void {
@@ -2034,6 +2593,7 @@ function syncWaveformCanvasPresentation(uiState: ViewportUiState | null = state.
   if (!(sampleRate > 0)) {
     canvas.style.width = '100%';
     canvas.style.transform = 'translate3d(0, 0, 0)';
+    mirrorWaveformLaneStyles();
     return;
   }
 
@@ -2050,6 +2610,7 @@ function syncWaveformCanvasPresentation(uiState: ViewportUiState | null = state.
   if (!activeRenderRange || !(activeRenderRange.end > activeRenderRange.start)) {
     canvas.style.width = '100%';
     canvas.style.transform = 'translate3d(0, 0, 0)';
+    mirrorWaveformLaneStyles();
     return;
   }
 
@@ -2079,8 +2640,13 @@ function syncWaveformCanvasPresentation(uiState: ViewportUiState | null = state.
   const hasBufferedCoverage = renderSpan > visibleSpan && widthPx > viewportWidthPx;
 
   canvas.style.width = hasBufferedCoverage ? `${widthPx}px` : '100%';
-  canvas.style.height = '100%';
+  // In split mode each lane canvas keeps its inline per-lane height; only set a
+  // full height for the single mono canvas.
+  if (getSpectrogramLaneCount() <= 1) {
+    canvas.style.height = '100%';
+  }
   canvas.style.transform = hasBufferedCoverage ? `translate3d(${-offsetPx}px, 0, 0)` : 'translate3d(0, 0, 0)';
+  mirrorWaveformLaneStyles();
 }
 
 function expandRange(range: TimeRange, duration: number, factor: number): TimeRange {
@@ -2224,7 +2790,7 @@ function syncSpectrogramDisplayRange(displayRange: TimeRange, pixelWidth: number
     start: displayRange.start,
   };
 
-  state.analysisWorker.postMessage({
+  const message = {
     type: 'updateVisibleDisplayRange',
     body: {
       displayEnd: displayRange.end,
@@ -2232,7 +2798,9 @@ function syncSpectrogramDisplayRange(displayRange: TimeRange, pixelWidth: number
       pixelHeight,
       pixelWidth,
     },
-  });
+  };
+  state.analysisWorker.postMessage(message);
+  broadcastSpectrogramLaneMessage(message);
 }
 
 function syncPresentedSpectrogramRange(displayRange: TimeRange | null): void {
@@ -2248,7 +2816,7 @@ function requestSpectrogramOverviewRender(renderConfig = getEffectiveSpectrogram
     return;
   }
 
-  state.analysisWorker.postMessage({
+  const message = {
     type: 'renderOverview',
     body: {
       analysisType: renderConfig.analysisType,
@@ -2276,7 +2844,10 @@ function requestSpectrogramOverviewRender(renderConfig = getEffectiveSpectrogram
       loudnessCurves: renderConfig.loudnessCurves,
       loudnessShowPeak: renderConfig.loudnessShowPeak,
     },
-  });
+  };
+  state.lastSpectrogramOverviewMessage = message;
+  state.analysisWorker.postMessage(message);
+  broadcastSpectrogramLaneMessage(message);
 }
 
 function scheduleSpectrogramRender({ force = false } = {}): void {
@@ -2341,13 +2912,15 @@ function syncSpectrogramView({ force = false } = {}): void {
   };
 
   if (previousGeneration > 0) {
-    state.analysisWorker.postMessage({
+    const cancelMessage = {
       type: 'cancelGeneration',
       body: { generation: previousGeneration },
-    });
+    };
+    state.analysisWorker.postMessage(cancelMessage);
+    broadcastSpectrogramLaneMessage(cancelMessage);
   }
 
-  state.analysisWorker.postMessage({
+  const visibleMessage = {
     type: 'renderVisibleRange',
     body: {
       analysisType: renderConfig.analysisType,
@@ -2382,7 +2955,10 @@ function syncSpectrogramView({ force = false } = {}): void {
       requestEnd: requestRange.end,
       requestStart: requestRange.start,
     },
-  });
+  };
+  state.lastSpectrogramVisibleMessage = visibleMessage;
+  state.analysisWorker.postMessage(visibleMessage);
+  broadcastSpectrogramLaneMessage(visibleMessage);
 
   if (state.analysisOverviewRefreshPending) {
     state.analysisOverviewRefreshPending = false;
@@ -2444,18 +3020,25 @@ function applySampleInfo(payload: SampleInfoPayload): void {
     return;
   }
 
+  const laneCount = Math.max(1, hover.laneCount);
+  const channelPrefix = laneCount > 1 && payload.label
+    ? `${channelLaneLabel(hover.laneIndex, laneCount)} • `
+    : '';
+
   if (payload.surface === 'waveform') {
     updateSurfaceHoverTooltip(
       elements.waveformHoverTooltip,
       elements.waveformViewport,
       hover,
-      payload.label,
+      channelPrefix + payload.label,
     );
 
     if (elements.waveformSampleMarker && payload.markerVisible) {
+      // markerYRatio is within the hovered lane; map it back to full height.
+      const fullMarkerYRatio = (hover.laneIndex + payload.markerYRatio) / laneCount;
       elements.waveformSampleMarker.style.display = 'block';
       elements.waveformSampleMarker.style.left = `${payload.markerXRatio * elements.waveformViewport.clientWidth}px`;
-      elements.waveformSampleMarker.style.top = `${payload.markerYRatio * elements.waveformViewport.clientHeight}px`;
+      elements.waveformSampleMarker.style.top = `${fullMarkerYRatio * elements.waveformViewport.clientHeight}px`;
     } else {
       hideWaveformSampleMarker();
     }
@@ -2466,8 +3049,81 @@ function applySampleInfo(payload: SampleInfoPayload): void {
     elements.spectrogramHoverTooltip,
     elements.spectrogramHitTarget,
     hover,
-    payload.label,
+    channelPrefix + payload.label,
   );
+}
+
+function isPerChannelSpectrogramValueType(): boolean {
+  const type = state.spectrogramConfig.analysisType;
+  return type === 'spectrogram' || type === 'mel' || type === 'scalogram';
+}
+
+// Primary analysis worker is channel 0; satellite lane workers follow in order.
+function getAnalysisChannelWorkers(): Worker[] {
+  const workers: Worker[] = [];
+  if (state.analysisWorker) {
+    workers.push(state.analysisWorker);
+  }
+  for (const worker of state.analysisLaneWorkers) {
+    workers.push(worker);
+  }
+  return workers;
+}
+
+function formatHoverFrequency(startHz: number | null, endHz: number | null): string | null {
+  const startValid = typeof startHz === 'number' && Number.isFinite(startHz);
+  const endValid = typeof endHz === 'number' && Number.isFinite(endHz);
+  const hz = startValid && endValid
+    ? ((startHz as number) + (endHz as number)) / 2
+    : (startValid ? (startHz as number) : (endValid ? (endHz as number) : NaN));
+  if (!Number.isFinite(hz) || hz <= 0) {
+    return null;
+  }
+  return hz >= 1000 ? `${(hz / 1000).toFixed(2)} kHz` : `${Math.round(hz)} Hz`;
+}
+
+function formatHoverDb(valueDb: number | null): string {
+  if (valueDb === null || !Number.isFinite(valueDb)) {
+    return '–';
+  }
+  return valueDb <= -120 ? '-∞ dB' : `${valueDb.toFixed(1)} dB`;
+}
+
+function applyChannelSampleValue(payload: { channelIndex: number; requestId: number; result: ChannelSampleValueResult }): void {
+  const aggregation = state.spectrogramChannelHover;
+  if (!aggregation || aggregation.requestId !== payload.requestId) {
+    return;
+  }
+  if (payload.channelIndex < 0 || payload.channelIndex >= aggregation.results.length) {
+    return;
+  }
+  aggregation.results[payload.channelIndex] = payload.result;
+  renderSpectrogramChannelHoverTooltip();
+}
+
+function renderSpectrogramChannelHoverTooltip(): void {
+  const aggregation = state.spectrogramChannelHover;
+  const hover = state.hoverState.spectrogram;
+  if (!aggregation || !hover || hover.requestId !== aggregation.requestId) {
+    return;
+  }
+  const reference = aggregation.results.find((entry) => entry) ?? null;
+  if (!reference) {
+    return;
+  }
+
+  const parts = [formatAxisLabel(reference.timeSeconds)];
+  const frequencyLabel = formatHoverFrequency(reference.frequencyStartHz, reference.frequencyEndHz);
+  if (frequencyLabel) {
+    parts.push(frequencyLabel);
+  }
+  const laneCount = aggregation.laneCount;
+  aggregation.results.forEach((entry, channelIndex) => {
+    const prefix = laneCount > 1 ? `${channelLaneLabel(channelIndex, laneCount)} ` : '';
+    parts.push(`${prefix}${formatHoverDb(entry ? entry.valueDb : null)}`);
+  });
+
+  updateSurfaceHoverTooltip(elements.spectrogramHoverTooltip, elements.spectrogramHitTarget, hover, parts.join(' • '));
 }
 
 function requestSampleInfoAtClientPoint(surface: SurfaceKind, clientX: number, clientY: number): void {
@@ -2489,17 +3145,49 @@ function requestSampleInfoAtClientPoint(surface: SurfaceKind, clientX: number, c
 
   const requestId = state.hoverRequestIds[surface] + 1;
   state.hoverRequestIds[surface] = requestId;
+
+  // In split-channel mode the surface stacks one lane per channel, so map the
+  // full-height pointer ratio into the hovered lane and report values relative
+  // to that lane (so frequency / marker position match the channel under it).
+  const pointerRatioY = clamp((clientY - rect.top) / rect.height, 0, 1);
+  const laneCount = getSpectrogramLaneCount();
+  const laneIndex = clamp(Math.floor(pointerRatioY * laneCount), 0, laneCount - 1);
+  const laneRatioY = clamp(pointerRatioY * laneCount - laneIndex, 0, 1);
+
   state.hoverState[surface] = {
     clientX,
     clientY,
     requestId,
+    laneCount,
+    laneIndex,
   };
+
+  const pointerRatioX = clamp((clientX - rect.left) / rect.width, 0, 1);
+
+  // Split spectrogram with dB-valued analysis: query every channel's analysis
+  // worker so the readout shows each channel's actual value at this point.
+  if (surface === 'spectrogram' && laneCount > 1 && isPerChannelSpectrogramValueType()) {
+    const workers = getAnalysisChannelWorkers();
+    state.spectrogramChannelHover = {
+      requestId,
+      laneCount,
+      results: new Array(workers.length).fill(null),
+    };
+    workers.forEach((worker, channelIndex) => {
+      worker.postMessage({
+        type: 'requestChannelSampleValue',
+        body: { channelIndex, pointerRatioX, pointerRatioY: laneRatioY, requestId },
+      });
+    });
+    return;
+  }
+  state.spectrogramChannelHover = null;
 
   state.engineWorker.postMessage({
     type: 'RequestSampleInfo',
     body: {
-      pointerRatioX: clamp((clientX - rect.left) / rect.width, 0, 1),
-      pointerRatioY: clamp((clientY - rect.top) / rect.height, 0, 1),
+      pointerRatioX,
+      pointerRatioY: laneRatioY,
       requestId,
       surface,
     },
@@ -2573,6 +3261,7 @@ function hideWaveformHoverTooltip(): void {
 function hideSpectrogramHoverTooltip(): void {
   clearPendingSampleInfoRequest('spectrogram');
   state.hoverState.spectrogram = null;
+  state.spectrogramChannelHover = null;
   hideSurfaceHoverTooltip(elements.spectrogramHoverTooltip);
 }
 
@@ -2747,6 +3436,11 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
     return;
   }
 
+  if ((message as { type?: string })?.type === 'channelSampleValue') {
+    applyChannelSampleValue((message as unknown as { body: { channelIndex: number; requestId: number; result: ChannelSampleValueResult } }).body);
+    return;
+  }
+
   if (!state.analysis) {
     return;
   }
@@ -2829,6 +3523,7 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
       viewStart: Number(body.viewStart) || 0,
     };
     setAnalysisStatus('Ready');
+    setSurfaceLoading('spectrogram', false);
     return;
   }
 
@@ -2839,6 +3534,7 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
 
   if (message?.type === 'error') {
     setAnalysisStatus(`Spectrogram failed: ${message.body?.message || 'Unknown worker error.'}`, true);
+    setSurfaceLoading('spectrogram', false);
   }
 }
 
@@ -2886,6 +3582,7 @@ function handleWaveformWorkerMessage(loadToken: number, message: WaveformWorkerT
       state.waveformViewport.pendingRenderRange = null;
       state.waveformViewport.pendingRenderWidthPx = 0;
       syncWaveformCanvasPresentation();
+      setSurfaceLoading('waveform', false);
       handleWaveformSurfaceReady();
       return;
     case 'error':
@@ -2953,18 +3650,22 @@ function requestWaveformRender(uiState: ViewportUiState | null = state.engineUiS
   state.waveformRenderGeneration += 1;
   state.waveformViewport.pendingRenderRange = renderRange;
   state.waveformViewport.pendingRenderWidthPx = renderWidthPx;
-  state.waveformWorker.postMessage({
+  const laneCount = getSpectrogramLaneCount();
+  const message = {
     type: 'renderWaveformView',
     body: {
       generation: state.waveformRenderGeneration,
-      height: waveformSize.height,
+      height: Math.max(1, Math.round(waveformSize.height / laneCount)),
       renderScale: DISPLAY_PIXEL_RATIO,
       viewEnd: renderRange.end,
       viewStart: renderRange.start,
       visibleSpan: Math.max(0, renderRange.end - renderRange.start),
       width: renderWidthPx,
     },
-  });
+  };
+  state.lastWaveformRenderMessage = message;
+  state.waveformWorker.postMessage(message);
+  broadcastWaveformLaneMessage(message);
 }
 
 function applyPlaybackProgress(body: {
@@ -3021,6 +3722,9 @@ async function startDeferredAnalysisSession(loadToken: number): Promise<void> {
   }
 
   state.pendingAnalysisSession = null;
+  teardownSpectrogramLanes();
+  const laneCount = getSpectrogramLaneCount();
+  layoutSpectrogramLanePrimary(laneCount);
   state.spectrogramSurfaceReadyPromise = initializeSpectrogramSurface(loadToken);
   await state.spectrogramSurfaceReadyPromise;
 
@@ -3042,17 +3746,32 @@ async function startDeferredAnalysisSession(loadToken: number): Promise<void> {
     return;
   }
 
+  // Lane 0 (the primary worker) renders channel 0 in split mode, or the mono
+  // downmix otherwise. A dedicated session revision forces the worker to
+  // re-prepare its WASM session with the new per-lane PCM on a mode change.
+  state.spectrogramSessionRevision += 1;
+  const primaryPcm = laneCount > 1 && pending.playbackSession.channelBuffers[0] instanceof ArrayBuffer
+    ? new Float32Array(pending.playbackSession.channelBuffers[0].slice(0))
+    : pending.monoSamples;
   analysisWorker.postMessage({
     type: 'attachAudioSession',
     body: {
       duration: pending.playbackSession.durationSeconds,
       quality: pending.quality,
-      sampleCount: pending.monoSamples.length,
+      sampleCount: primaryPcm.length,
       sampleRate: pending.playbackSession.sourceSampleRate,
-      samplesBuffer: pending.monoSamples.buffer,
-      sessionVersion: state.engineSessionRevision,
+      samplesBuffer: primaryPcm.buffer,
+      sessionVersion: state.spectrogramSessionRevision,
     },
-  }, [pending.monoSamples.buffer]);
+  }, [primaryPcm.buffer]);
+
+  await setupSpectrogramSatellites(
+    loadToken,
+    laneCount,
+    pending.playbackSession.sourceSampleRate,
+    pending.playbackSession.durationSeconds,
+    pending.quality,
+  );
 }
 
 async function initializeDecodedPlayback(loadToken: number, payload: any, decodedAudio: AudioBuffer): Promise<void> {
@@ -3090,7 +3809,6 @@ async function initializePlaybackFromPreparedData(
   }
 
   state.engineSessionRevision += 1;
-  const waveformMono = monoSamples.slice();
   engineWorker.postMessage({
     type: 'LoadAnalysisSession',
     body: {
@@ -3102,17 +3820,10 @@ async function initializePlaybackFromPreparedData(
       sessionRevision: state.engineSessionRevision,
     },
   });
-  waveformWorker.postMessage({
-    type: 'attachAudioSession',
-    body: {
-      duration: playbackSession.durationSeconds,
-      sampleCount: waveformMono.length,
-      sampleRate: playbackSession.sourceSampleRate,
-      samplesBuffer: waveformMono.buffer,
-      sessionVersion: state.engineSessionRevision,
-    },
-  }, [waveformMono.buffer]);
-  waveformWorker.postMessage({ type: 'buildWaveformPyramid' });
+  // Sets up the primary waveform lane (channel 0 in split mode, mono downmix
+  // otherwise) plus any per-channel satellite lanes. A copy is passed so the
+  // original mono buffer survives for the spectrogram session below.
+  void setupWaveformChannels(loadToken, monoSamples.slice(), playbackSession);
 
   state.pendingAnalysisSession = {
     loadToken,
@@ -3120,6 +3831,15 @@ async function initializePlaybackFromPreparedData(
     playbackSession,
     quality: normalizeSpectrogramQuality(payload?.spectrogramQuality),
   };
+
+  // Start the spectrogram session in parallel with the waveform (both right
+  // after decode) instead of waiting for the waveform's first frame.
+  void startDeferredAnalysisSession(loadToken).catch((error) => {
+    if (loadToken !== state.loadToken) {
+      return;
+    }
+    setAnalysisStatus(`Spectrogram failed: ${error instanceof Error ? error.message : String(error)}`, true);
+  });
 
   await audioTransport.load({
     playbackSession,
@@ -3137,17 +3857,6 @@ async function initializePlaybackFromPreparedData(
   syncTransport();
   refreshSpectrogramAnalysisConfig({ persist: false });
   setAnalysisStatus('Playback ready');
-
-  if (state.initialWaveformReadyLoadToken === loadToken) {
-    void startDeferredAnalysisSession(loadToken)
-      .catch((error) => {
-        if (loadToken !== state.loadToken) {
-          return;
-        }
-
-        setAnalysisStatus(`Spectrogram failed: ${error instanceof Error ? error.message : String(error)}`, true);
-      });
-  }
 }
 
 const {
@@ -3197,6 +3906,8 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
       state.activeFile = message.body;
     }
     applyPersistedSpectrogramDefaults(message.body?.spectrogramDefaults);
+    syncWebGpuToggleFromActiveFile();
+    syncSplitChannelsToggleFromActiveFile();
     renderSpectrogramMeta();
     state.externalTools = normalizeExternalToolStatus(message.body?.externalTools, EMBEDDED_MEDIA_TOOLS_GUIDANCE);
     void loadAudioFile(message.body);
@@ -3514,6 +4225,25 @@ function attachUiEvents(): void {
       elements.spectrogramDistributionSelect.value,
     );
     refreshSpectrogramAnalysisConfig();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramWebGpuToggle.addEventListener('change', () => {
+    const enabled = elements.spectrogramWebGpuToggle.checked;
+    if (state.activeFile) {
+      (state.activeFile as { enableWebGpuRendering?: boolean }).enableWebGpuRendering = enabled;
+    }
+    vscode.postMessage({ type: 'persistWebGpuRendering', body: { enabled } });
+    applyWebGpuRenderingChange();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.spectrogramSplitChannelsToggle.addEventListener('change', () => {
+    const enabled = elements.spectrogramSplitChannelsToggle.checked;
+    state.splitChannels = enabled;
+    if (state.activeFile) {
+      (state.activeFile as { splitChannels?: boolean }).splitChannels = enabled;
+    }
+    vscode.postMessage({ type: 'persistSplitChannels', body: { enabled } });
+    applyChannelModeChange();
     scheduleKeyboardSurfaceFocus();
   });
   elements.spectrogramMeta.addEventListener('dragstart', (event) => {

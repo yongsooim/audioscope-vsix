@@ -44,6 +44,8 @@ export interface SpectrogramDefaultsPayload {
 export interface AudioscopePayload {
   audioBytes: ArrayBuffer | null;
   documentUri: string;
+  enableWebGpuRendering: boolean;
+  splitChannels: boolean;
   externalTools: ExternalToolStatusPayload;
   fileBacked: boolean;
   fileExtension: string;
@@ -161,6 +163,16 @@ export interface PersistSpectrogramDefaultsMessage {
   body: Partial<SpectrogramDefaultsPayload>;
 }
 
+export interface PersistWebGpuRenderingMessage {
+  type: 'persistWebGpuRendering';
+  body: { enabled: boolean };
+}
+
+export interface PersistSplitChannelsMessage {
+  type: 'persistSplitChannels';
+  body: { enabled: boolean };
+}
+
 export interface RequestMediaMetadataMessage {
   type: 'requestMediaMetadata';
   body: { loadToken: number };
@@ -185,6 +197,8 @@ export type WebviewToHostMessage =
   | ReadyMessage
   | ReloadMessage
   | PersistSpectrogramDefaultsMessage
+  | PersistWebGpuRenderingMessage
+  | PersistSplitChannelsMessage
   | RequestMediaMetadataMessage
   | RequestDecodeFallbackMessage
   | RequestLoudnessSummaryMessage

@@ -74,6 +74,9 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             <div id="waveform-cursor" class="waveform-cursor" aria-hidden="true"></div>
             <div id="waveform-loop-start" class="waveform-loop-handle" aria-hidden="true"></div>
             <div id="waveform-loop-end" class="waveform-loop-handle" aria-hidden="true"></div>
+            <div id="waveform-loading" class="surface-loading" role="status" aria-label="Loading waveform" hidden>
+              <span class="surface-loading-spinner" aria-hidden="true"></span>
+            </div>
           </div>
           <div id="waveform-axis" class="waveform-axis" aria-hidden="true"></div>
         </div>
@@ -303,6 +306,25 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                     <option value="show">Show</option>
                   </select>
                 </label>
+                <div class="spectrogram-control-divider" aria-hidden="true">Experimental</div>
+                <label id="spectrogram-webgpu-control" class="spectrogram-control" title="Render the spectrogram with WebGPU compute when available. Falls back to CPU automatically. Several times faster but uses extra GPU memory.">
+                  <span class="spectrogram-control-label">WebGPU</span>
+                  <span class="spectrogram-control-inline spectrogram-control-toggle-inline">
+                    <input id="spectrogram-webgpu-toggle" class="spectrogram-control-toggle-input" type="checkbox" aria-label="Enable experimental WebGPU spectrogram rendering" />
+                    <span class="spectrogram-control-toggle-track" aria-hidden="true">
+                      <span class="spectrogram-control-toggle-thumb"></span>
+                    </span>
+                  </span>
+                </label>
+                <label id="spectrogram-split-channels-control" class="spectrogram-control" title="Show each audio channel as its own stacked lane instead of a mono downmix. Increases compute and memory with channel count.">
+                  <span class="spectrogram-control-label">Channels</span>
+                  <span class="spectrogram-control-inline spectrogram-control-toggle-inline">
+                    <input id="spectrogram-split-channels-toggle" class="spectrogram-control-toggle-input" type="checkbox" aria-label="Split audio channels into separate lanes" />
+                    <span class="spectrogram-control-toggle-track" aria-hidden="true">
+                      <span class="spectrogram-control-toggle-thumb"></span>
+                    </span>
+                  </span>
+                </label>
               </div>
             </div>
             <div id="spectrogram-hover-tooltip" class="surface-hover-tooltip surface-hover-tooltip-detail" aria-hidden="true"></div>
@@ -314,6 +336,9 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             <div id="spectrogram-guides" class="spectrogram-guides" aria-hidden="true"></div>
             <div id="spectrogram-loudness-ref-label" class="spectrogram-loudness-ref-label" aria-hidden="true" hidden></div>
             <div id="spectrogram-hit-target" class="spectrogram-hit-target" aria-hidden="true"></div>
+            <div id="spectrogram-loading" class="surface-loading" role="status" aria-label="Loading spectrogram" hidden>
+              <span class="surface-loading-spinner" aria-hidden="true"></span>
+            </div>
           </div>
         </div>
       </section>
