@@ -911,6 +911,10 @@ body {
 .spectrogram-meta[data-open="true"] {
   padding: 8px 10px;
   border-radius: var(--chrome-radius);
+  /* Keep the panel within the spectrogram stage; the toggle stays pinned and
+     the controls scroll when the window is too short to show them all. */
+  max-height: calc(100% - 20px);
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .spectrogram-meta-toggle {
@@ -958,6 +962,9 @@ body {
 .spectrogram-meta-controls {
   display: grid;
   gap: 7px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .spectrogram-control {

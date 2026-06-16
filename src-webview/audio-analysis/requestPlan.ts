@@ -289,10 +289,23 @@ export function createRequestPlan(
     TILE_COLUMN_COUNT,
     quantizeCeil(Math.ceil(pixelWidth * preset.colsMultiplier), TILE_COLUMN_COUNT / 2),
   );
-  const hopSamples = analysisType === 'scalogram' || analysisType === 'chroma'
+  const nativeHopSamples = analysisType === 'scalogram' || analysisType === 'chroma'
     ? normalizeScalogramHopSamples(request?.scalogramHopSamples)
     : Math.max(1, Math.round(fftSize * (1 - overlapRatio)));
-  const secondsPerColumn = hopSamples / context.sampleRate;
+  const nativeSecondsPerColumn = nativeHopSamples / context.sampleRate;
+  // Time-axis level-of-detail: a wide view (e.g. a long file zoomed out) would
+  // otherwise render the whole file at full hop resolution — hundreds of tiles.
+  // Stride the hop so the column/tile count tracks the on-screen target instead
+  // of the file length. Quantized to powers of two so tile boundaries stay
+  // stable across small zoom changes (cache friendly), like waveform mip levels.
+  const viewSpanSeconds = Math.max(1 / context.sampleRate, viewEnd - viewStart);
+  const desiredColumns = Math.max(1, targetColumns);
+  let timeStride = 1;
+  while (timeStride < (1 << 20) && (viewSpanSeconds / nativeSecondsPerColumn) / timeStride > desiredColumns) {
+    timeStride *= 2;
+  }
+  const hopSamples = nativeHopSamples * timeStride;
+  const secondsPerColumn = nativeSecondsPerColumn * timeStride;
   const tileDuration = Math.max(secondsPerColumn * TILE_COLUMN_COUNT, 1 / context.sampleRate);
   const startTileIndex = Math.max(0, Math.floor(viewStart / tileDuration));
   const endTileIndex = Math.max(
