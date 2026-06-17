@@ -42,7 +42,7 @@ for (const [name, entry] of workerEntries) {
   await build({
     ...sharedOptions,
     input: { [name]: entry },
-    output: { ...sharedOutput, inlineDynamicImports: true },
+    output: { ...sharedOutput, codeSplitting: false },
   });
 }
 
@@ -51,5 +51,5 @@ for (const [name, entry] of workerEntries) {
 await build({
   ...sharedOptions,
   input: { audioTransportProcessor: path.join(projectRoot, 'src-webview', 'transport', 'audioTransportProcessor.ts') },
-  output: { ...sharedOutput, inlineDynamicImports: true },
+  output: { ...sharedOutput, codeSplitting: false },
 });

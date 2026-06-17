@@ -412,8 +412,7 @@ body {
 
 .wave-toolbar-pill-zoom {
   justify-content: center;
-  width: 88px;
-  min-width: 88px;
+  min-width: 148px;
   color: var(--chrome-text-strong);
   text-align: center;
   cursor: default;

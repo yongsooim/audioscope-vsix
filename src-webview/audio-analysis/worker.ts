@@ -6334,6 +6334,10 @@ function disposeWasmSession(module: WaveCoreModule): void {
   if (analysisState.spectrogramOutputPointer) {
     module._free(analysisState.spectrogramOutputPointer);
   }
+  if (analysisSampleScratchPointer) {
+    module._free(analysisSampleScratchPointer);
+    analysisSampleScratchPointer = 0;
+  }
 
   module._wave_dispose_session();
   analysisState.module = null;

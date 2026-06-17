@@ -2,7 +2,7 @@
   "name": "audioscope",
   "displayName": "audioscope",
   "description": "Audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
@@ -67,7 +67,7 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onCustomEditor:audioscope.audioEditor",
+    "onCustomEditor:audioscope.editor",
     "onCommand:audioscope.openActiveFileInAudioscope"
   ],
   "contributes": {

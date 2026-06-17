@@ -2165,10 +2165,10 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
 
   const sampleStartFrame = range.startFrame;
   const visibleSampleSpan = Math.max(0, Math.max(1, spanFrames) - 1);
-  const sampleIndex = clamp(frameAtPointer, 0, Math.max(0, state.session.durationFrames));
+  const sampleIndex = clamp(frameAtPointer, 0, getMaxSampleIndex());
 
   return {
-    label: timeLabel,
+    label: formatAxisLabel(sampleIndex / sampleRate),
     markerVisible: true,
     markerXRatio: spanFrames <= 0 ? 0 : clamp01((sampleIndex - sampleStartFrame) / Math.max(1, visibleSampleSpan)),
     markerYRatio: clamp01(pointerRatioY),
@@ -2834,6 +2834,10 @@ function framesToSeconds(frame: number): number {
 
 function clampFrame(value: number): number {
   return clamp(Math.round(value), 0, Math.max(0, state.session.durationFrames));
+}
+
+function getMaxSampleIndex(): number {
+  return Math.max(0, state.session.durationFrames - 1);
 }
 
 function disposeWasmSession(module: WaveCoreModule): void {
