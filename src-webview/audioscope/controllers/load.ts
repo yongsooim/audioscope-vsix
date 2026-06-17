@@ -264,7 +264,7 @@ export function createAudioscopeLoadController({
         kind: 'pcm',
         numberOfChannels,
         sampleRate,
-        source: body?.source === 'ffmpeg' ? 'ffmpeg' : 'ffmpeg',
+        source: 'ffmpeg',
       };
     } else {
       const audioBuffer = body?.audioBuffer;
@@ -285,7 +285,7 @@ export function createAudioscopeLoadController({
         mimeType: typeof body?.mimeType === 'string' && body.mimeType.length > 0
           ? body.mimeType
           : 'audio/wav',
-        source: body?.source === 'ffmpeg' ? 'ffmpeg' : 'ffmpeg',
+        source: 'ffmpeg',
       };
     }
 
@@ -485,52 +485,6 @@ export function createAudioscopeLoadController({
     return state.decodeFallbackPromise;
   }
 
-  function guessAudioMimeType(resourcePath) {
-    const extension = resourcePath.split('.').pop()?.toLowerCase();
-
-    switch (extension) {
-      case 'wav':
-      case 'wave':
-        return 'audio/wav';
-      case 'mp3':
-        return 'audio/mpeg';
-      case 'ogg':
-      case 'oga':
-        return 'audio/ogg';
-      case 'flac':
-        return 'audio/flac';
-      case 'm4a':
-        return 'audio/mp4';
-      case 'aac':
-        return 'audio/aac';
-      case 'opus':
-        return 'audio/ogg';
-      case 'aif':
-      case 'aiff':
-        return 'audio/aiff';
-      default:
-        return 'application/octet-stream';
-    }
-  }
-
-  function resolvePlayableAudioMimeType(payload, responseContentType) {
-    const normalizedContentType = responseContentType?.split(';', 1)[0]?.trim().toLowerCase() || '';
-
-    if (
-      normalizedContentType
-      && normalizedContentType !== 'application/octet-stream'
-      && normalizedContentType !== 'binary/octet-stream'
-    ) {
-      return normalizedContentType;
-    }
-
-    if (typeof payload?.fileExtension === 'string' && payload.fileExtension.length > 0) {
-      return guessAudioMimeType(`file.${payload.fileExtension}`);
-    }
-
-    return guessAudioMimeType(payload?.sourceUri || payload?.documentUri || '');
-  }
-
   function createPlaybackTransport(loadToken) {
     let transport = null;
 
@@ -623,7 +577,6 @@ export function createAudioscopeLoadController({
     try {
       setAnalysisStatus('Loading audio…');
       let audioData = getHostSuppliedAudioBytes(payload);
-      let responseContentType = null;
       let sourceKind = 'native';
 
       if (shouldPreferHostDecodeBeforeFetch(payload)) {
@@ -662,11 +615,8 @@ export function createAudioscopeLoadController({
           throw new Error(`HTTP ${response.status}`);
         }
 
-        responseContentType = response.headers.get('content-type');
         audioData = await response.arrayBuffer();
       }
-
-      resolvePlayableAudioMimeType(payload, responseContentType);
 
       if (loadToken !== state.loadToken) {
         return;
@@ -774,7 +724,6 @@ export function createAudioscopeLoadController({
 
           state.playbackSourceKind = 'ffmpeg-fallback';
           setAnalysisSourceKind('ffmpeg-fallback');
-          state.playbackSourceKind = 'ffmpeg-fallback';
           renderMediaMetadata();
 
           await initializeFromDecodeFallback(loadToken, payload, fallback);

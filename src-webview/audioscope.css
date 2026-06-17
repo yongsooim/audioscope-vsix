@@ -1496,10 +1496,11 @@ body {
   border-radius: 8px;
   background: rgba(5, 9, 18, 0.58);
   color: rgba(239, 246, 255, 0.96);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 10px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  line-height: 1.2;
+  line-height: 1.25;
   white-space: nowrap;
   pointer-events: none;
   opacity: 0;
@@ -1516,6 +1517,46 @@ body {
 
 .surface-hover-tooltip-detail {
   color: rgba(255, 242, 228, 0.96);
+}
+
+/* Two-column hover readout: time/frequency on the left, per-channel values on the right. */
+.surface-hover-tooltip-grid {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.surface-hover-tooltip-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.surface-hover-tooltip-divider {
+  width: 1px;
+  align-self: stretch;
+  background: rgba(191, 219, 254, 0.16);
+}
+
+.surface-hover-tooltip-line {
+  white-space: nowrap;
+}
+
+.surface-hover-tooltip-chan {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 8px;
+  white-space: nowrap;
+}
+
+.surface-hover-tooltip-chan-label {
+  text-align: left;
+  opacity: 0.72;
+}
+
+.surface-hover-tooltip-chan-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .transport {

@@ -178,6 +178,9 @@ export interface SampleInfoPayload {
   markerYRatio: number;
   requestId: number;
   surface: SurfaceKind;
+  // Source-frame index under the pointer when the waveform is zoomed to
+  // per-sample resolution; lets the main thread read every channel's value.
+  sampleIndex?: number;
 }
 
 export interface InitSurfacesMessage {

@@ -656,7 +656,7 @@ function ensureWaveformSliceCapacity(module: WaveCoreModule, floatCount: number)
   return analysisState.waveformSlice;
 }
 
-function hasRenderableWaveformData(_waveformData: unknown): boolean {
+function hasRenderableWaveformData(): boolean {
   return Boolean(analysisState.waveformPcmPointer && analysisState.sampleCount > 0);
 }
 
@@ -667,7 +667,7 @@ function hasRenderableSurface(): boolean {
 function isRenderReady(): boolean {
   return hasRenderableSurface()
     && analysisState.initialized
-    && hasRenderableWaveformData(analysisState.waveformData);
+    && hasRenderableWaveformData();
 }
 
 function getWaveformSampleData(module: WaveCoreModule): Float32Array | null {
@@ -715,12 +715,6 @@ function getRuntime(): Promise<WaveCoreRuntime> {
 
 function getHeapF32View(module: WaveCoreModule, pointer: number, length: number): Float32Array {
   return new Float32Array(module.HEAPF32.buffer, pointer, length);
-}
-
-function assertInitialized() {
-  if (!analysisState.initialized) {
-    throw new Error('Waveform analysis is not initialized.');
-  }
 }
 
 function postError(error: unknown): void {

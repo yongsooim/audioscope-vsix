@@ -369,7 +369,7 @@ class AudioWorkletCopyTransport {
 
     this.audioContext = new AudioContextConstructor();
     return this.audioContext;
-  }ㅎ
+  }
 
   async ensureWorkletNode(initialTimeSeconds = this.pausedAtSeconds): Promise<AudioWorkletNode> {
     if (this.workletNode) {

@@ -58,50 +58,62 @@ function computeRlbCoefficients(sampleRate: number): {
   };
 }
 
-function applyBiquad(
-  input: Float32Array,
-  b0: number, b1: number, b2: number,
-  a1: number, a2: number,
-): Float32Array {
-  const output = new Float32Array(input.length);
-  let x1 = 0;
-  let x2 = 0;
-  let y1 = 0;
-  let y2 = 0;
-
-  for (let i = 0; i < input.length; i++) {
-    const x0 = input[i];
-    const y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-    output[i] = y0;
-    x2 = x1;
-    x1 = x0;
-    y2 = y1;
-    y1 = y0;
-  }
-
-  return output;
-}
-
 export function computeLoudnessData(pcm: Float32Array, sampleRate: number): LoudnessData {
-  // Apply K-weighting: pre-filter then RLB.
+  // K-weighting (pre-filter then RLB) cascade. Both biquad stages, the per-block
+  // mean-square accumulation, and the per-block sample-peak scan are fused into a
+  // single pass over the PCM so we never allocate full-length intermediate buffers
+  // (previously two Float32Array(N) plus three extra O(N) passes).
   const pre = computePreFilterCoefficients(sampleRate);
   const rlb = computeRlbCoefficients(sampleRate);
-  const stage1 = applyBiquad(pcm, pre.b0, pre.b1, pre.b2, pre.a1, pre.a2);
-  const kWeighted = applyBiquad(stage1, rlb.b0, rlb.b1, rlb.b2, rlb.a1, rlb.a2);
 
   const blockSamples = Math.max(1, Math.round(sampleRate * LOUDNESS_BLOCK_SECONDS));
-  const blockCount = Math.max(1, Math.ceil(kWeighted.length / blockSamples));
+  const blockCount = Math.max(1, Math.ceil(pcm.length / blockSamples));
 
-  // Mean square per block.
   const blockPower = new Float64Array(blockCount);
+  const truePeak = new Float32Array(blockCount);
+  let peakTruePeakDb = LOUDNESS_FLOOR_LUFS;
+
+  // Cascade state must persist across block boundaries (the filter is sequential).
+  let px1 = 0;
+  let px2 = 0;
+  let py1 = 0;
+  let py2 = 0;
+  let rx1 = 0;
+  let rx2 = 0;
+  let ry1 = 0;
+  let ry2 = 0;
+
   for (let i = 0; i < blockCount; i++) {
     const start = i * blockSamples;
-    const end = Math.min(start + blockSamples, kWeighted.length);
+    const end = Math.min(start + blockSamples, pcm.length);
     let sum = 0;
+    let maxAbs = 0;
     for (let j = start; j < end; j++) {
-      sum += kWeighted[j] * kWeighted[j];
+      const x0 = pcm[j];
+      const abs = x0 < 0 ? -x0 : x0;
+      if (abs > maxAbs) { maxAbs = abs; }
+
+      // Stage 1: K-weighting pre-filter.
+      const stage1 = pre.b0 * x0 + pre.b1 * px1 + pre.b2 * px2 - pre.a1 * py1 - pre.a2 * py2;
+      px2 = px1;
+      px1 = x0;
+      py2 = py1;
+      py1 = stage1;
+
+      // Stage 2: RLB high-pass, fed by the pre-filter output.
+      const kWeighted = rlb.b0 * stage1 + rlb.b1 * rx1 + rlb.b2 * rx2 - rlb.a1 * ry1 - rlb.a2 * ry2;
+      rx2 = rx1;
+      rx1 = stage1;
+      ry2 = ry1;
+      ry1 = kWeighted;
+
+      sum += kWeighted * kWeighted;
     }
-    blockPower[i] = sum / (end - start);
+    blockPower[i] = sum / Math.max(1, end - start);
+
+    const db = maxAbs > 1e-20 ? 20 * Math.log10(maxAbs) : LOUDNESS_FLOOR_LUFS;
+    truePeak[i] = db;
+    if (db > peakTruePeakDb) { peakTruePeakDb = db; }
   }
 
   const momentaryWindowBlocks = Math.max(1, Math.round(MOMENTARY_WINDOW_SECONDS / LOUDNESS_BLOCK_SECONDS));
@@ -139,22 +151,6 @@ export function computeLoudnessData(pcm: Float32Array, sampleRate: number): Loud
   for (let i = 0; i < blockCount; i++) {
     if (momentary[i] > peakMomentaryLufs) { peakMomentaryLufs = momentary[i]; }
     if (shortTerm[i] > peakShortTermLufs) { peakShortTermLufs = shortTerm[i]; }
-  }
-
-  // Per-block sample peak in dBFS.
-  const truePeak = new Float32Array(blockCount);
-  let peakTruePeakDb = LOUDNESS_FLOOR_LUFS;
-  for (let i = 0; i < blockCount; i++) {
-    const start = i * blockSamples;
-    const end = Math.min(start + blockSamples, pcm.length);
-    let maxAbs = 0;
-    for (let j = start; j < end; j++) {
-      const abs = Math.abs(pcm[j]);
-      if (abs > maxAbs) { maxAbs = abs; }
-    }
-    const db = maxAbs > 1e-20 ? 20 * Math.log10(maxAbs) : LOUDNESS_FLOOR_LUFS;
-    truePeak[i] = db;
-    if (db > peakTruePeakDb) { peakTruePeakDb = db; }
   }
 
   // EBU R128 gated integrated loudness.

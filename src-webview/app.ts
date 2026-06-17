@@ -1386,6 +1386,7 @@ function mirrorWaveformLaneStyles(): void {
   }
   for (const canvas of state.waveformLaneCanvases) {
     canvas.style.width = primary.style.width;
+    canvas.style.transformOrigin = primary.style.transformOrigin;
     canvas.style.transform = primary.style.transform;
   }
 }
@@ -2564,89 +2565,27 @@ function areWaveformRenderRequestsEqual(
     && Math.abs(Math.round(leftWidthPx) - Math.round(rightWidthPx)) <= 1;
 }
 
-function doesRangeCoverVisibleRange(range: TimeRange, visibleStart: number, visibleEnd: number, epsilon: number): boolean {
-  return visibleStart >= range.start - epsilon && visibleEnd <= range.end + epsilon;
-}
-
-function areWaveformRenderGeometriesCompatible(
-  activeRenderRange: TimeRange,
-  activeRenderWidthPx: number,
-  expectedRenderRange: TimeRange,
-  expectedRenderWidthPx: number,
-  epsilon: number,
-): boolean {
-  const activeSpan = activeRenderRange.end - activeRenderRange.start;
-  const expectedSpan = expectedRenderRange.end - expectedRenderRange.start;
-  return expectedSpan > 0
-    && Math.abs(activeSpan - expectedSpan) <= epsilon
-    && Math.abs(Math.round(activeRenderWidthPx) - Math.round(expectedRenderWidthPx)) <= 1;
-}
-
-function syncWaveformCanvasPresentation(uiState: ViewportUiState | null = state.engineUiState): void {
-  const canvas = state.waveformCanvas;
-  if (!canvas || !uiState) {
-    return;
-  }
-  const viewportWidthPx = getWaveformViewportSize().width;
-
-  const sampleRate = uiState.playback.sampleRate || getSampleRate();
-  if (!(sampleRate > 0)) {
-    canvas.style.width = '100%';
-    canvas.style.transform = 'translate3d(0, 0, 0)';
-    mirrorWaveformLaneStyles();
-    return;
-  }
-
-  const visibleStart = uiState.presentedStartFrame / sampleRate;
-  const visibleEnd = uiState.presentedEndFrame / sampleRate;
-  const expectedRenderRange = {
-    start: uiState.viewport.renderedStartFrame / sampleRate,
-    end: uiState.viewport.renderedEndFrame / sampleRate,
-  };
-  const expectedRenderWidthPx = Math.max(1, uiState.viewport.renderWidthPx || viewportWidthPx);
-  const activeRenderRange = state.waveformViewport.activeRenderRange;
-  const activeRenderWidthPx = Math.max(1, state.waveformViewport.activeRenderWidthPx);
-
-  if (!activeRenderRange || !(activeRenderRange.end > activeRenderRange.start)) {
-    canvas.style.width = '100%';
-    canvas.style.transform = 'translate3d(0, 0, 0)';
-    mirrorWaveformLaneStyles();
-    return;
-  }
-
-  const renderSpan = activeRenderRange.end - activeRenderRange.start;
-  const visibleSpan = Math.max(0, visibleEnd - visibleStart);
-  const rangeEpsilon = Math.max(1 / sampleRate, 1e-6);
-
-  if (
-    !areWaveformRenderGeometriesCompatible(
-      activeRenderRange,
-      activeRenderWidthPx,
-      expectedRenderRange,
-      expectedRenderWidthPx,
-      rangeEpsilon,
-    )
-    || !doesRangeCoverVisibleRange(activeRenderRange, visibleStart, visibleEnd, rangeEpsilon)
-  ) {
-    return;
-  }
-
-  const widthPx = Math.max(viewportWidthPx, activeRenderWidthPx);
-  const visibleOffsetRatio = renderSpan > 0
-    ? clamp((visibleStart - activeRenderRange.start) / renderSpan, 0, 1)
-    : 0;
-  const maxOffsetPx = Math.max(0, widthPx - viewportWidthPx);
-  const offsetPx = clamp(visibleOffsetRatio * widthPx, 0, maxOffsetPx);
-  const hasBufferedCoverage = renderSpan > visibleSpan && widthPx > viewportWidthPx;
-
-  canvas.style.width = hasBufferedCoverage ? `${widthPx}px` : '100%';
-  // In split mode each lane canvas keeps its inline per-lane height; only set a
-  // full height for the single mono canvas.
+function resetWaveformCanvasPresentation(canvas: HTMLCanvasElement): void {
+  canvas.style.width = '100%';
   if (getSpectrogramLaneCount() <= 1) {
     canvas.style.height = '100%';
   }
-  canvas.style.transform = hasBufferedCoverage ? `translate3d(${-offsetPx}px, 0, 0)` : 'translate3d(0, 0, 0)';
+  canvas.style.transformOrigin = '0 0';
+  canvas.style.transform = 'translate3d(0, 0, 0)';
   mirrorWaveformLaneStyles();
+}
+
+// Unified pipeline: the engine worker owns the geometry (presentedRange) and the
+// waveform workers render that EXACT range every frame, so the canvas is always a
+// 1:1 image of the viewport. No CSS scale/translate bridge — which previously
+// stretched a stale envelope on zoom (an envelope can't be linearly scaled) and
+// flashed the wrong region. We only ensure the canvas sits at identity.
+function syncWaveformCanvasPresentation(_uiState: ViewportUiState | null = state.engineUiState): void {
+  const canvas = state.waveformCanvas;
+  if (!canvas) {
+    return;
+  }
+  resetWaveformCanvasPresentation(canvas);
 }
 
 function expandRange(range: TimeRange, duration: number, factor: number): TimeRange {
@@ -2971,16 +2910,74 @@ function hideSurfaceHoverTooltip(tooltipElement: HTMLElement): void {
   tooltipElement.setAttribute('aria-hidden', 'true');
 }
 
-function updateSurfaceHoverTooltip(tooltipElement: HTMLElement, targetElement: HTMLElement, point: HoverContext, label: string): void {
+// Structured hover readout: `meta` lines (time, frequency, sample index) render
+// stacked in the left column; `channels` render one per line in the right column
+// with the value right-aligned so digits line up across channels.
+interface HoverTooltipModel {
+  meta: string[];
+  channels: Array<{ label: string; value: string }>;
+}
+
+function isHoverTooltipModelEmpty(model: HoverTooltipModel): boolean {
+  return model.meta.length === 0 && model.channels.length === 0;
+}
+
+function setSurfaceHoverTooltipContent(tooltipElement: HTMLElement, content: string | HoverTooltipModel): void {
+  if (typeof content === 'string') {
+    tooltipElement.textContent = content;
+    return;
+  }
+
+  tooltipElement.textContent = '';
+  const grid = document.createElement('div');
+  grid.className = 'surface-hover-tooltip-grid';
+
+  const meta = document.createElement('div');
+  meta.className = 'surface-hover-tooltip-col surface-hover-tooltip-meta';
+  for (const line of content.meta) {
+    const row = document.createElement('div');
+    row.className = 'surface-hover-tooltip-line';
+    row.textContent = line;
+    meta.append(row);
+  }
+  grid.append(meta);
+
+  if (content.channels.length > 0) {
+    const divider = document.createElement('div');
+    divider.className = 'surface-hover-tooltip-divider';
+    grid.append(divider);
+
+    const channels = document.createElement('div');
+    channels.className = 'surface-hover-tooltip-col surface-hover-tooltip-channels';
+    for (const channel of content.channels) {
+      const row = document.createElement('div');
+      row.className = 'surface-hover-tooltip-chan';
+      const label = document.createElement('span');
+      label.className = 'surface-hover-tooltip-chan-label';
+      label.textContent = channel.label;
+      const value = document.createElement('span');
+      value.className = 'surface-hover-tooltip-chan-value';
+      value.textContent = channel.value;
+      row.append(label, value);
+      channels.append(row);
+    }
+    grid.append(channels);
+  }
+
+  tooltipElement.append(grid);
+}
+
+function updateSurfaceHoverTooltip(tooltipElement: HTMLElement, targetElement: HTMLElement, point: HoverContext, content: string | HoverTooltipModel): void {
   const rect = targetElement.getBoundingClientRect();
-  if (!label || rect.width <= 0 || rect.height <= 0) {
+  const isEmpty = typeof content === 'string' ? !content : isHoverTooltipModelEmpty(content);
+  if (isEmpty || rect.width <= 0 || rect.height <= 0) {
     hideSurfaceHoverTooltip(tooltipElement);
     return;
   }
 
   const localX = clamp(point.clientX - rect.left, 0, rect.width);
   const localY = clamp(point.clientY - rect.top, 0, rect.height);
-  tooltipElement.textContent = label;
+  setSurfaceHoverTooltipContent(tooltipElement, content);
   tooltipElement.classList.add('visible');
   tooltipElement.setAttribute('aria-hidden', 'false');
 
@@ -3026,11 +3023,16 @@ function applySampleInfo(payload: SampleInfoPayload): void {
     : '';
 
   if (payload.surface === 'waveform') {
+    // At per-sample zoom show every channel stacked; otherwise keep the single
+    // time-only readout the worker produced.
+    const sampleModel = payload.markerVisible && typeof payload.sampleIndex === 'number'
+      ? buildWaveformChannelHoverModel(payload.sampleIndex)
+      : null;
     updateSurfaceHoverTooltip(
       elements.waveformHoverTooltip,
       elements.waveformViewport,
       hover,
-      channelPrefix + payload.label,
+      sampleModel ?? channelPrefix + payload.label,
     );
 
     if (elements.waveformSampleMarker && payload.markerVisible) {
@@ -3089,6 +3091,50 @@ function formatHoverDb(valueDb: number | null): string {
   return valueDb <= -120 ? '-∞ dB' : `${valueDb.toFixed(1)} dB`;
 }
 
+// Fixed decimal count keeps the decimal point and digits aligned across channels
+// in the monospace readout (trailing zeros are intentionally kept).
+function formatWaveformChannelSample(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return '–';
+  }
+  const normalized = Math.abs(value) < 0.0000005 ? 0 : value;
+  return normalized.toFixed(5);
+}
+
+// Reads every source channel's amplitude at the hovered sample directly from the
+// main-thread decoded buffers, so the waveform readout shows all channels at once.
+function buildWaveformChannelHoverModel(sampleIndex: number): HoverTooltipModel | null {
+  const session = state.playbackSession;
+  if (!session || !Number.isFinite(sampleIndex) || sampleIndex < 0) {
+    return null;
+  }
+
+  const channelCount = Math.max(1, Math.min(session.numberOfChannels, session.channelBuffers.length));
+  const meta: string[] = [];
+  if (session.sourceSampleRate > 0) {
+    meta.push(formatAxisLabel(sampleIndex / session.sourceSampleRate));
+  }
+  meta.push(`Sample ${(sampleIndex + 1).toLocaleString()}`);
+
+  const channels: Array<{ label: string; value: string }> = [];
+  for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+    const buffer = session.channelBuffers[channelIndex];
+    let value: number | null = null;
+    if (buffer instanceof ArrayBuffer) {
+      const view = new Float32Array(buffer);
+      if (sampleIndex < view.length) {
+        value = view[sampleIndex];
+      }
+    }
+    channels.push({
+      label: channelCount > 1 ? channelLaneLabel(channelIndex, channelCount) : '',
+      value: formatWaveformChannelSample(value),
+    });
+  }
+
+  return { meta, channels };
+}
+
 function applyChannelSampleValue(payload: { channelIndex: number; requestId: number; result: ChannelSampleValueResult }): void {
   const aggregation = state.spectrogramChannelHover;
   if (!aggregation || aggregation.requestId !== payload.requestId) {
@@ -3112,18 +3158,18 @@ function renderSpectrogramChannelHoverTooltip(): void {
     return;
   }
 
-  const parts = [formatAxisLabel(reference.timeSeconds)];
+  const meta = [formatAxisLabel(reference.timeSeconds)];
   const frequencyLabel = formatHoverFrequency(reference.frequencyStartHz, reference.frequencyEndHz);
   if (frequencyLabel) {
-    parts.push(frequencyLabel);
+    meta.push(frequencyLabel);
   }
   const laneCount = aggregation.laneCount;
-  aggregation.results.forEach((entry, channelIndex) => {
-    const prefix = laneCount > 1 ? `${channelLaneLabel(channelIndex, laneCount)} ` : '';
-    parts.push(`${prefix}${formatHoverDb(entry ? entry.valueDb : null)}`);
-  });
+  const channels = aggregation.results.map((entry, channelIndex) => ({
+    label: laneCount > 1 ? channelLaneLabel(channelIndex, laneCount) : '',
+    value: formatHoverDb(entry ? entry.valueDb : null),
+  }));
 
-  updateSurfaceHoverTooltip(elements.spectrogramHoverTooltip, elements.spectrogramHitTarget, hover, parts.join(' • '));
+  updateSurfaceHoverTooltip(elements.spectrogramHoverTooltip, elements.spectrogramHitTarget, hover, { meta, channels });
 }
 
 function requestSampleInfoAtClientPoint(surface: SurfaceKind, clientX: number, clientY: number): void {
@@ -3623,10 +3669,14 @@ function requestWaveformRender(uiState: ViewportUiState | null = state.engineUiS
   }
 
   const waveformSize = getWaveformViewportSize();
-  const renderWidthPx = Math.max(1, uiState.viewport.renderWidthPx || waveformSize.width);
+  // Render the EXACT presented (visible) range at viewport resolution every frame.
+  // Previously this used the engine's buffered renderedRange and the main thread
+  // scrolled/scaled the buffer via CSS transform — the source of the zoom flash.
+  // Now there is no transform, so the rendered range must equal the visible range.
+  const renderWidthPx = Math.max(1, waveformSize.width);
   const renderRange: TimeRange = {
-    start: uiState.viewport.renderedStartFrame / sampleRate,
-    end: uiState.viewport.renderedEndFrame / sampleRate,
+    start: uiState.presentedStartFrame / sampleRate,
+    end: uiState.presentedEndFrame / sampleRate,
   };
   if (!(renderRange.end > renderRange.start)) {
     return;

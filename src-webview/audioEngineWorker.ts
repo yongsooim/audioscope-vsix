@@ -102,6 +102,12 @@ const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
 const WAVEFORM_FOLLOW_RATIO = 0.5;
 const WAVEFORM_MAX_ZOOM_PIXELS_PER_SAMPLE = 8;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
+// Discrete zoom: snap the view span to a fixed geometric grid. Between grid levels the
+// span is held constant, so the spectrogram's cached tiles are NOT rescaled each frame
+// (a raster rescale is what made it shimmer while zooming); crossing a level is a single
+// crisp step. Smaller ratio = finer steps. Anchored to getMinVisibleFrames() so the grid
+// is stable regardless of the current zoom.
+const ZOOM_SPAN_QUANTIZE_RATIO = 1.25;
 const HOVER_SAMPLE_VALUE_MAX_SAMPLES_PER_PIXEL = 32;
 
 interface WaveformSurfaceState {
@@ -887,11 +893,16 @@ function handleWheelIntent(intent: Extract<ViewportIntent, { kind: 'wheel' }>): 
   const currentRange = getTargetRange();
   const currentSpanFrames = Math.max(1, currentRange.endFrame - currentRange.startFrame);
 
-  if (verticalMagnitude >= horizontalMagnitude && verticalMagnitude > 0.01) {
-    const nextSpanFrames = clamp(
-      Math.round(currentSpanFrames * Math.pow(WAVEFORM_ZOOM_STEP_FACTOR, deltaY / 180)),
-      getMinVisibleFrames(),
-      Math.max(getMinVisibleFrames(), state.session.durationFrames),
+  // Require vertical to clearly dominate before treating the gesture as a zoom. On a
+  // trackpad a horizontal pan carries small vertical noise; without this margin those
+  // noise frames flip to zoom, which rescales the cached spectrogram tiles (a raster
+  // resample = visible shimmer) even though the waveform — recomputed each frame — stays
+  // smooth. That is exactly the "spectrogram-only shake while time-shifting" symptom.
+  if (verticalMagnitude > horizontalMagnitude * 1.5 && verticalMagnitude > 0.01) {
+    // Snap the continuous wheel/pinch zoom to discrete grid levels so the span holds
+    // steady between levels (no per-frame tile rescale = no spectrogram shimmer).
+    const nextSpanFrames = quantizeViewSpanFrames(
+      currentSpanFrames * Math.pow(WAVEFORM_ZOOM_STEP_FACTOR, deltaY / 180),
     );
 
     const anchorRatio = state.viewport.followEnabled
@@ -930,12 +941,21 @@ function handleWheelIntent(intent: Extract<ViewportIntent, { kind: 'wheel' }>): 
   emitUiState();
 }
 
+function quantizeViewSpanFrames(spanFrames: number): number {
+  const minSpan = Math.max(1, getMinVisibleFrames());
+  const maxSpan = Math.max(minSpan, state.session.durationFrames);
+  const clamped = clamp(spanFrames, minSpan, maxSpan);
+  const level = Math.round(Math.log(clamped / minSpan) / Math.log(ZOOM_SPAN_QUANTIZE_RATIO));
+  const snapped = minSpan * Math.pow(ZOOM_SPAN_QUANTIZE_RATIO, level);
+  return clamp(Math.round(snapped), minSpan, maxSpan);
+}
+
 function handleZoomStepIntent(direction: 'in' | 'out'): void {
   const currentRange = getTargetRange();
   const currentSpanFrames = Math.max(1, currentRange.endFrame - currentRange.startFrame);
   const nextSpanFrames = direction === 'in'
-    ? Math.max(getMinVisibleFrames(), Math.round(currentSpanFrames / WAVEFORM_ZOOM_STEP_FACTOR))
-    : Math.min(state.session.durationFrames, Math.round(currentSpanFrames * WAVEFORM_ZOOM_STEP_FACTOR));
+    ? quantizeViewSpanFrames(currentSpanFrames / WAVEFORM_ZOOM_STEP_FACTOR)
+    : quantizeViewSpanFrames(currentSpanFrames * WAVEFORM_ZOOM_STEP_FACTOR);
   const anchorRatio = state.viewport.followEnabled
     ? WAVEFORM_FOLLOW_RATIO
     : (state.hoverWaveformRatioX ?? 0.5);
@@ -1370,6 +1390,24 @@ function scheduleRender(): void {
   void pumpRenderLoop();
 }
 
+// Snap the presented (displayed) view origin to a whole sample so the spectrogram,
+// waveform, ruler and playhead share one integer-frame grid. At high zoom this
+// frame-locks the view: while time-shifting the image holds steady between whole-sample
+// steps instead of bilinear-resampling at sub-pixel offsets (the left/right shimmer).
+// At low zoom the <0.5-sample shift is sub-pixel and invisible. The span is preserved
+// exactly so zooming stays smooth, and snapping at this single source keeps every layer
+// aligned (no cross-layer jitter).
+function snapPresentedRangeToFrames(range: RangeFrames): RangeFrames {
+  const durationFrames = Math.max(0, state.session.durationFrames);
+  if (durationFrames <= 0 || !(range.endFrame > range.startFrame)) {
+    return range;
+  }
+  const span = range.endFrame - range.startFrame;
+  const maxStartFrame = Math.max(0, durationFrames - span);
+  const snappedStartFrame = clamp(Math.round(range.startFrame), 0, maxStartFrame);
+  return { startFrame: snappedStartFrame, endFrame: snappedStartFrame + span };
+}
+
 async function pumpRenderLoop(): Promise<void> {
   if (!state.renderScheduled) {
     return;
@@ -1393,15 +1431,16 @@ async function pumpRenderLoop(): Promise<void> {
         }
       }
 
-      state.viewport.presentedStartFrame = targetRange.startFrame;
-      state.viewport.presentedEndFrame = targetRange.endFrame;
+      const presentedRange = snapPresentedRangeToFrames(targetRange);
+      state.viewport.presentedStartFrame = presentedRange.startFrame;
+      state.viewport.presentedEndFrame = presentedRange.endFrame;
       emitUiState();
       if (canRenderSpectrogram()) {
         postMessage({
           type: 'SpectrogramSurfaceReady',
           body: {
-            presentedEndFrame: targetRange.endFrame,
-            presentedStartFrame: targetRange.startFrame,
+            presentedEndFrame: presentedRange.endFrame,
+            presentedStartFrame: presentedRange.startFrame,
             serial: state.uiRevision,
           },
         });
@@ -2138,6 +2177,7 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
     markerXRatio: spanFrames <= 0 ? 0 : clamp01((sampleIndex - sampleStartFrame) / Math.max(1, visibleSampleSpan)),
     markerYRatio: getWaveformMarkerYRatio(state.waveformSurface.heightCssPx, sampleValue),
     requestId,
+    sampleIndex,
     surface: 'waveform',
   };
 }

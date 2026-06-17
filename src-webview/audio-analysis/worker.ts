@@ -163,10 +163,14 @@ interface AnalysisWorkerState {
   currentDisplayRange: {
     end: number;
     endSample: number;
+    // Fractional (sub-sample) view edges, kept so panning/zooming positions the
+    // composite continuously instead of snapping to whole samples (visible jitter).
+    endSampleExact: number;
     pixelHeight: number;
     pixelWidth: number;
     start: number;
     startSample: number;
+    startSampleExact: number;
   };
   duration: number;
   generationStatus: Map<number, { cancelled: boolean }>;
@@ -646,6 +650,8 @@ function createEmptyAnalysisState(): AnalysisWorkerState {
       end: 0,
       startSample: 0,
       endSample: 0,
+      startSampleExact: 0,
+      endSampleExact: 0,
       pixelWidth: 0,
       pixelHeight: 0,
     },
@@ -1650,25 +1656,67 @@ function getTileSampleBounds(plan: RenderRequestPlan, tileIndex: number): {
   };
 }
 
+// Repaint once the view has moved by at least this fraction of a device pixel,
+// so sub-sample pans at deep zoom track smoothly without thrashing on float noise.
+const DISPLAY_RANGE_SUBPIXEL_EPSILON = 0.05;
+
 function updateCurrentDisplayRange(request: SpectrogramRequest | null): boolean {
   const pixelWidth = Math.max(1, Math.round(Number(request?.pixelWidth) || surfaceState.pixelWidth || 1));
   const pixelHeight = Math.max(1, Math.round(Number(request?.pixelHeight) || surfaceState.pixelHeight || 1));
   const maximumSampleCount = Math.max(1, analysisState.sampleCount);
   const maximumStartSample = Math.max(0, maximumSampleCount - 1);
-  const startSample = timeToDisplaySample(Number(request?.displayStart) || 0, maximumStartSample);
-  const requestedEndSample = timeToDisplaySample(Number(request?.displayEnd) || analysisState.duration, maximumSampleCount);
+  const displaySampleRate = getDisplaySampleRate();
+  const displayStartSeconds = Number(request?.displayStart) || 0;
+  const displayEndSeconds = Number(request?.displayEnd) || analysisState.duration;
+
+  // Rounded sample bounds drive tile selection and source sampling (the tiles are
+  // computed on the whole-sample grid). The exact (fractional) bounds below drive
+  // where the composite lands on screen so it follows the ruler/playhead exactly.
+  const startSample = clampSampleIndex(displayStartSeconds * displaySampleRate, maximumStartSample);
+  const requestedEndSample = clampSampleIndex(displayEndSeconds * displaySampleRate, maximumSampleCount);
   const endSample = clamp(
     Math.max(startSample + 1, requestedEndSample),
     startSample + 1,
     maximumSampleCount,
   );
+
+  const rawStartSampleExact = clamp(displayStartSeconds * displaySampleRate, 0, maximumStartSample);
+  const rawEndSampleExact = clamp(
+    Math.max(rawStartSampleExact + 1, displayEndSeconds * displaySampleRate),
+    rawStartSampleExact + 1,
+    maximumSampleCount,
+  );
+
+  // Pixel-align the composite origin so the exact start maps to a whole device pixel
+  // (startSample * compositeWidth / span is an integer). With the origin on a whole pixel
+  // and the span constant, each pan frame's composite is a pure integer-pixel translation
+  // of the previous one — no sub-pixel re-resampling of the cached tiles, so the high-zoom
+  // left/right shimmer disappears. CRUCIAL: this must use the SAME width the compositor
+  // uses (surfaceState.pixelWidth), otherwise the origin lands off-grid and still shimmers.
+  const compositeWidth = Math.max(1, surfaceState.pixelWidth);
+  const exactSpan = Math.max(1, rawEndSampleExact - rawStartSampleExact);
+  const samplesPerPixel = exactSpan / compositeWidth;
+  const startSampleExact = clamp(
+    Math.round(rawStartSampleExact / samplesPerPixel) * samplesPerPixel,
+    0,
+    maximumStartSample,
+  );
+  const endSampleExact = startSampleExact + exactSpan;
+
   const start = sampleToTime(startSample);
   const end = sampleToTime(endSample);
   const currentDisplayRange = analysisState.currentDisplayRange;
+
+  const pixelsPerSample = compositeWidth / exactSpan;
+  const startMovedPx = Math.abs(startSampleExact - currentDisplayRange.startSampleExact) * pixelsPerSample;
+  const endMovedPx = Math.abs(endSampleExact - currentDisplayRange.endSampleExact) * pixelsPerSample;
+
   const changed = currentDisplayRange.startSample !== startSample
     || currentDisplayRange.endSample !== endSample
     || currentDisplayRange.pixelWidth !== pixelWidth
-    || currentDisplayRange.pixelHeight !== pixelHeight;
+    || currentDisplayRange.pixelHeight !== pixelHeight
+    || startMovedPx >= DISPLAY_RANGE_SUBPIXEL_EPSILON
+    || endMovedPx >= DISPLAY_RANGE_SUBPIXEL_EPSILON;
 
   if (!changed) {
     return false;
@@ -1678,6 +1726,8 @@ function updateCurrentDisplayRange(request: SpectrogramRequest | null): boolean 
   currentDisplayRange.end = end;
   currentDisplayRange.startSample = startSample;
   currentDisplayRange.endSample = endSample;
+  currentDisplayRange.startSampleExact = startSampleExact;
+  currentDisplayRange.endSampleExact = endSampleExact;
   currentDisplayRange.pixelWidth = pixelWidth;
   currentDisplayRange.pixelHeight = pixelHeight;
   return true;
@@ -2230,17 +2280,19 @@ function renderTileChunk(
   startColumn: number,
   columnCount: number,
 ): void {
+  // Pass the FULL tile window (start + span) together with the global column
+  // offset and TILE_COLUMN_COUNT so the WASM column-centering reproduces the
+  // GPU center grid exactly (center = tileStart + (2*globalColumn+1)*span/(2*N)).
+  // Passing a chunk-local window here previously compressed/shifted every
+  // chunk after the first, smearing the spectrogram time axis on the CPU path.
   const tileSampleSpan = Math.max(1, tileRecord.tileEndSample - tileRecord.tileStartSample);
-  const chunkStartSample = tileRecord.tileStartSample + Math.floor((startColumn * tileSampleSpan) / TILE_COLUMN_COUNT);
-  const chunkEndSample = tileRecord.tileStartSample + Math.floor(((startColumn + columnCount) * tileSampleSpan) / TILE_COLUMN_COUNT);
-  const chunkSampleSpan = Math.max(1, chunkEndSample - chunkStartSample);
   const byteLength = columnCount * plan.rowCount * 4;
 
   ensureSpectrogramOutputCapacity(runtime.module, byteLength);
 
   const ok = runtime.module._wave_render_spectrogram_tile_rgba(
-    chunkStartSample,
-    chunkSampleSpan,
+    tileRecord.tileStartSample,
+    tileSampleSpan,
     startColumn,
     TILE_COLUMN_COUNT,
     columnCount,
@@ -6067,7 +6119,11 @@ function getTilePresentationGeometry(
   sourceWidth: number;
   sourceX: number;
 } | null {
-  const displaySampleSpan = Math.max(1, displayRange.endSample - displayRange.startSample);
+  // Position using the fractional view edges so the composite tracks sub-sample
+  // pans smoothly. A single linear sample->pixel map is shared by every tile, so
+  // neighbouring tiles still abut exactly (no seams, no jitter).
+  const displayStartSample = displayRange.startSampleExact;
+  const displaySampleSpan = Math.max(1, displayRange.endSampleExact - displayStartSample);
   const tileSampleSpan = Math.max(1, tile.tileEndSample - tile.tileStartSample);
   const availableColumns = tile.complete ? tile.columnCount : Math.max(0, tile.renderedColumns ?? 0);
 
@@ -6079,8 +6135,8 @@ function getTilePresentationGeometry(
     tile.tileEndSample,
     tile.tileStartSample + Math.ceil((availableColumns * tileSampleSpan) / tile.columnCount),
   );
-  const overlapStartSample = Math.max(displayRange.startSample, tile.tileStartSample);
-  const overlapEndSample = Math.min(displayRange.endSample, availableTileEndSample);
+  const overlapStartSample = Math.max(displayStartSample, tile.tileStartSample);
+  const overlapEndSample = Math.min(displayRange.endSampleExact, availableTileEndSample);
 
   if (overlapEndSample <= overlapStartSample) {
     return null;
@@ -6102,11 +6158,16 @@ function getTilePresentationGeometry(
       Math.ceil(((overlapEndSample - overlapStartSample) * tile.columnCount) / tileSampleSpan),
     ),
   );
-  const destinationX = Math.floor(((overlapStartSample - displayRange.startSample) * destinationWidth) / displaySampleSpan);
-  const destinationWidthPx = Math.max(
-    1,
-    Math.ceil(((overlapEndSample - overlapStartSample) * destinationWidth) / displaySampleSpan),
-  );
+  // Snap both edges to whole device pixels through one shared linear map. This makes
+  // the tile composite scroll in integer-pixel steps so a sub-sample time-shift no
+  // longer lands the upscaled tiles at fractional offsets (which bilinear-resamples
+  // every frame and reads as a left/right shimmer at high zoom). Because both edges
+  // round through the same map, adjacent tiles still share an exact pixel boundary —
+  // no seam, no overlap needed.
+  const sampleToPixel = destinationWidth / displaySampleSpan;
+  const destinationX = Math.round((overlapStartSample - displayStartSample) * sampleToPixel);
+  const destinationEndX = Math.round((overlapEndSample - displayStartSample) * sampleToPixel);
+  const destinationWidthPx = Math.max(1, destinationEndX - destinationX);
 
   return {
     destinationWidthPx,
