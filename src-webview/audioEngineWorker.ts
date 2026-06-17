@@ -53,9 +53,6 @@ import {
 import {
   RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL,
   formatMfccValue,
-  formatSampleOrdinal,
-  formatSampleValue,
-  getWaveformMarkerYRatio,
 } from './audio-engine-worker/waveformRender';
 import {
   DEFAULT_MFCC_COEFFICIENT_COUNT,
@@ -2125,10 +2122,9 @@ function ensureSpectrogramOutputCapacity(module: WaveCoreModule, byteLength: num
 
 function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, requestId: number): SampleInfoPayload | null {
   const sampleRate = state.session.sampleRate;
-  const sampleData = state.session.waveformPcmPointer && state.session.module
-    ? getWaveformSampleData(state.session.module)
-    : null;
-  const range = getTargetRange();
+  // Use the presented (currently drawn) range, not the animation target, so the
+  // marker x lines up with the rendered waveform — matches the spectrogram path.
+  const range = getPresentedRangeForInteraction();
   const spanFrames = Math.max(0, range.endFrame - range.startFrame);
   state.hoverWaveformRatioX = clamp01(pointerRatioX);
 
@@ -2153,7 +2149,10 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
 
   const samplesPerPixel = spanFrames / Math.max(1, state.viewport.renderWidthPx);
 
-  if (!(sampleData instanceof Float32Array) || samplesPerPixel > HOVER_SAMPLE_VALUE_MAX_SAMPLES_PER_PIXEL) {
+  // Whether per-sample detail is shown depends only on the zoom level. The
+  // actual sample values + marker positions are resolved on the main thread
+  // from the decoded per-channel buffers (the engine no longer holds PCM).
+  if (samplesPerPixel > HOVER_SAMPLE_VALUE_MAX_SAMPLES_PER_PIXEL) {
     return {
       label: timeLabel,
       markerVisible: false,
@@ -2166,16 +2165,13 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
 
   const sampleStartFrame = range.startFrame;
   const visibleSampleSpan = Math.max(0, Math.max(1, spanFrames) - 1);
-  let sampleIndex = frameAtPointer;
-
-  sampleIndex = clamp(sampleIndex, 0, Math.max(0, sampleData.length - 1));
-  const sampleValue = clamp(sampleData[sampleIndex] ?? 0, -1, 1);
+  const sampleIndex = clamp(frameAtPointer, 0, Math.max(0, state.session.durationFrames));
 
   return {
-    label: `${timeLabel} - Sample ${formatSampleOrdinal(sampleIndex + 1)}, Value ${formatSampleValue(sampleValue)}`,
+    label: timeLabel,
     markerVisible: true,
     markerXRatio: spanFrames <= 0 ? 0 : clamp01((sampleIndex - sampleStartFrame) / Math.max(1, visibleSampleSpan)),
-    markerYRatio: getWaveformMarkerYRatio(state.waveformSurface.heightCssPx, sampleValue),
+    markerYRatio: clamp01(pointerRatioY),
     requestId,
     sampleIndex,
     surface: 'waveform',
@@ -2784,13 +2780,6 @@ function nextTransportCommandSerial(): number {
 
 function queueTransportCommand(command: TransportCommand): void {
   state.pendingTransportCommand = command;
-}
-
-function getWaveformSampleData(module: WaveCoreModule): Float32Array | null {
-  if (!state.session.waveformPcmPointer || state.session.durationFrames <= 0) {
-    return null;
-  }
-  return getHeapF32View(module, state.session.waveformPcmPointer, state.session.durationFrames);
 }
 
 function ensureAnalysisSampleCapacity(module: WaveCoreModule, floatCount: number): Float32Array {

@@ -2,6 +2,7 @@ import { DISPLAY_MIN_DPR } from './sharedBuffers';
 import type { AudioTransport, PlaybackSession } from './transport/audioTransport';
 import { createAudioscopeElements } from './audioscope/core/elements';
 import { clamp, formatAxisLabel } from './audioscope/core/format';
+import { getWaveformMarkerYRatio } from './audio-engine-worker/waveformRender';
 import { createAudioscopeFocusController } from './audioscope/controllers/focus';
 import { createAudioscopeLifecycleController } from './audioscope/controllers/lifecycle';
 import {
@@ -130,6 +131,7 @@ const SPECTROGRAM_SCALOGRAM_HOP_OPTIONS = [0, 256, 512, 1024, 2048, 4096];
 const SPECTROGRAM_SCALOGRAM_OMEGA_OPTIONS = [4, 5, 6, 7, 8, 10, 12];
 const SPECTROGRAM_SCALOGRAM_ROW_DENSITY_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 3, 4];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
+const HOVER_FLUSH_MIN_INTERVAL_MS = 1000 / 30;
 const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
@@ -397,6 +399,7 @@ const state = {
     waveform: 0,
   },
   hoverFrame: 0,
+  lastHoverFlushTime: 0,
   pendingHoverRequests: {
     spectrogram: null as HoverRequestPoint | null,
     waveform: null as HoverRequestPoint | null,
@@ -410,6 +413,7 @@ const state = {
     laneCount: number;
     results: (ChannelSampleValueResult | null)[];
   } | null,
+  waveformSampleMarkers: [] as HTMLElement[],
   lastAppliedTransportCommandSerial: 0,
   loadToken: 0,
   loudness: createLoudnessSummaryState('idle'),
@@ -2055,10 +2059,43 @@ function renderPlaybackIndicators(uiState: ViewportUiState | null): void {
   renderTransportOverview(uiState);
 }
 
+function formatVisibleDuration(seconds: number): string {
+  if (!(seconds > 0)) {
+    return '0 ms';
+  }
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds - minutes * 60;
+    return `${minutes}:${remainder.toFixed(0).padStart(2, '0')}`;
+  }
+  if (seconds >= 1) {
+    return `${seconds.toFixed(2)} s`;
+  }
+  const ms = seconds * 1000;
+  return ms >= 10 ? `${ms.toFixed(1)} ms` : `${ms.toFixed(2)} ms`;
+}
+
+// Shows the visible window length, plus pixels-per-sample once individual
+// samples become resolvable — more meaningful than a file-relative multiplier.
+function formatWaveformZoomLabel(uiState: ViewportUiState): string {
+  const sampleRate = uiState.playback.sampleRate || getSampleRate();
+  const spanFrames = uiState.presentedEndFrame - uiState.presentedStartFrame;
+  if (!(sampleRate > 0) || !(spanFrames > 0)) {
+    return formatVisibleDuration(0);
+  }
+  const durationLabel = formatVisibleDuration(spanFrames / sampleRate);
+  const pxPerSample = getWaveformViewportSize().width / spanFrames;
+  if (pxPerSample >= 1) {
+    const pxLabel = pxPerSample >= 10 ? `${Math.round(pxPerSample)}` : pxPerSample.toFixed(1);
+    return `${durationLabel} · ${pxLabel} px/smp`;
+  }
+  return durationLabel;
+}
+
 function renderWaveformUi(): void {
   const uiState = state.engineUiState;
   elements.waveZoomReset.textContent = 'Reset';
-  elements.waveZoomChip.textContent = uiState ? `Zoom ${uiState.zoomFactor.toFixed(1)}x` : 'Zoom 1.0x';
+  elements.waveZoomChip.textContent = uiState ? formatWaveformZoomLabel(uiState) : formatVisibleDuration(0);
   elements.waveFollow.checked = state.followPlayback;
 
   const selection = uiState?.selection;
@@ -3011,6 +3048,96 @@ function hideWaveformSampleMarker(): void {
   elements.waveformSampleMarker.style.top = '0px';
 }
 
+// Pool of per-channel hover markers (one per lane in split mode, one for the
+// mono downmix otherwise).
+function getWaveformSampleMarker(index: number): HTMLElement {
+  let marker = state.waveformSampleMarkers[index];
+  if (!marker) {
+    marker = document.createElement('div');
+    marker.className = 'waveform-sample-marker';
+    marker.setAttribute('aria-hidden', 'true');
+    elements.waveformViewport.append(marker);
+    state.waveformSampleMarkers[index] = marker;
+  }
+  return marker;
+}
+
+function hideWaveformSampleMarkers(): void {
+  for (const marker of state.waveformSampleMarkers) {
+    marker.style.display = 'none';
+  }
+  hideWaveformSampleMarker();
+}
+
+function readChannelSampleValue(channelIndex: number, sampleIndex: number): number | null {
+  const buffer = state.playbackSession?.channelBuffers[channelIndex];
+  if (!(buffer instanceof ArrayBuffer)) {
+    return null;
+  }
+  const view = new Float32Array(buffer);
+  if (sampleIndex < 0 || sampleIndex >= view.length) {
+    return null;
+  }
+  return clamp(view[sampleIndex], -1, 1);
+}
+
+// Positions a hover marker on each displayed waveform: one per channel lane in
+// split mode, or a single marker on the mono downmix line otherwise.
+function positionWaveformChannelMarkers(sampleIndex: number, markerXRatio: number): void {
+  const session = state.playbackSession;
+  if (!session) {
+    hideWaveformSampleMarkers();
+    return;
+  }
+  const channelCount = Math.max(1, Math.min(session.numberOfChannels, session.channelBuffers.length));
+  const laneCount = getSpectrogramLaneCount();
+  const viewportWidth = elements.waveformViewport.clientWidth;
+  const viewportHeight = elements.waveformViewport.clientHeight;
+  const left = markerXRatio * viewportWidth;
+
+  if (laneCount > 1) {
+    const laneHeight = viewportHeight / laneCount;
+    for (let channelIndex = 0; channelIndex < laneCount; channelIndex += 1) {
+      const marker = getWaveformSampleMarker(channelIndex);
+      const value = readChannelSampleValue(channelIndex, sampleIndex);
+      if (value === null) {
+        marker.style.display = 'none';
+        continue;
+      }
+      const fullRatioY = (channelIndex + getWaveformMarkerYRatio(laneHeight, value)) / laneCount;
+      marker.style.display = 'block';
+      marker.style.left = `${left}px`;
+      marker.style.top = `${fullRatioY * viewportHeight}px`;
+    }
+    for (let index = laneCount; index < state.waveformSampleMarkers.length; index += 1) {
+      state.waveformSampleMarkers[index].style.display = 'none';
+    }
+    return;
+  }
+
+  // Mono view: the displayed waveform is the equal-weight downmix.
+  let sum = 0;
+  let count = 0;
+  for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+    const value = readChannelSampleValue(channelIndex, sampleIndex);
+    if (value !== null) {
+      sum += value;
+      count += 1;
+    }
+  }
+  if (count === 0) {
+    hideWaveformSampleMarkers();
+    return;
+  }
+  const marker = getWaveformSampleMarker(0);
+  marker.style.display = 'block';
+  marker.style.left = `${left}px`;
+  marker.style.top = `${getWaveformMarkerYRatio(viewportHeight, sum / count) * viewportHeight}px`;
+  for (let index = 1; index < state.waveformSampleMarkers.length; index += 1) {
+    state.waveformSampleMarkers[index].style.display = 'none';
+  }
+}
+
 function applySampleInfo(payload: SampleInfoPayload): void {
   const hover = state.hoverState[payload.surface];
   if (!hover || hover.requestId !== payload.requestId) {
@@ -3035,14 +3162,10 @@ function applySampleInfo(payload: SampleInfoPayload): void {
       sampleModel ?? channelPrefix + payload.label,
     );
 
-    if (elements.waveformSampleMarker && payload.markerVisible) {
-      // markerYRatio is within the hovered lane; map it back to full height.
-      const fullMarkerYRatio = (hover.laneIndex + payload.markerYRatio) / laneCount;
-      elements.waveformSampleMarker.style.display = 'block';
-      elements.waveformSampleMarker.style.left = `${payload.markerXRatio * elements.waveformViewport.clientWidth}px`;
-      elements.waveformSampleMarker.style.top = `${fullMarkerYRatio * elements.waveformViewport.clientHeight}px`;
+    if (payload.markerVisible && typeof payload.sampleIndex === 'number') {
+      positionWaveformChannelMarkers(payload.sampleIndex, payload.markerXRatio);
     } else {
-      hideWaveformSampleMarker();
+      hideWaveformSampleMarkers();
     }
     return;
   }
@@ -3263,10 +3386,19 @@ function scheduleSampleInfoRequestAtClientPoint(surface: SurfaceKind, clientX: n
     return;
   }
 
-  state.hoverFrame = window.requestAnimationFrame(() => {
+  // Cap hover sample-info updates at ~30 Hz regardless of the display refresh
+  // rate (rAF fires at 120/144 Hz on high-refresh monitors), so high-rate
+  // pointer moves don't drive extra worker queries.
+  const flush = (now: number): void => {
+    if (now - state.lastHoverFlushTime < HOVER_FLUSH_MIN_INTERVAL_MS) {
+      state.hoverFrame = window.requestAnimationFrame(flush);
+      return;
+    }
     state.hoverFrame = 0;
+    state.lastHoverFlushTime = now;
     flushPendingSampleInfoRequests();
-  });
+  };
+  state.hoverFrame = window.requestAnimationFrame(flush);
 }
 
 function requestSampleInfo(surface: SurfaceKind, event: PointerEvent): void {
@@ -3301,7 +3433,7 @@ function hideWaveformHoverTooltip(): void {
   clearPendingSampleInfoRequest('waveform');
   state.hoverState.waveform = null;
   hideSurfaceHoverTooltip(elements.waveformHoverTooltip);
-  hideWaveformSampleMarker();
+  hideWaveformSampleMarkers();
 }
 
 function hideSpectrogramHoverTooltip(): void {

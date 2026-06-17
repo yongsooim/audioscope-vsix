@@ -34,6 +34,14 @@ export function createAudioscopeTransportLoopController({
   state,
   syncPlaybackRateControl,
 }: AudioscopeTransportLoopDeps) {
+  // Cache the last-written transport UI values so the per-frame syncTransport
+  // only touches the DOM for things that actually changed (most don't).
+  let lastTransportEnabled: boolean | null = null;
+  let lastPlayLabel: string | null = null;
+  let lastRateEnabled: boolean | null = null;
+  let lastRateValue: string | null = null;
+  let lastTimeReadout: string | null = null;
+
   function getPlaybackClockState() {
     return state.audioTransport?.getPlaybackClockState() ?? null;
   }
@@ -79,13 +87,37 @@ export function createAudioscopeTransportLoopController({
       ? frameToSeconds(Math.round(clock.currentFrameFloat))
       : 0;
 
-    elements.playToggle.disabled = !hasPlaybackTransport();
-    elements.playToggle.textContent = state.audioTransport?.isPlaying() ? 'Pause' : 'Play';
-    elements.seekBackward.disabled = !hasPlaybackTransport();
-    elements.seekForward.disabled = !hasPlaybackTransport();
-    elements.playbackRateSelect.disabled = !state.audioTransport;
-    elements.playbackRateSelect.value = String(state.playbackRate);
-    elements.timeReadout.textContent = `${formatTime(currentTime)} / ${formatTime(durationSeconds)}`;
+    const transportEnabled = hasPlaybackTransport();
+    if (transportEnabled !== lastTransportEnabled) {
+      lastTransportEnabled = transportEnabled;
+      elements.playToggle.disabled = !transportEnabled;
+      elements.seekBackward.disabled = !transportEnabled;
+      elements.seekForward.disabled = !transportEnabled;
+    }
+
+    const playLabel = state.audioTransport?.isPlaying() ? 'Pause' : 'Play';
+    if (playLabel !== lastPlayLabel) {
+      lastPlayLabel = playLabel;
+      elements.playToggle.textContent = playLabel;
+    }
+
+    const rateEnabled = Boolean(state.audioTransport);
+    if (rateEnabled !== lastRateEnabled) {
+      lastRateEnabled = rateEnabled;
+      elements.playbackRateSelect.disabled = !rateEnabled;
+    }
+
+    const rateValue = String(state.playbackRate);
+    if (rateValue !== lastRateValue) {
+      lastRateValue = rateValue;
+      elements.playbackRateSelect.value = rateValue;
+    }
+
+    const timeReadout = `${formatTime(currentTime)} / ${formatTime(durationSeconds)}`;
+    if (timeReadout !== lastTimeReadout) {
+      lastTimeReadout = timeReadout;
+      elements.timeReadout.textContent = timeReadout;
+    }
     syncPlaybackRateControl();
 
     if (state.engineWorker) {
