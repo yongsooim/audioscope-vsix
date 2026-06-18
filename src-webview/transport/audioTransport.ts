@@ -4,7 +4,7 @@ import SignalsmithStretch from '../vendor/SignalsmithStretch.mjs';
 const DEFAULT_SAMPLE_RATE = 48000;
 const DEFAULT_PLAYBACK_RATE = 1;
 const AUDIO_CONTEXT_SUSPEND_DELAY_MS = 3000;
-const STRETCH_TIME_UPDATE_INTERVAL_SECONDS = 1 / 30;
+const STRETCH_TIME_UPDATE_INTERVAL_SECONDS = 1 / 60;
 
 export type PlaybackLoopRange = {
   end: number;
