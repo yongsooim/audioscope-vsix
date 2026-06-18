@@ -1,0 +1,17 @@
+.ffmpeg-build/**
+.vscode/**
+.vscode-test/**
+benchmarks/**
+exampleFiles/**
+node_modules/**
+scripts/**
+src/**
+src-wasm/**
+src-webview/**/*.ts
+src-webview/**/*.tsx
+src-webview/**/*.map
+.DS_Store
+.gitignore
+.gitmodules
+bun.lock
+tsconfig*.json
