@@ -423,6 +423,7 @@ const state = {
   lastAppliedTransportCommandSerial: 0,
   loadToken: 0,
   loudness: createLoudnessSummaryState('idle'),
+  loudnessChannelSessionRevision: 0,
   mediaMetadataLoadToken: 0,
   mediaMetadata: createMediaMetadataState('idle'),
   mediaMetadataDetailOpen: false,
@@ -2799,10 +2800,46 @@ function syncPresentedSpectrogramRange(displayRange: TimeRange | null): void {
   syncSpectrogramDisplayRange(displayRange, pixelWidth, pixelHeight);
 }
 
+function postProgramLoudnessChannelsIfNeeded(renderConfig = getEffectiveSpectrogramRenderConfig()): void {
+  if (
+    renderConfig.analysisType !== 'loudness'
+    || !state.analysisWorker
+    || !state.playbackSession
+    || state.loudnessChannelSessionRevision === state.spectrogramSessionRevision
+  ) {
+    return;
+  }
+
+  const session = state.playbackSession;
+  if (getSpectrogramLaneCount() !== 1 || session.numberOfChannels < 2) {
+    state.loudnessChannelSessionRevision = state.spectrogramSessionRevision;
+    return;
+  }
+
+  const channelBuffers = session.channelBuffers
+    .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer)
+    .map((buffer) => buffer.slice(0));
+  if (channelBuffers.length < 2) {
+    state.loudnessChannelSessionRevision = state.spectrogramSessionRevision;
+    return;
+  }
+
+  state.analysisWorker.postMessage({
+    type: 'attachLoudnessChannels',
+    body: {
+      channelBuffers,
+      sessionVersion: state.spectrogramSessionRevision,
+    },
+  }, channelBuffers);
+  state.loudnessChannelSessionRevision = state.spectrogramSessionRevision;
+}
+
 function requestSpectrogramOverviewRender(renderConfig = getEffectiveSpectrogramRenderConfig()): void {
   if (!state.analysisWorker || !state.analysis?.initialized) {
     return;
   }
+
+  postProgramLoudnessChannelsIfNeeded(renderConfig);
 
   const message = {
     type: 'renderOverview',
@@ -2870,6 +2907,8 @@ function syncSpectrogramView({ force = false } = {}): void {
   }
 
   const renderConfig = getEffectiveSpectrogramRenderConfig();
+  postProgramLoudnessChannelsIfNeeded(renderConfig);
+
   const previousGeneration = state.analysis.generation;
   const generation = previousGeneration + 1;
   state.analysis.generation = generation;
@@ -3968,29 +4007,21 @@ async function startDeferredAnalysisSession(loadToken: number): Promise<void> {
   // downmix otherwise. A dedicated session revision forces the worker to
   // re-prepare its WASM session with the new per-lane PCM on a mode change.
   state.spectrogramSessionRevision += 1;
+  state.loudnessChannelSessionRevision = 0;
   const primaryPcm = laneCount > 1 && pending.playbackSession.channelBuffers[0] instanceof ArrayBuffer
     ? new Float32Array(pending.playbackSession.channelBuffers[0].slice(0))
     : pending.monoSamples;
-  // For the non-split program loudness curve, hand the worker every source
-  // channel so it can sum per-channel mean-squares (BS.1770) instead of using a
-  // coherent mono pre-mix. Mono files (and split lanes) just use their own PCM.
-  const loudnessChannelBuffers = laneCount === 1 && pending.playbackSession.numberOfChannels >= 2
-    ? pending.playbackSession.channelBuffers
-      .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer)
-      .map((buffer) => buffer.slice(0))
-    : undefined;
   analysisWorker.postMessage({
     type: 'attachAudioSession',
     body: {
       duration: pending.playbackSession.durationSeconds,
-      loudnessChannelBuffers,
       quality: pending.quality,
       sampleCount: primaryPcm.length,
       sampleRate: pending.playbackSession.sourceSampleRate,
       samplesBuffer: primaryPcm.buffer,
       sessionVersion: state.spectrogramSessionRevision,
     },
-  }, [primaryPcm.buffer, ...(loudnessChannelBuffers ?? [])]);
+  }, [primaryPcm.buffer]);
 
   await setupSpectrogramSatellites(
     loadToken,

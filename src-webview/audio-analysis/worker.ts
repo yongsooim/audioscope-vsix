@@ -104,14 +104,15 @@ interface CanvasInitOptions {
 
 interface AudioSessionOptions {
   duration?: number;
-  // Per-channel PCM for BS.1770-correct loudness (weighted sum of channels).
-  // Only sent for the non-split program view; in split mode each lane computes
-  // loudness from its own single-channel samplesBuffer.
-  loudnessChannelBuffers?: ArrayBuffer[];
   quality?: QualityPreset;
   sampleCount?: number;
   sampleRate?: number;
   samplesBuffer?: ArrayBuffer;
+  sessionVersion?: number;
+}
+
+interface LoudnessChannelOptions {
+  channelBuffers?: ArrayBuffer[];
   sessionVersion?: number;
 }
 
@@ -535,6 +536,9 @@ self.onmessage = (event) => {
         const runtime = await getRuntime();
         attachAudioSession(runtime, message.body);
       });
+      return;
+    case 'attachLoudnessChannels':
+      attachLoudnessChannels(message.body);
       return;
     case 'renderOverview':
       registerActiveConfigVersion(message.body?.configVersion);
@@ -1615,13 +1619,7 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
   analysisState.maxFrequency = Math.min(MAX_FREQUENCY, sampleRate / 2);
   analysisState.runtimeVariant = runtime.variant;
 
-  // Per-channel PCM for the program (non-split) loudness curve; null in split
-  // mode, where this lane's own single-channel PCM is the loudness source.
-  analysisState.loudnessChannels = Array.isArray(options?.loudnessChannelBuffers)
-    ? options.loudnessChannelBuffers
-      .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer)
-      .map((buffer) => new Float32Array(buffer))
-    : null;
+  analysisState.loudnessChannels = null;
   analysisState.loudnessCache = null;
 
   if (isNewAudioSession) {
@@ -1632,6 +1630,24 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
   }
 
   postAnalysisInitialized();
+}
+
+function attachLoudnessChannels(options: LoudnessChannelOptions | undefined): void {
+  const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options?.sessionVersion) : -1;
+  if (sessionVersion !== analysisState.attachedSessionVersion) {
+    return;
+  }
+
+  analysisState.loudnessChannels = Array.isArray(options?.channelBuffers)
+    ? options.channelBuffers
+      .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer)
+      .map((buffer) => new Float32Array(buffer))
+    : null;
+  analysisState.loudnessCache = null;
+
+  if (analysisState.currentAnalysisType === 'loudness') {
+    scheduleSpectrogramDisplayPaint();
+  }
 }
 
 function updateLoudnessConfig(body: Record<string, unknown> | null | undefined): void {
@@ -2432,8 +2448,11 @@ function ensureLoudnessCache(): LoudnessData | null {
   if (analysisState.sampleRate <= 0) {
     return null;
   }
-  const channels = analysisState.loudnessChannels && analysisState.loudnessChannels.length > 0
+  const retainedChannels = analysisState.loudnessChannels && analysisState.loudnessChannels.length > 0
     ? analysisState.loudnessChannels
+    : null;
+  const channels = retainedChannels
+    ? retainedChannels
     : (() => {
       const pcm = getSessionPcmData();
       return pcm ? [pcm] : [];
@@ -2442,6 +2461,9 @@ function ensureLoudnessCache(): LoudnessData | null {
     return null;
   }
   analysisState.loudnessCache = computeLoudnessData(channels, analysisState.sampleRate);
+  if (retainedChannels) {
+    analysisState.loudnessChannels = null;
+  }
   return analysisState.loudnessCache;
 }
 

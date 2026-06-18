@@ -1,6 +1,6 @@
 import { AUDIO_TRANSPORT_PROCESSOR_NAME } from './audioTransportShared';
 
-const SNAPSHOT_INTERVAL_QUANTA = 8;
+const SNAPSHOT_INTERVAL_QUANTA = 4;
 
 interface ProcessorControlBody {
   loopEnabled?: boolean;

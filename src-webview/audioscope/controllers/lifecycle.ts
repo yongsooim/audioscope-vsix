@@ -25,6 +25,7 @@ interface LifecycleState {
   lastAppliedTransportCommandSerial: number;
   lastSyncedSpectrogramDisplay: unknown | null;
   loopHandleDrag: unknown | null;
+  loudnessChannelSessionRevision: number;
   playbackFrame: number;
   playbackSession: PlaybackSession | null;
   pendingAnalysisSession: unknown | null;
@@ -105,6 +106,7 @@ export function createAudioscopeLifecycleController({
     state.analysisRuntimeReadyPromise = null;
     state.resolveAnalysisRuntimeReady = null;
     state.analysis = null;
+    state.loudnessChannelSessionRevision = 0;
     state.spectrogramSurfaceResetPromise = null;
     window.cancelAnimationFrame(state.spectrogramFrame);
     state.spectrogramFrame = 0;
@@ -157,6 +159,7 @@ export function createAudioscopeLifecycleController({
     state.pendingAnalysisSession = null;
     state.initialWaveformReadyLoadToken = 0;
     state.deferredLoudnessLoadToken = 0;
+    state.loudnessChannelSessionRevision = 0;
     state.mediaMetadataLoadToken = 0;
     state.selectionDrag = null;
     state.loopHandleDrag = null;
