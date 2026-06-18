@@ -4589,8 +4589,28 @@ function attachUiEvents(): void {
     sendViewportIntent({ kind: 'clearLoop' });
   });
 
-  elements.waveformViewport.addEventListener('wheel', (event) => handleViewportWheel(event, 'waveform', elements.waveformViewport), { passive: false });
-  elements.spectrogramHitTarget.addEventListener('wheel', (event) => handleViewportWheel(event, 'spectrogram', elements.spectrogramHitTarget), { passive: false });
+  // One wheel listener for the whole viewport — the waveform window, the shared time strip
+  // and splitter between the panels, and the spectrogram window. Pick the surface from
+  // where the cursor is and anchor the zoom against that surface's element; the two
+  // surfaces are x-aligned (same panel inline padding), so the time strip and splitter
+  // resolve correctly through the waveform. Scrollable chrome (the toolbar and the
+  // spectrogram settings panel) is skipped so its own scrolling keeps working.
+  elements.viewport.addEventListener(
+    'wheel',
+    (event) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (!target || elements.waveToolbar.contains(target) || elements.spectrogramMeta.contains(target)) {
+        return;
+      }
+      const onSpectrogram = elements.spectrogramPanel.contains(target);
+      handleViewportWheel(
+        event,
+        onSpectrogram ? 'spectrogram' : 'waveform',
+        onSpectrogram ? elements.spectrogramHitTarget : elements.waveformViewport,
+      );
+    },
+    { passive: false },
+  );
 
   elements.waveformHitTarget.addEventListener('pointerdown', (event) => beginSelectionDrag(event, elements.waveformHitTarget, 'waveform'));
   elements.waveformHitTarget.addEventListener('pointermove', (event) => {

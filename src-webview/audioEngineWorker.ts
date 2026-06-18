@@ -105,6 +105,17 @@ const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 // crisp step. Smaller ratio = finer steps. Anchored to getMinVisibleFrames() so the grid
 // is stable regardless of the current zoom.
 const ZOOM_SPAN_QUANTIZE_RATIO = 1.25;
+// A trackpad drag arrives as a burst of wheel events. If the gap between two events
+// exceeds this, the next event starts a fresh gesture and the axis lock is re-decided.
+// Momentum (inertial) events keep arriving well under this threshold, so they stay locked.
+const WHEEL_GESTURE_RESET_MS = 120;
+// A fresh gesture zooms only if the vertical delta beats the horizontal by this factor;
+// otherwise it pans.
+const WHEEL_ZOOM_BIAS_RATIO = 1.5;
+// While a gesture is locked, the opposite axis must beat the locked one by this (larger)
+// factor to take over. The gap between this and WHEEL_ZOOM_BIAS_RATIO is the lock's
+// hysteresis: a deliberate direction change switches axes, frame-to-frame noise does not.
+const WHEEL_AXIS_SWITCH_RATIO = 3;
 const HOVER_SAMPLE_VALUE_MAX_SAMPLES_PER_PIXEL = 32;
 
 interface WaveformSurfaceState {
@@ -191,6 +202,12 @@ interface LoopHandleDragState {
 
 type DragState = LoopHandleDragState | SelectionDragState | null;
 
+interface WheelGestureState {
+  axis: 'pan' | 'zoom';
+  lastEventTimeMs: number;
+  surface: SurfaceKind;
+}
+
 interface EngineSessionState {
   durationFrames: number;
   initialized: boolean;
@@ -223,6 +240,7 @@ interface EngineState {
   pendingTransportCommand: TransportCommand | null;
   playbackClock: PlaybackClockState;
   renderConfigRevision: number;
+  renderInFlight: boolean;
   renderRevision: number;
   renderScheduled: boolean;
   renderSurfacesRevision: number;
@@ -263,6 +281,7 @@ interface EngineState {
     targetStartFrame: number;
   };
   waveformSurface: WaveformSurfaceState;
+  wheelGesture: WheelGestureState | null;
   spectrogramSurface: SpectrogramSurfaceState;
 }
 
@@ -299,6 +318,7 @@ const state: EngineState = {
   pendingTransportCommand: null,
   playbackClock: createEmptyPlaybackClock(),
   renderConfigRevision: 0,
+  renderInFlight: false,
   renderRevision: 0,
   renderScheduled: false,
   renderSurfacesRevision: 0,
@@ -339,6 +359,7 @@ const state: EngineState = {
     targetStartFrame: 0,
   },
   waveformSurface,
+  wheelGesture: null,
   spectrogramSurface,
 };
 
@@ -887,20 +908,53 @@ function handleWheelIntent(intent: Extract<ViewportIntent, { kind: 'wheel' }>): 
   const deltaY = intent.deltaY * deltaScale;
   const horizontalMagnitude = Math.abs(deltaX);
   const verticalMagnitude = Math.abs(deltaY);
+
+  // Ignore idle/empty events without disturbing the in-flight gesture lock.
+  if (horizontalMagnitude <= 0.01 && verticalMagnitude <= 0.01) {
+    emitUiState();
+    return;
+  }
+
+  // Axis lock. A single trackpad drag arrives as a burst of wheel events whose dominant
+  // axis wobbles frame-to-frame; classifying each event on its own makes zoom and pan
+  // flicker on at once. So decide the axis at the start of a gesture and hold it until a
+  // pause (or a surface change) ends the gesture — with one exception: if the opposite
+  // axis becomes overwhelmingly dominant mid-gesture (a deliberate direction change), the
+  // lock switches. The switch ratio sits well above the initial zoom bias, so the lock
+  // has hysteresis and won't flip-flop on noise. (A zoom gesture rescales cached
+  // spectrogram tiles, so a horizontal pan carrying vertical noise used to flicker the
+  // spectrogram — locking the axis stops that.)
+  const eventTimeMs = performance.now();
+  const previousGesture = state.wheelGesture;
+  const continuingGesture =
+    previousGesture !== null
+    && previousGesture.surface === intent.surface
+    && eventTimeMs - previousGesture.lastEventTimeMs <= WHEEL_GESTURE_RESET_MS;
+  let axis: 'pan' | 'zoom';
+  if (!continuingGesture) {
+    // Fresh gesture: zoom only when vertical clearly dominates, else pan.
+    axis = verticalMagnitude > horizontalMagnitude * WHEEL_ZOOM_BIAS_RATIO ? 'zoom' : 'pan';
+  } else {
+    axis = previousGesture.axis;
+    if (axis === 'pan' && verticalMagnitude > horizontalMagnitude * WHEEL_AXIS_SWITCH_RATIO) {
+      axis = 'zoom';
+    } else if (axis === 'zoom' && horizontalMagnitude > verticalMagnitude * WHEEL_AXIS_SWITCH_RATIO) {
+      axis = 'pan';
+    }
+  }
+  state.wheelGesture = { axis, lastEventTimeMs: eventTimeMs, surface: intent.surface };
+
   const currentRange = getTargetRange();
   const currentSpanFrames = Math.max(1, currentRange.endFrame - currentRange.startFrame);
 
-  // Require vertical to clearly dominate before treating the gesture as a zoom. On a
-  // trackpad a horizontal pan carries small vertical noise; without this margin those
-  // noise frames flip to zoom, which rescales the cached spectrogram tiles (a raster
-  // resample = visible shimmer) even though the waveform — recomputed each frame — stays
-  // smooth. That is exactly the "spectrogram-only shake while time-shifting" symptom.
-  if (verticalMagnitude > horizontalMagnitude * 1.5 && verticalMagnitude > 0.01) {
-    // Snap the continuous wheel/pinch zoom to discrete grid levels so the span holds
-    // steady between levels (no per-frame tile rescale = no spectrogram shimmer).
-    const nextSpanFrames = quantizeViewSpanFrames(
-      currentSpanFrames * Math.pow(WAVEFORM_ZOOM_STEP_FACTOR, deltaY / 180),
-    );
+  if (axis === 'zoom') {
+    // Continuous zoom: accumulate the span directly (no grid snapping) so even the small
+    // per-event deltas a trackpad emits sum up and the zoom travels all the way to the
+    // min/max instead of stalling on a grid level. (The +/- zoom-step buttons still snap
+    // to a grid via quantizeViewSpanFrames; the trade-off of continuous zoom is the
+    // spectrogram may shimmer slightly while a zoom is in flight.) The locked axis ignores
+    // any horizontal component, so a diagonal drag no longer pans while it zooms.
+    const nextSpanFrames = currentSpanFrames * Math.pow(WAVEFORM_ZOOM_STEP_FACTOR, deltaY / 180);
 
     const anchorRatio = state.viewport.followEnabled
       ? WAVEFORM_FOLLOW_RATIO
@@ -909,32 +963,40 @@ function handleWheelIntent(intent: Extract<ViewportIntent, { kind: 'wheel' }>): 
       ? getClampedPlaybackFrame()
       : getFrameAtPresentedRatio(intent.pointerRatioX);
 
-    state.viewport.followEnabled = state.viewport.followEnabled && verticalMagnitude > 0.01;
     applyZoomAroundFrame(anchorFrame, nextSpanFrames, anchorRatio);
     if (state.viewport.followEnabled) {
       applyFollowSolver();
     } else {
       syncRenderedRangeToTarget();
     }
-    emitUiState();
+    emitInteractionUiState();
     scheduleRender();
     return;
   }
 
-  if (horizontalMagnitude > 0.01) {
-    state.viewport.followEnabled = false;
-    const framesPerPixel = currentSpanFrames / Math.max(1, widthPx);
-    const deltaFrames = Math.round(deltaX * framesPerPixel);
-    setTargetRange(
-      currentRange.startFrame + deltaFrames,
-      currentRange.endFrame + deltaFrames,
-    );
-    syncRenderedRangeToTarget();
-    emitUiState();
-    scheduleRender();
+  // Pan: shift the view by the horizontal delta only; the locked axis ignores any
+  // vertical component so the gesture no longer zooms while it pans.
+  state.viewport.followEnabled = false;
+  const framesPerPixel = currentSpanFrames / Math.max(1, widthPx);
+  const deltaFrames = Math.round(deltaX * framesPerPixel);
+  setTargetRange(
+    currentRange.startFrame + deltaFrames,
+    currentRange.endFrame + deltaFrames,
+  );
+  syncRenderedRangeToTarget();
+  emitInteractionUiState();
+  scheduleRender();
+}
+
+// During a continuous wheel gesture the immediate UI-state emit is only needed when the
+// render loop is idle. If a render is already in flight it will emit the latest state the
+// moment it finishes (and scheduleRender keeps the view dirty), so skipping the emit here
+// drops one redundant ViewportUiState post per burst frame without losing any update or
+// hurting first-event responsiveness.
+function emitInteractionUiState(): void {
+  if (state.renderInFlight) {
     return;
   }
-
   emitUiState();
 }
 
@@ -1375,15 +1437,20 @@ function resizeSpectrogramSurface(): void {
 }
 
 function scheduleRender(): void {
+  // renderToken/renderRevision advance on every request so an in-flight render can detect
+  // it has been superseded and bail (the tile builder checks the token between tiles).
   state.renderToken += 1;
+  state.renderRevision += 1;
+  state.renderScheduled = true;
 
-  if (state.renderScheduled) {
-    state.renderRevision += 1;
+  // Single-flight: if a render is already running, just leave the dirty bit set — the
+  // running loop re-reads the latest view when it finishes its current pass. Without this,
+  // a schedule that arrived mid-render (renderScheduled is cleared before the await) would
+  // start a SECOND concurrent pump, so a fast wheel/pan burst spawned several overlapping
+  // spectrogram renders whose results were mostly discarded.
+  if (state.renderInFlight) {
     return;
   }
-
-  state.renderScheduled = true;
-  state.renderRevision += 1;
   void pumpRenderLoop();
 }
 
@@ -1406,45 +1473,53 @@ function snapPresentedRangeToFrames(range: RangeFrames): RangeFrames {
 }
 
 async function pumpRenderLoop(): Promise<void> {
-  if (!state.renderScheduled) {
+  // Single-flight guard: only one pump runs at a time. Schedules that arrive while a render
+  // is awaiting just re-set renderScheduled (the dirty bit) and this loop picks them up on
+  // its next pass — no concurrent re-entry. renderInFlight stays true for the whole loop.
+  if (state.renderInFlight) {
     return;
   }
+  state.renderInFlight = true;
 
-  while (state.renderScheduled) {
-    state.renderScheduled = false;
+  try {
+    while (state.renderScheduled) {
+      state.renderScheduled = false;
 
-    if (!canRender()) {
-      continue;
-    }
+      if (!canRender()) {
+        continue;
+      }
 
-    const token = state.renderToken;
-    const targetRange = getTargetRange();
+      const token = state.renderToken;
+      const targetRange = getTargetRange();
 
-    try {
-      if (canRenderSpectrogram()) {
-        await renderSpectrogram(targetRange, token);
-        if (token !== state.renderToken) {
-          continue;
+      try {
+        if (canRenderSpectrogram()) {
+          await renderSpectrogram(targetRange, token);
+          if (token !== state.renderToken) {
+            continue;
+          }
         }
-      }
 
-      const presentedRange = snapPresentedRangeToFrames(targetRange);
-      state.viewport.presentedStartFrame = presentedRange.startFrame;
-      state.viewport.presentedEndFrame = presentedRange.endFrame;
-      emitUiState();
-      if (canRenderSpectrogram()) {
-        postMessage({
-          type: 'SpectrogramSurfaceReady',
-          body: {
-            presentedEndFrame: presentedRange.endFrame,
-            presentedStartFrame: presentedRange.startFrame,
-            serial: state.uiRevision,
-          },
-        });
+        const presentedRange = snapPresentedRangeToFrames(targetRange);
+        state.viewport.presentedStartFrame = presentedRange.startFrame;
+        state.viewport.presentedEndFrame = presentedRange.endFrame;
+        emitUiState();
+        if (canRenderSpectrogram()) {
+          postMessage({
+            type: 'SpectrogramSurfaceReady',
+            body: {
+              presentedEndFrame: presentedRange.endFrame,
+              presentedStartFrame: presentedRange.startFrame,
+              serial: state.uiRevision,
+            },
+          });
+        }
+      } catch (error) {
+        postError(error);
       }
-    } catch (error) {
-      postError(error);
     }
+  } finally {
+    state.renderInFlight = false;
   }
 }
 
