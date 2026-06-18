@@ -549,7 +549,11 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     renderViewStart + renderSpan,
   );
   const renderVisibleSampleCount = Math.max(1, (renderViewEnd - renderViewStart) * analysisState.sampleRate);
-  const visibleSampleSpan = Math.max(0, renderVisibleSampleCount - 1);
+  // Span convention (matches ruler / playhead / spectrogram): sample p maps to
+  // x = p / span * width, so the window's right edge is the sample-span boundary.
+  // Previously this used span-1, which pinned the last sample to the right edge
+  // and drifted up to ~1 sample from the ruler at per-sample zoom.
+  const visibleSampleSpan = renderVisibleSampleCount;
 
   analysisState.plotMode = rawSamplePlotMode ? 'raw' : 'envelope';
 

@@ -13,6 +13,7 @@ import {
   normalizeExternalToolStatus,
 } from './audioscope/controllers/media';
 import {
+  MAX_TOTAL_ANALYSIS_SAMPLES,
   createPlaybackAnalysisData,
   createPlaybackAnalysisDataFromPlaybackSession,
   createPlaybackSessionFromPcmFallback,
@@ -116,7 +117,7 @@ function fetchWorkerSourceText(moduleUrl: string): Promise<string> {
   return cached;
 }
 
-const DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
+let DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
 const DEFAULT_VIEWPORT_SPLIT_RATIO = 0.5;
 const VIEWPORT_SPLIT_STEP = 0.05;
 const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 12;
@@ -223,6 +224,9 @@ type ChannelSampleValueResult = {
   frequencyStartHz: number | null;
   timeSeconds: number;
   valueDb: number | null;
+  loudnessMomentary?: number | null;
+  loudnessShortTerm?: number | null;
+  loudnessSamplePeak?: number | null;
 } | null;
 
 type TimeRange = {
@@ -553,6 +557,10 @@ const {
   renderSpectrogramScale,
   renderWaveformUi,
   state,
+  teardownSatelliteLanes: () => {
+    teardownSpectrogramLanes();
+    teardownWaveformLanes();
+  },
 });
 
 const {
@@ -577,10 +585,11 @@ const {
   applyViewportSplit,
   attachResizeObservers,
   handleViewportWheel,
+  syncSurfaceSizes,
   updateViewportSplitRatioFromClientY,
 } = createAudioscopeViewportController({
   defaultViewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
-  displayPixelRatio: DISPLAY_PIXEL_RATIO,
+  getDisplayPixelRatio: () => DISPLAY_PIXEL_RATIO,
   elements,
   getDurationFrames,
   refreshHoveredSampleInfos,
@@ -3217,6 +3226,13 @@ function formatHoverDb(valueDb: number | null): string {
   return valueDb <= -120 ? '-∞ dB' : `${valueDb.toFixed(1)} dB`;
 }
 
+function formatHoverLufs(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= -100) {
+    return '-∞';
+  }
+  return value.toFixed(1);
+}
+
 // Fixed decimal count keeps the decimal point and digits aligned across channels
 // in the monospace readout (trailing zeros are intentionally kept).
 function formatWaveformChannelSample(value: number | null): string {
@@ -3284,12 +3300,26 @@ function renderSpectrogramChannelHoverTooltip(): void {
     return;
   }
 
+  const laneCount = aggregation.laneCount;
   const meta = [formatAxisLabel(reference.timeSeconds)];
+
+  // Loudness: time + per-channel momentary / short-term LUFS and sample peak.
+  // No frequency axis applies to the loudness view.
+  if (state.spectrogramConfig.analysisType === 'loudness') {
+    const channels = aggregation.results.map((entry, channelIndex) => ({
+      label: laneCount > 1 ? channelLaneLabel(channelIndex, laneCount) : '',
+      value: entry
+        ? `M ${formatHoverLufs(entry.loudnessMomentary)} / S ${formatHoverLufs(entry.loudnessShortTerm)} LUFS · Pk ${formatHoverLufs(entry.loudnessSamplePeak)} dBFS`
+        : '–',
+    }));
+    updateSurfaceHoverTooltip(elements.spectrogramHoverTooltip, elements.spectrogramHitTarget, hover, { meta, channels });
+    return;
+  }
+
   const frequencyLabel = formatHoverFrequency(reference.frequencyStartHz, reference.frequencyEndHz);
   if (frequencyLabel) {
     meta.push(frequencyLabel);
   }
-  const laneCount = aggregation.laneCount;
   const channels = aggregation.results.map((entry, channelIndex) => ({
     label: laneCount > 1 ? channelLaneLabel(channelIndex, laneCount) : '',
     value: formatHoverDb(entry ? entry.valueDb : null),
@@ -3338,7 +3368,10 @@ function requestSampleInfoAtClientPoint(surface: SurfaceKind, clientX: number, c
 
   // Split spectrogram with dB-valued analysis: query every channel's analysis
   // worker so the readout shows each channel's actual value at this point.
-  if (surface === 'spectrogram' && laneCount > 1 && isPerChannelSpectrogramValueType()) {
+  // Loudness always routes here (each lane reports its own LUFS/sample peak; in
+  // non-split mode the single worker reports the program loudness).
+  const isLoudnessSurface = state.spectrogramConfig.analysisType === 'loudness';
+  if (surface === 'spectrogram' && ((laneCount > 1 && isPerChannelSpectrogramValueType()) || isLoudnessSurface)) {
     const workers = getAnalysisChannelWorkers();
     state.spectrogramChannelHover = {
       requestId,
@@ -3938,17 +3971,26 @@ async function startDeferredAnalysisSession(loadToken: number): Promise<void> {
   const primaryPcm = laneCount > 1 && pending.playbackSession.channelBuffers[0] instanceof ArrayBuffer
     ? new Float32Array(pending.playbackSession.channelBuffers[0].slice(0))
     : pending.monoSamples;
+  // For the non-split program loudness curve, hand the worker every source
+  // channel so it can sum per-channel mean-squares (BS.1770) instead of using a
+  // coherent mono pre-mix. Mono files (and split lanes) just use their own PCM.
+  const loudnessChannelBuffers = laneCount === 1 && pending.playbackSession.numberOfChannels >= 2
+    ? pending.playbackSession.channelBuffers
+      .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer)
+      .map((buffer) => buffer.slice(0))
+    : undefined;
   analysisWorker.postMessage({
     type: 'attachAudioSession',
     body: {
       duration: pending.playbackSession.durationSeconds,
+      loudnessChannelBuffers,
       quality: pending.quality,
       sampleCount: primaryPcm.length,
       sampleRate: pending.playbackSession.sourceSampleRate,
       samplesBuffer: primaryPcm.buffer,
       sessionVersion: state.spectrogramSessionRevision,
     },
-  }, [primaryPcm.buffer]);
+  }, [primaryPcm.buffer, ...(loudnessChannelBuffers ?? [])]);
 
   await setupSpectrogramSatellites(
     loadToken,
@@ -3969,6 +4011,23 @@ async function initializePlaybackFromPreparedData(
   preparedPlaybackData: { monoSamples: Float32Array; playbackSession: PlaybackSession },
 ): Promise<void> {
   const { monoSamples, playbackSession } = preparedPlaybackData;
+
+  // Refuse files beyond the analysis ceiling: holding per-channel PCM across the
+  // transport + waveform + spectrogram workers would multiply into several GB
+  // and risk an OOM crash. Better to show a clear message than to take down the
+  // editor host.
+  const totalAnalysisSamples = Math.max(0, playbackSession.sourceLength) * Math.max(1, playbackSession.numberOfChannels);
+  if (totalAnalysisSamples > MAX_TOTAL_ANALYSIS_SAMPLES) {
+    const durationMinutes = playbackSession.sourceSampleRate > 0
+      ? Math.round(playbackSession.sourceLength / playbackSession.sourceSampleRate / 60)
+      : 0;
+    setFatalStatus(
+      `This file is too large for audioscope to analyze (${durationMinutes} min, ${playbackSession.numberOfChannels} ch). `
+      + 'Try a shorter excerpt.',
+    );
+    return;
+  }
+
   const audioTransport = state.audioTransport;
   state.playbackSession = playbackSession;
   state.lastSyncedSpectrogramDisplay = null;
@@ -4239,6 +4298,32 @@ function attachUiEvents(): void {
     closePlaybackRateMenu();
     positionPlaybackRateMenu();
   });
+
+  // Re-scale the canvas backing stores when the device pixel ratio changes
+  // (window dragged to a different-DPI monitor, or OS/browser zoom). A pure DPR
+  // change does not alter CSS sizes, so the ResizeObserver would not fire and
+  // the surfaces would otherwise stay at the launch resolution and look soft.
+  const handleDevicePixelRatioChange = (): void => {
+    const next = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
+    if (next !== DISPLAY_PIXEL_RATIO) {
+      DISPLAY_PIXEL_RATIO = next;
+      syncSurfaceSizes(true);
+    }
+    armDevicePixelRatioListener();
+  };
+  function armDevicePixelRatioListener(): void {
+    if (typeof window.matchMedia !== 'function') {
+      return;
+    }
+    try {
+      window
+        .matchMedia(`(resolution: ${DISPLAY_PIXEL_RATIO}dppx)`)
+        .addEventListener('change', handleDevicePixelRatioChange, { once: true });
+    } catch {
+      // Older engines without a resolution media query: leave the launch DPR.
+    }
+  }
+  armDevicePixelRatioListener();
 
   // Terminal teardown when the editor panel is disposed. retainContextWhenHidden
   // keeps this page alive while hidden, so the only reliable teardown signal is

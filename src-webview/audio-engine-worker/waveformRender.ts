@@ -282,7 +282,10 @@ function getSampleXTransform(sampleStartFrame: number, visibleSampleSpan: number
     return { maxX, xOffset: 0, xScale: 0 };
   }
 
-  const xScale = maxX / visibleSampleSpan;
+  // Map sample p to x = p / span * drawColumns so the window's right edge aligns
+  // with the ruler/playhead (which divide by the full span, not span-1). maxX
+  // still clamps drawn points to the last device column.
+  const xScale = drawColumns / visibleSampleSpan;
   return {
     maxX,
     xOffset: -(sampleStartFrame * xScale),

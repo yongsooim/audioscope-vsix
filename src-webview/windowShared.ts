@@ -35,3 +35,34 @@ export function getWindowValue(
         : 1;
   }
 }
+
+// Coherent-gain power normalization. A pure tone peaks at (Σ window)/2 in the
+// one-sided magnitude spectrum, so dividing power by (Σw/2)² makes the displayed
+// dB independent of the window choice (a window with lower coherent gain no
+// longer reads quieter). A rectangular window (Σw = N) reduces to the original
+// 1/(N/2)². Memoized per (window, size); the Zig analysis core mirrors this.
+const windowPowerScaleCache = new Map<string, number>();
+export function getWindowCoherentPowerScale(
+  windowFunction: SpectrogramWindowFunction,
+  fftSize: number,
+): number {
+  const size = Math.max(1, Math.round(fftSize));
+  const cacheKey = `${windowFunction}:${size}`;
+  const cached = windowPowerScaleCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  let windowSum = 0;
+  for (let index = 0; index < size; index += 1) {
+    windowSum += getWindowValue(windowFunction, index, size);
+  }
+
+  const halfWindowSum = windowSum * 0.5;
+  const halfFftSize = Math.max(1, size / 2);
+  const scale = halfWindowSum > 0
+    ? 1 / (halfWindowSum * halfWindowSum)
+    : 1 / (halfFftSize * halfFftSize);
+  windowPowerScaleCache.set(cacheKey, scale);
+  return scale;
+}

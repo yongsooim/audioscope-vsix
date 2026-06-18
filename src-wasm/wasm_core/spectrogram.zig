@@ -62,11 +62,24 @@ fn getFftResource(fft_size_i32: i32, window_function: core.WindowFunction) ?*cor
     resource.power_spectrum = core.allocator.alloc(f32, power_spectrum_length) catch return null;
     resource.low_power_spectrum = core.allocator.alloc(f32, power_spectrum_length) catch return null;
     const half_fft_size = @as(f32, @floatFromInt(fft_size / 2));
-    resource.power_scale = 1.0 / (half_fft_size * half_fft_size);
 
+    // Accumulate the window sum while filling so the power scale can be
+    // normalized by the window's coherent gain: a pure tone peaks at sum/2 in
+    // the one-sided spectrum, so dividing power by (sum/2)^2 keeps the displayed
+    // dB independent of the window. A rectangular window reduces to the old
+    // 1/(N/2)^2. Mirrors getWindowCoherentPowerScale in windowShared.ts.
+    var window_sum: f32 = 0.0;
     for (resource.window, 0..) |*value, index| {
-        value.* = core.windowValue(window_function, @as(i32, @intCast(index)), @as(i32, @intCast(fft_size)));
+        const w = core.windowValue(window_function, @as(i32, @intCast(index)), @as(i32, @intCast(fft_size)));
+        value.* = w;
+        window_sum += w;
     }
+
+    const half_window_sum = window_sum * 0.5;
+    resource.power_scale = if (half_window_sum > 0.0)
+        1.0 / (half_window_sum * half_window_sum)
+    else
+        1.0 / (half_fft_size * half_fft_size);
 
     resource.next = core.g_session.fft_resources;
     core.g_session.fft_resources = resource;

@@ -11,6 +11,7 @@ import {
   CQT_DEFAULT_FMIN,
 } from './chromaShared';
 import {
+  getWindowCoherentPowerScale,
   getWindowValue,
   WINDOW_FUNCTION_CODES,
   type SpectrogramWindowFunction,
@@ -103,6 +104,10 @@ interface CanvasInitOptions {
 
 interface AudioSessionOptions {
   duration?: number;
+  // Per-channel PCM for BS.1770-correct loudness (weighted sum of channels).
+  // Only sent for the non-split program view; in split mode each lane computes
+  // loudness from its own single-channel samplesBuffer.
+  loudnessChannelBuffers?: ArrayBuffer[];
   quality?: QualityPreset;
   sampleCount?: number;
   sampleRate?: number;
@@ -177,6 +182,7 @@ interface AnalysisWorkerState {
   generationStatus: Map<number, { cancelled: boolean }>;
   initialized: boolean;
   loudnessCache: LoudnessData | null;
+  loudnessChannels: Float32Array[] | null;
   loudnessConfig: {
     refLevel: number | null;
     yAxisMode: string;
@@ -627,6 +633,7 @@ function createEmptyAnalysisState(): AnalysisWorkerState {
     duration: 0,
     quality: 'high',
     loudnessCache: null,
+    loudnessChannels: null,
     loudnessConfig: {
       refLevel: -14,
       yAxisMode: 'auto',
@@ -1608,6 +1615,15 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
   analysisState.maxFrequency = Math.min(MAX_FREQUENCY, sampleRate / 2);
   analysisState.runtimeVariant = runtime.variant;
 
+  // Per-channel PCM for the program (non-split) loudness curve; null in split
+  // mode, where this lane's own single-channel PCM is the loudness source.
+  analysisState.loudnessChannels = Array.isArray(options?.loudnessChannelBuffers)
+    ? options.loudnessChannelBuffers
+      .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer)
+      .map((buffer) => new Float32Array(buffer))
+    : null;
+  analysisState.loudnessCache = null;
+
   if (isNewAudioSession) {
     clearTileCache();
     analysisState.generationStatus.clear();
@@ -2413,11 +2429,19 @@ function ensureLoudnessCache(): LoudnessData | null {
   if (analysisState.loudnessCache) {
     return analysisState.loudnessCache;
   }
-  const pcm = getSessionPcmData();
-  if (!pcm || analysisState.sampleRate <= 0) {
+  if (analysisState.sampleRate <= 0) {
     return null;
   }
-  analysisState.loudnessCache = computeLoudnessData(pcm, analysisState.sampleRate);
+  const channels = analysisState.loudnessChannels && analysisState.loudnessChannels.length > 0
+    ? analysisState.loudnessChannels
+    : (() => {
+      const pcm = getSessionPcmData();
+      return pcm ? [pcm] : [];
+    })();
+  if (channels.length === 0) {
+    return null;
+  }
+  analysisState.loudnessCache = computeLoudnessData(channels, analysisState.sampleRate);
   return analysisState.loudnessCache;
 }
 
@@ -2592,7 +2616,7 @@ function paintLoudnessDisplay(context: OffscreenCanvasRenderingContext2D): void 
   // True peak curve.
   if (cfg.showPeak) {
     drawLoudnessLine(
-      context, loudness.truePeak, loudness.blockCount,
+      context, loudness.samplePeak, loudness.blockCount,
       blockSeconds, viewStartSeconds, viewSpan,
       width, height, minLufs, maxLufs, lufsRange,
       'rgba(255,80,80,0.8)', 1.0,
@@ -3810,8 +3834,7 @@ function writeStftComputeParamsData(
     useLowFrequencyEnhancement: boolean;
   },
 ): void {
-  const halfFftSize = Math.max(1, plan.fftSize / 2);
-  const powerScale = 1 / (halfFftSize * halfFftSize);
+  const powerScale = getWindowCoherentPowerScale(plan.windowFunction, plan.fftSize);
   const distributionGamma = COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution];
   const normalization = getAnalysisNormalizationParams(
     plan.analysisType,
@@ -3858,8 +3881,7 @@ function writeStftRenderParamsData(
     useLowFrequencyEnhancement: boolean;
   },
 ): void {
-  const halfFftSize = Math.max(1, plan.fftSize / 2);
-  const powerScale = 1 / (halfFftSize * halfFftSize);
+  const powerScale = getWindowCoherentPowerScale(plan.windowFunction, plan.fftSize);
   const distributionGamma = COLORMAP_DISTRIBUTION_GAMMAS[plan.colormapDistribution];
   const normalization = getAnalysisNormalizationParams(
     plan.analysisType,
@@ -6357,6 +6379,8 @@ function disposeWasmSession(module: WaveCoreModule): void {
   analysisState.pcmPointer = 0;
   analysisState.spectrogramOutputPointer = 0;
   analysisState.spectrogramOutputCapacity = 0;
+  analysisState.loudnessChannels = null;
+  analysisState.loudnessCache = null;
 }
 
 function disposeSession(runtime: WaveCoreRuntime): void {
@@ -6406,6 +6430,10 @@ interface ChannelSampleValue {
   frequencyStartHz: number | null;
   timeSeconds: number;
   valueDb: number | null;
+  // Loudness readout (LUFS / sample-peak dBFS) for the loudness analysis type.
+  loudnessMomentary?: number | null;
+  loudnessShortTerm?: number | null;
+  loudnessSamplePeak?: number | null;
 }
 
 let analysisSampleScratchPointer = 0;
@@ -6420,8 +6448,7 @@ function getAnalysisRowIndexFromRatio(positionRatio: number, rowCount: number): 
 
 function computeChannelSampleValue(pointerRatioX: number, pointerRatioY: number): ChannelSampleValue | null {
   const module = analysisState.module;
-  const plan = analysisState.visible.plan ?? analysisState.overview.plan;
-  if (!module || !analysisState.initialized || !analysisState.pcmPointer || !plan) {
+  if (!module || !analysisState.initialized) {
     return null;
   }
 
@@ -6434,11 +6461,36 @@ function computeChannelSampleValue(pointerRatioX: number, pointerRatioY: number)
   const start = range.end > range.start ? range.start : 0;
   const end = range.end > range.start ? range.end : analysisState.duration;
   const timeSeconds = start + clamp(pointerRatioX, 0, 1) * Math.max(0, end - start);
+
+  // Loudness reports this lane's time-aligned momentary / short-term LUFS and
+  // sample peak (no frequency axis). It doesn't need a spectrogram plan.
+  if ((analysisState.currentAnalysisType as string) === 'loudness') {
+    const loudness = ensureLoudnessCache();
+    if (!loudness || !(loudness.blockSamples > 0)) {
+      return { frequencyEndHz: null, frequencyStartHz: null, timeSeconds, valueDb: null };
+    }
+    const blockSeconds = loudness.blockSamples / sampleRate;
+    const blockIndex = clamp(Math.floor(timeSeconds / Math.max(1e-9, blockSeconds)), 0, loudness.blockCount - 1);
+    return {
+      frequencyEndHz: null,
+      frequencyStartHz: null,
+      timeSeconds,
+      valueDb: null,
+      loudnessMomentary: loudness.momentary[blockIndex],
+      loudnessShortTerm: loudness.shortTerm[blockIndex],
+      loudnessSamplePeak: loudness.samplePeak[blockIndex],
+    };
+  }
+
+  const plan = analysisState.visible.plan ?? analysisState.overview.plan;
+  if (!analysisState.pcmPointer || !plan) {
+    return null;
+  }
   const frame = clamp(Math.round(timeSeconds * sampleRate), 0, Math.max(0, analysisState.sampleCount - 1));
 
-  // Per-channel values are reported for the dB-valued analyses; mfcc/loudness
-  // keep the single shared readout handled on the main thread.
-  if (plan.analysisType === 'mfcc' || (plan.analysisType as string) === 'loudness') {
+  // Per-channel values are reported for the dB-valued analyses; mfcc keeps the
+  // single shared readout handled on the main thread.
+  if (plan.analysisType === 'mfcc') {
     return { frequencyEndHz: null, frequencyStartHz: null, timeSeconds, valueDb: null };
   }
 

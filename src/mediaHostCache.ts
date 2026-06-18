@@ -1,9 +1,16 @@
+import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import type {
   DecodeFallbackPayload,
   LoudnessSummaryPayload,
   MediaMetadataPayload,
 } from './externalAudioTools';
+
+// Below this size we hash the file contents into the cache key so a rewrite that
+// keeps the same mtime + size (coarse-mtime filesystems, `touch -d`, some
+// virtual FS) still invalidates the cache. Larger files fall back to mtime+size:
+// reading them just to hash would defeat the purpose of the cache.
+const CONTENT_HASH_MAX_BYTES = 8 * 1024 * 1024;
 
 class WeightedLruCache<T> {
   private readonly entries = new Map<string, { value: T; weight: number }>();
@@ -109,7 +116,19 @@ class ResourceCache<T> {
 async function getResourceRevisionKey(resource: vscode.Uri): Promise<string> {
   try {
     const stat = await vscode.workspace.fs.stat(resource);
-    return `${resource.toString()}::${stat.mtime}::${stat.size}`;
+    const base = `${resource.toString()}::${stat.mtime}::${stat.size}`;
+
+    if (stat.size > 0 && stat.size <= CONTENT_HASH_MAX_BYTES) {
+      try {
+        const bytes = await vscode.workspace.fs.readFile(resource);
+        const hash = createHash('sha1').update(bytes).digest('hex');
+        return `${base}::${hash}`;
+      } catch {
+        return base;
+      }
+    }
+
+    return base;
   } catch {
     return `${resource.toString()}::missing`;
   }

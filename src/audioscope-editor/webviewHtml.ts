@@ -1,6 +1,16 @@
 import * as vscode from 'vscode';
 
+function getNonce(): string {
+    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let text = '';
+    for (let i = 0; i < 32; i += 1) {
+        text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
+}
+
 export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webview: vscode.Webview): string {
+    const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioscope.js'));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'src-webview', 'audioscope.css'));
     const engineWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioEngineWorker.js'));
@@ -20,7 +30,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; img-src ${webview.cspSource} blob: data:; media-src ${webview.cspSource} blob:; style-src ${webview.cspSource}; script-src ${webview.cspSource} 'wasm-unsafe-eval'; connect-src ${webview.cspSource} blob:; worker-src ${webview.cspSource} blob:;"
+      content="default-src 'none'; img-src ${webview.cspSource} blob: data:; media-src ${webview.cspSource} blob:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}' ${webview.cspSource} 'wasm-unsafe-eval'; connect-src ${webview.cspSource} blob:; worker-src ${webview.cspSource} blob:;"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="${styleUri}" />
@@ -300,8 +310,8 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                   </select>
                 </label>
                 <label id="spectrogram-loudness-peak-control" class="spectrogram-control" hidden>
-                  <span class="spectrogram-control-label">Peak</span>
-                  <select id="spectrogram-loudness-peak-select" class="spectrogram-control-select" aria-label="Show true peak curve">
+                  <span class="spectrogram-control-label">Sample Peak</span>
+                  <select id="spectrogram-loudness-peak-select" class="spectrogram-control-select" aria-label="Show sample peak curve">
                     <option value="hide" selected>Hide</option>
                     <option value="show">Show</option>
                   </select>
@@ -405,7 +415,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
       <div id="status" class="status-overlay" role="alertdialog" aria-modal="true" aria-label="audioscope error" hidden></div>
     </main>
 
-    <script type="module" src="${scriptUri}"></script>
+    <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
   </body>
 </html>`;
 }

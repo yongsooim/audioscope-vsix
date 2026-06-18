@@ -192,13 +192,13 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
               document.uri,
               () => getMediaMetadata(document.uri),
             );
-            await postToWebview(webviewPanel.webview, {
+            await postIfAlive({
               type: 'mediaMetadataReady',
               body: { loadToken, metadata },
             });
           } catch (error) {
             const toolStatus = await getExternalToolStatus(document.uri);
-            await postToWebview(webviewPanel.webview, {
+            await postIfAlive({
               type: 'mediaMetadataError',
               body: {
                 loadToken,
@@ -217,13 +217,13 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
               document.uri,
               () => decodeWithFfmpeg(document.uri),
             );
-            await postToWebview(webviewPanel.webview, {
+            await postIfAlive({
               type: 'decodeFallbackReady',
               body: { ...cloneDecodeFallbackPayload(fallback), loadToken },
             });
           } catch (error) {
             const toolStatus = await getExternalToolStatus(document.uri);
-            await postToWebview(webviewPanel.webview, {
+            await postIfAlive({
               type: 'decodeFallbackError',
               body: {
                 loadToken,
@@ -242,12 +242,12 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
               document.uri,
               () => getLoudnessSummary(document.uri),
             );
-            await postToWebview(webviewPanel.webview, {
+            await postIfAlive({
               type: 'loudnessSummaryReady',
               body: { ...summary, loadToken },
             });
           } catch (error) {
-            await postToWebview(webviewPanel.webview, {
+            await postIfAlive({
               type: 'loudnessSummaryError',
               body: {
                 loadToken,

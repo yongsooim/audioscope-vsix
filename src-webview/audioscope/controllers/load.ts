@@ -85,14 +85,22 @@ export function createAudioscopeLoadController({
       return false;
     }
 
+    // Always prefer the ffmpeg PCM path: it decodes at the file's native sample
+    // rate, whereas the browser's decodeAudioData resamples to the hardware
+    // device rate (so a 44.1 kHz file on a 48 kHz device would skew the time and
+    // frequency axes away from the file's true metadata).
     return (
       fileExtension === 'aac'
+      || fileExtension === 'aif'
+      || fileExtension === 'aiff'
       || fileExtension === 'flac'
       || fileExtension === 'm4a'
       || fileExtension === 'mp3'
       || fileExtension === 'oga'
       || fileExtension === 'ogg'
       || fileExtension === 'opus'
+      || fileExtension === 'wav'
+      || fileExtension === 'wave'
     );
   }
 
@@ -414,6 +422,10 @@ export function createAudioscopeLoadController({
     }
   }
 
+  // Backstop for a hung embedded decode (corrupt/unsupported file). Generous so
+  // legitimately large files still finish; the host ffmpeg path errors at 120s.
+  const DECODE_FALLBACK_TIMEOUT_MS = 180_000;
+
   function requestDecodeFallback(loadToken, payload, reason, sourceBytes = null) {
     if (loadToken !== state.loadToken) {
       return Promise.reject(new Error('Decode request is stale.'));
@@ -443,9 +455,35 @@ export function createAudioscopeLoadController({
       payload,
       reason,
     };
+    // Watchdog so a corrupt file that makes the embedded WASM decoder spin (the
+    // worker never posts back and worker.onerror never fires) cannot leave the
+    // UI stuck on "Decoding…" forever. The host ffmpeg path has its own 120s
+    // timeout; this is the backstop for the embedded path.
+    let decodeWatchdog: ReturnType<typeof setTimeout> | null = null;
+    const clearDecodeWatchdog = (): void => {
+      if (decodeWatchdog !== null) {
+        clearTimeout(decodeWatchdog);
+        decodeWatchdog = null;
+      }
+    };
     state.decodeFallbackPromise = new Promise((resolve, reject) => {
-      state.resolveDecodeFallback = resolve;
-      state.rejectDecodeFallback = reject;
+      state.resolveDecodeFallback = (value) => {
+        clearDecodeWatchdog();
+        resolve(value);
+      };
+      state.rejectDecodeFallback = (error) => {
+        clearDecodeWatchdog();
+        reject(error);
+      };
+      decodeWatchdog = setTimeout(() => {
+        if (state.decodeFallbackLoadToken !== loadToken || !state.decodeFallbackPromise) {
+          return;
+        }
+        const message = 'Decoding timed out. The file may be unsupported or corrupt.';
+        state.decodeFallbackError = { loadToken, message };
+        state.decodeFallbackPromise = null;
+        state.rejectDecodeFallback?.(new Error(message));
+      }, DECODE_FALLBACK_TIMEOUT_MS);
     });
     renderMediaMetadata();
 

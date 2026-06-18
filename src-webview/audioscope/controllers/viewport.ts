@@ -15,7 +15,9 @@ interface ViewportControllerState {
 
 interface AudioscopeViewportControllerDeps {
   defaultViewportSplitRatio: number;
-  displayPixelRatio: number;
+  // Read fresh each resize so a monitor/zoom DPR change re-scales the surfaces
+  // instead of staying pinned to the ratio captured at module load.
+  getDisplayPixelRatio: () => number;
   elements: AudioscopeElements;
   getDurationFrames: () => number;
   refreshHoveredSampleInfos: () => void;
@@ -32,7 +34,7 @@ interface AudioscopeViewportControllerDeps {
 
 export function createAudioscopeViewportController({
   defaultViewportSplitRatio,
-  displayPixelRatio,
+  getDisplayPixelRatio,
   elements,
   getDurationFrames,
   refreshHoveredSampleInfos,
@@ -148,63 +150,71 @@ export function createAudioscopeViewportController({
     });
   }
 
+  // Re-measure the surfaces and push the new sizes + render scale to the workers.
+  // `force` bypasses the size-change short-circuit so a pure DPR change (which
+  // leaves the CSS sizes untouched) still re-scales the backing stores.
+  function syncSurfaceSizes(force = false): void {
+    applyViewportSplit();
+    const waveformSize = getWaveformViewportSize();
+    const spectrogramSize = getSpectrogramCanvasTargetSize();
+    const overviewWidth = Math.max(1, elements.waveformOverview.clientWidth);
+    const renderScale = getDisplayPixelRatio();
+
+    const changed =
+      state.observedWaveformViewportWidth !== waveformSize.width
+      || state.observedWaveformViewportHeight !== waveformSize.height
+      || state.observedSpectrogramPixelWidth !== spectrogramSize.pixelWidth
+      || state.observedSpectrogramPixelHeight !== spectrogramSize.pixelHeight
+      || state.observedOverviewWidth !== overviewWidth;
+
+    if (!changed && !force) {
+      return;
+    }
+
+    state.observedWaveformViewportWidth = waveformSize.width;
+    state.observedWaveformViewportHeight = waveformSize.height;
+    state.observedSpectrogramPixelWidth = spectrogramSize.pixelWidth;
+    state.observedSpectrogramPixelHeight = spectrogramSize.pixelHeight;
+    state.observedOverviewWidth = overviewWidth;
+
+    sendViewportIntent({
+      kind: 'resize',
+      spectrogramPixelHeight: spectrogramSize.pixelHeight,
+      spectrogramPixelWidth: spectrogramSize.pixelWidth,
+      waveformHeightCssPx: waveformSize.height,
+      waveformRenderScale: renderScale,
+      waveformWidthCssPx: waveformSize.width,
+    });
+
+    if (state.analysisWorker) {
+      state.analysisWorker.postMessage({
+        type: 'resizeCanvas',
+        body: {
+          pixelHeight: spectrogramSize.pixelHeight,
+          pixelWidth: spectrogramSize.pixelWidth,
+        },
+      });
+      scheduleSpectrogramRender({ force: true });
+    }
+
+    if (state.waveformWorker) {
+      state.waveformWorker.postMessage({
+        type: 'resizeCanvas',
+        body: {
+          height: waveformSize.height,
+          renderScale,
+          width: waveformSize.width,
+        },
+      });
+      requestWaveformRender();
+    }
+
+    refreshHoveredSampleInfos();
+  }
+
   function attachResizeObservers(): void {
     const resizeObserver = new ResizeObserver(() => {
-      applyViewportSplit();
-      const waveformSize = getWaveformViewportSize();
-      const spectrogramSize = getSpectrogramCanvasTargetSize();
-      const overviewWidth = Math.max(1, elements.waveformOverview.clientWidth);
-
-      const changed =
-        state.observedWaveformViewportWidth !== waveformSize.width
-        || state.observedWaveformViewportHeight !== waveformSize.height
-        || state.observedSpectrogramPixelWidth !== spectrogramSize.pixelWidth
-        || state.observedSpectrogramPixelHeight !== spectrogramSize.pixelHeight
-        || state.observedOverviewWidth !== overviewWidth;
-
-      if (!changed) {
-        return;
-      }
-
-      state.observedWaveformViewportWidth = waveformSize.width;
-      state.observedWaveformViewportHeight = waveformSize.height;
-      state.observedSpectrogramPixelWidth = spectrogramSize.pixelWidth;
-      state.observedSpectrogramPixelHeight = spectrogramSize.pixelHeight;
-      state.observedOverviewWidth = overviewWidth;
-
-      sendViewportIntent({
-        kind: 'resize',
-        spectrogramPixelHeight: spectrogramSize.pixelHeight,
-        spectrogramPixelWidth: spectrogramSize.pixelWidth,
-        waveformHeightCssPx: waveformSize.height,
-        waveformRenderScale: displayPixelRatio,
-        waveformWidthCssPx: waveformSize.width,
-      });
-
-      if (state.analysisWorker) {
-        state.analysisWorker.postMessage({
-          type: 'resizeCanvas',
-          body: {
-            pixelHeight: spectrogramSize.pixelHeight,
-            pixelWidth: spectrogramSize.pixelWidth,
-          },
-        });
-        scheduleSpectrogramRender({ force: true });
-      }
-
-      if (state.waveformWorker) {
-        state.waveformWorker.postMessage({
-          type: 'resizeCanvas',
-          body: {
-            height: waveformSize.height,
-            renderScale: displayPixelRatio,
-            width: waveformSize.width,
-          },
-        });
-        requestWaveformRender();
-      }
-
-      refreshHoveredSampleInfos();
+      syncSurfaceSizes(false);
     });
 
     resizeObserver.observe(document.body);
@@ -217,6 +227,7 @@ export function createAudioscopeViewportController({
     applyViewportSplit,
     attachResizeObservers,
     handleViewportWheel,
+    syncSurfaceSizes,
     updateViewportSplitRatioFromClientY,
   };
 }

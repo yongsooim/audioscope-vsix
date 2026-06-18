@@ -54,6 +54,9 @@ interface AudioscopeLifecycleControllerDeps {
   renderSpectrogramScale: () => void;
   renderWaveformUi: () => void;
   state: LifecycleState;
+  // Terminates per-channel satellite lane workers (split mode). They are owned
+  // by app.ts; tearing them down here prevents them leaking on reload/close.
+  teardownSatelliteLanes: () => void;
 }
 
 export function createAudioscopeLifecycleController({
@@ -65,6 +68,7 @@ export function createAudioscopeLifecycleController({
   renderSpectrogramScale,
   renderWaveformUi,
   state,
+  teardownSatelliteLanes,
 }: AudioscopeLifecycleControllerDeps) {
   function disposeEngineWorker(): void {
     if (state.engineWorker) {
@@ -169,6 +173,7 @@ export function createAudioscopeLifecycleController({
     resetAnalysisWorkerSession();
     resetEngineWorkerSession();
     resetWaveformWorkerSession();
+    teardownSatelliteLanes();
 
     const audioTransport = state.audioTransport;
     state.audioTransport = null;

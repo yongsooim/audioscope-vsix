@@ -1844,7 +1844,7 @@ function ensureLoudnessCache(): LoudnessData | null {
   }
 
   const pcm = getHeapF32View(module, state.session.waveformPcmPointer, state.session.durationFrames);
-  state.session.loudnessCache = computeLoudnessData(pcm, state.session.sampleRate);
+  state.session.loudnessCache = computeLoudnessData([pcm], state.session.sampleRate);
   return state.session.loudnessCache;
 }
 
@@ -2246,7 +2246,9 @@ function buildWaveformSampleInfo(pointerRatioX: number, pointerRatioY: number, r
   }
 
   const sampleStartFrame = range.startFrame;
-  const visibleSampleSpan = Math.max(0, Math.max(1, spanFrames) - 1);
+  // Span convention so the hover marker stays aligned with the waveform (which
+  // now maps sample p to p / span of the width) and the ruler/playhead.
+  const visibleSampleSpan = Math.max(1, spanFrames);
   const sampleIndex = clamp(frameAtPointer, 0, getMaxSampleIndex());
 
   return {
@@ -2290,12 +2292,12 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
       const blockIndex = clamp(Math.floor((frame / sampleRate) / blockSeconds), 0, loudness.blockCount - 1);
       const momentaryVal = loudness.momentary[blockIndex];
       const shortTermVal = loudness.shortTerm[blockIndex];
-      const peakVal = loudness.truePeak[blockIndex];
+      const peakVal = loudness.samplePeak[blockIndex];
       const fmtM = momentaryVal <= -100 ? '-\u221E' : `${momentaryVal.toFixed(1)}`;
       const fmtS = shortTermVal <= -100 ? '-\u221E' : `${shortTermVal.toFixed(1)}`;
       const fmtP = peakVal <= -100 ? '-\u221E' : `${peakVal.toFixed(1)}`;
       return {
-        label: `${timeLabel} \u2022 M ${fmtM} LUFS \u2022 S ${fmtS} LUFS \u2022 Peak ${fmtP} dBFS`,
+        label: `${timeLabel} \u2022 M ${fmtM} LUFS \u2022 S ${fmtS} LUFS \u2022 Sample Peak ${fmtP} dBFS`,
         markerVisible: false,
         markerXRatio: ratioX,
         markerYRatio: clamp01(pointerRatioY),

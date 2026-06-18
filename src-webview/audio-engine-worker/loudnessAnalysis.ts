@@ -9,13 +9,17 @@ const LOUDNESS_FLOOR_LUFS = -100;
 export interface LoudnessData {
   momentary: Float32Array;
   shortTerm: Float32Array;
-  truePeak: Float32Array;
+  // Per-block sample peak in dBFS (the highest |sample| in the block). This is a
+  // sample peak, not an oversampled ITU true peak; the UI labels it "Sample
+  // Peak" accordingly. The metadata panel's True Peak comes from ffmpeg ebur128.
+  samplePeak: Float32Array;
   blockCount: number;
   blockSamples: number;
   sampleRate: number;
+  channelCount: number;
   peakMomentaryLufs: number;
   peakShortTermLufs: number;
-  peakTruePeakDb: number;
+  peakSamplePeakDb: number;
   integratedLufs: number;
 }
 
@@ -58,62 +62,84 @@ function computeRlbCoefficients(sampleRate: number): {
   };
 }
 
-export function computeLoudnessData(pcm: Float32Array, sampleRate: number): LoudnessData {
-  // K-weighting (pre-filter then RLB) cascade. Both biquad stages, the per-block
-  // mean-square accumulation, and the per-block sample-peak scan are fused into a
-  // single pass over the PCM so we never allocate full-length intermediate buffers
-  // (previously two Float32Array(N) plus three extra O(N) passes).
+// BS.1770 channel weights. Mono/stereo (and the front L/R/C) weigh 1.0; the
+// surround channels weigh ~1.41 (+1.5 dB); the LFE is excluded. Channel order
+// follows the conventional WAV/decoder layout L, R, C, LFE, Ls, Rs.
+function getChannelWeight(channelIndex: number, channelCount: number): number {
+  if (channelCount <= 2) {
+    return 1;
+  }
+  // 5.1 / 7.1 style layouts: index 3 is LFE (excluded), 4+ are surrounds.
+  if (channelIndex === 3) {
+    return 0;
+  }
+  if (channelIndex >= 4) {
+    return 1.41;
+  }
+  return 1;
+}
+
+// Mean-square accumulation per block, summed across channels with BS.1770
+// weights, plus a per-block sample-peak scan. Computing from the discrete
+// per-channel signals (rather than a coherent mono pre-mix) is required by
+// BS.1770: the loudness is the weighted sum of per-channel mean-squares, which
+// a single downmixed signal cannot represent.
+export function computeLoudnessData(channels: Float32Array[], sampleRate: number): LoudnessData {
+  const channelList = channels.filter((channel): channel is Float32Array => channel instanceof Float32Array && channel.length > 0);
+  const channelCount = Math.max(1, channelList.length);
+  const length = channelList.reduce((max, channel) => Math.max(max, channel.length), 0);
+
   const pre = computePreFilterCoefficients(sampleRate);
   const rlb = computeRlbCoefficients(sampleRate);
 
   const blockSamples = Math.max(1, Math.round(sampleRate * LOUDNESS_BLOCK_SECONDS));
-  const blockCount = Math.max(1, Math.ceil(pcm.length / blockSamples));
+  const blockCount = Math.max(1, Math.ceil(length / blockSamples));
 
   const blockPower = new Float64Array(blockCount);
-  const truePeak = new Float32Array(blockCount);
-  let peakTruePeakDb = LOUDNESS_FLOOR_LUFS;
+  const blockPeakLinear = new Float64Array(blockCount);
 
-  // Cascade state must persist across block boundaries (the filter is sequential).
-  let px1 = 0;
-  let px2 = 0;
-  let py1 = 0;
-  let py2 = 0;
-  let rx1 = 0;
-  let rx2 = 0;
-  let ry1 = 0;
-  let ry2 = 0;
+  for (let c = 0; c < channelList.length; c += 1) {
+    const channel = channelList[c];
+    const weight = getChannelWeight(c, channelCount);
 
-  for (let i = 0; i < blockCount; i++) {
-    const start = i * blockSamples;
-    const end = Math.min(start + blockSamples, pcm.length);
-    let sum = 0;
-    let maxAbs = 0;
-    for (let j = start; j < end; j++) {
-      const x0 = pcm[j];
-      const abs = x0 < 0 ? -x0 : x0;
-      if (abs > maxAbs) { maxAbs = abs; }
+    // Cascade state must persist across block boundaries (the filter is sequential).
+    let px1 = 0; let px2 = 0; let py1 = 0; let py2 = 0;
+    let rx1 = 0; let rx2 = 0; let ry1 = 0; let ry2 = 0;
 
-      // Stage 1: K-weighting pre-filter.
-      const stage1 = pre.b0 * x0 + pre.b1 * px1 + pre.b2 * px2 - pre.a1 * py1 - pre.a2 * py2;
-      px2 = px1;
-      px1 = x0;
-      py2 = py1;
-      py1 = stage1;
+    for (let i = 0; i < blockCount; i += 1) {
+      const start = i * blockSamples;
+      const end = Math.min(start + blockSamples, channel.length);
+      let sum = 0;
+      let peak = 0;
+      for (let j = start; j < end; j += 1) {
+        const x0 = channel[j];
+        const abs = x0 < 0 ? -x0 : x0;
+        if (abs > peak) { peak = abs; }
 
-      // Stage 2: RLB high-pass, fed by the pre-filter output.
-      const kWeighted = rlb.b0 * stage1 + rlb.b1 * rx1 + rlb.b2 * rx2 - rlb.a1 * ry1 - rlb.a2 * ry2;
-      rx2 = rx1;
-      rx1 = stage1;
-      ry2 = ry1;
-      ry1 = kWeighted;
+        if (weight > 0) {
+          // Stage 1: K-weighting pre-filter.
+          const stage1 = pre.b0 * x0 + pre.b1 * px1 + pre.b2 * px2 - pre.a1 * py1 - pre.a2 * py2;
+          px2 = px1; px1 = x0; py2 = py1; py1 = stage1;
 
-      sum += kWeighted * kWeighted;
+          // Stage 2: RLB high-pass, fed by the pre-filter output.
+          const kWeighted = rlb.b0 * stage1 + rlb.b1 * rx1 + rlb.b2 * rx2 - rlb.a1 * ry1 - rlb.a2 * ry2;
+          rx2 = rx1; rx1 = stage1; ry2 = ry1; ry1 = kWeighted;
+
+          sum += kWeighted * kWeighted;
+        }
+      }
+      blockPower[i] += weight * (sum / Math.max(1, end - start));
+      if (peak > blockPeakLinear[i]) { blockPeakLinear[i] = peak; }
     }
-    blockPower[i] = sum / Math.max(1, end - start);
+  }
 
-    const db = maxAbs > 1e-20 ? 20 * Math.log10(maxAbs) : LOUDNESS_FLOOR_LUFS;
-    truePeak[i] = db;
-    if (db > peakTruePeakDb) { peakTruePeakDb = db; }
+  const samplePeak = new Float32Array(blockCount);
+  let peakSamplePeakDb = LOUDNESS_FLOOR_LUFS;
+  for (let i = 0; i < blockCount; i += 1) {
+    const linear = blockPeakLinear[i];
+    const db = linear > 1e-20 ? 20 * Math.log10(linear) : LOUDNESS_FLOOR_LUFS;
+    samplePeak[i] = db;
+    if (db > peakSamplePeakDb) { peakSamplePeakDb = db; }
   }
 
   const momentaryWindowBlocks = Math.max(1, Math.round(MOMENTARY_WINDOW_SECONDS / LOUDNESS_BLOCK_SECONDS));
@@ -153,11 +179,14 @@ export function computeLoudnessData(pcm: Float32Array, sampleRate: number): Loud
     if (shortTerm[i] > peakShortTermLufs) { peakShortTermLufs = shortTerm[i]; }
   }
 
-  // EBU R128 gated integrated loudness.
+  // EBU R128 gated integrated loudness. Only full 400ms momentary windows
+  // participate in the gate (skip the partial windows at the file start so the
+  // gate is not biased by 100/200/300ms blocks).
   const absoluteGateDb = -70;
+  const firstFullWindow = Math.min(momentaryWindowBlocks - 1, Math.max(0, blockCount - 1));
   let ungatedPowerSum = 0;
   let ungatedCount = 0;
-  for (let i = 0; i < blockCount; i++) {
+  for (let i = firstFullWindow; i < blockCount; i++) {
     if (momentary[i] > absoluteGateDb) {
       ungatedPowerSum += Math.pow(10, (momentary[i] + 0.691) / 10);
       ungatedCount++;
@@ -169,7 +198,7 @@ export function computeLoudnessData(pcm: Float32Array, sampleRate: number): Loud
     const relativeGateDb = -0.691 + 10 * Math.log10(ungatedPowerSum / ungatedCount) - 10;
     let gatedPowerSum = 0;
     let gatedCount = 0;
-    for (let i = 0; i < blockCount; i++) {
+    for (let i = firstFullWindow; i < blockCount; i++) {
       if (momentary[i] > absoluteGateDb && momentary[i] > relativeGateDb) {
         gatedPowerSum += Math.pow(10, (momentary[i] + 0.691) / 10);
         gatedCount++;
@@ -181,7 +210,7 @@ export function computeLoudnessData(pcm: Float32Array, sampleRate: number): Loud
   }
 
   return {
-    momentary, shortTerm, truePeak, blockCount, blockSamples, sampleRate,
-    peakMomentaryLufs, peakShortTermLufs, peakTruePeakDb, integratedLufs,
+    momentary, shortTerm, samplePeak, blockCount, blockSamples, sampleRate, channelCount,
+    peakMomentaryLufs, peakShortTermLufs, peakSamplePeakDb, integratedLufs,
   };
 }
