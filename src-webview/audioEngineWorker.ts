@@ -1004,6 +1004,13 @@ function quantizeViewSpanFrames(spanFrames: number): number {
   const minSpan = Math.max(1, getMinVisibleFrames());
   const maxSpan = Math.max(minSpan, state.session.durationFrames);
   const clamped = clamp(spanFrames, minSpan, maxSpan);
+  // Once the requested span reaches the full file, snap to exactly the whole
+  // duration. Otherwise the geometric grid (minSpan * ratio^level) snaps to the
+  // level just below maxSpan, leaving the last zoom-out stuck on a partial view
+  // that can never show the entire file.
+  if (clamped >= maxSpan) {
+    return maxSpan;
+  }
   const level = Math.round(Math.log(clamped / minSpan) / Math.log(ZOOM_SPAN_QUANTIZE_RATIO));
   const snapped = minSpan * Math.pow(ZOOM_SPAN_QUANTIZE_RATIO, level);
   return clamp(Math.round(snapped), minSpan, maxSpan);

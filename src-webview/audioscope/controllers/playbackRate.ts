@@ -21,6 +21,10 @@ export function createAudioscopePlaybackRateController({
   scheduleKeyboardSurfaceFocus,
   state,
 }: PlaybackRateControllerDeps) {
+  let lastSyncedRate: string | null = null;
+  let lastSyncedMenuOpen: boolean | null = null;
+  let lastSyncedDisabled: boolean | null = null;
+
   function getPlaybackRateOptionButtons() {
     return Array.from(elements.playbackRateMenu.querySelectorAll<HTMLButtonElement>('.transport-rate-option'));
   }
@@ -33,12 +37,26 @@ export function createAudioscopePlaybackRateController({
 
   function syncPlaybackRateControl() {
     const normalizedValue = String(normalizePlaybackRateSelection(state.playbackRate));
-    const buttonLabel = getPlaybackRateLabel(normalizedValue);
+    const menuOpen = state.playbackRateMenuOpen;
+    const disabled = elements.playbackRateSelect.disabled;
 
-    elements.playbackRateButton.textContent = buttonLabel;
-    elements.playbackRateButton.disabled = elements.playbackRateSelect.disabled;
-    elements.playbackRateButton.dataset.open = state.playbackRateMenuOpen ? 'true' : 'false';
-    elements.playbackRateButton.setAttribute('aria-expanded', state.playbackRateMenuOpen ? 'true' : 'false');
+    // Rate + menu state rarely change, so skip the DOM query/writes (this runs
+    // every frame from the transport loop) unless something actually changed.
+    if (
+      normalizedValue === lastSyncedRate
+      && menuOpen === lastSyncedMenuOpen
+      && disabled === lastSyncedDisabled
+    ) {
+      return;
+    }
+    lastSyncedRate = normalizedValue;
+    lastSyncedMenuOpen = menuOpen;
+    lastSyncedDisabled = disabled;
+
+    elements.playbackRateButton.textContent = getPlaybackRateLabel(normalizedValue);
+    elements.playbackRateButton.disabled = disabled;
+    elements.playbackRateButton.dataset.open = menuOpen ? 'true' : 'false';
+    elements.playbackRateButton.setAttribute('aria-expanded', menuOpen ? 'true' : 'false');
 
     for (const optionButton of getPlaybackRateOptionButtons()) {
       const isSelected = optionButton.dataset.rate === normalizedValue;
@@ -188,7 +206,7 @@ export function createAudioscopePlaybackRateController({
     }
 
     const activeIndex = buttons.findIndex((button) => button === document.activeElement);
-    const startIndex = activeIndex >= 0 ? activeIndex : buttons.findIndex((button) => button.dataset.rate === String(state.playbackRate));
+    const startIndex = activeIndex >= 0 ? activeIndex : buttons.findIndex((button) => button.dataset.rate === String(normalizePlaybackRateSelection(state.playbackRate)));
     const nextIndex = Math.max(0, Math.min(buttons.length - 1, startIndex + direction));
     focusPlaybackRateOption(nextIndex);
   }

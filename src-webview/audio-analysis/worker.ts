@@ -126,6 +126,7 @@ interface TileRecord {
   complete: boolean;
   context: OffscreenCanvasRenderingContext2D | null;
   gpuBindGroup: any;
+  gpuByteLength: number;
   gpuDirty: boolean;
   gpuTexture: any;
   gpuTextureUsage: number;
@@ -1097,11 +1098,21 @@ function resetWebGpuComputeSessionResources(): void {
   webGpu.analysisFallbackReasons = {};
 }
 
+// Keep the cache byte total in sync with a tile's GPU texture footprint. The
+// running total must reflect resident GPU memory too, otherwise WebGPU sessions
+// blow far past MAX_TILE_CACHE_BYTES (textures aren't counted by byteLength).
+function setTileGpuByteLength(tileRecord: TileRecord, bytes: number): void {
+  const next = Math.max(0, bytes);
+  analysisState.tileCacheBytes = Math.max(0, analysisState.tileCacheBytes + next - tileRecord.gpuByteLength);
+  tileRecord.gpuByteLength = next;
+}
+
 function destroyTileGpuResources(tileRecord: TileRecord): void {
   if (tileRecord.gpuTexture && typeof tileRecord.gpuTexture.destroy === 'function') {
     tileRecord.gpuTexture.destroy();
   }
 
+  setTileGpuByteLength(tileRecord, 0);
   tileRecord.gpuTexture = null;
   tileRecord.gpuTextureUsage = 0;
   tileRecord.gpuTextureView = null;
@@ -2209,6 +2220,7 @@ function createTileRecord({
     complete: false,
     context: null,
     gpuBindGroup: null,
+    gpuByteLength: 0,
     gpuDirty: true,
     gpuTexture: null,
     gpuTextureUsage: 0,
@@ -6039,6 +6051,7 @@ function ensureTileGpuResources(
     tileRecord.gpuTextureUsage = requiredTextureUsage;
     tileRecord.gpuTextureView = tileRecord.gpuTexture.createView();
     tileRecord.gpuDirty = true;
+    setTileGpuByteLength(tileRecord, width * height * 4);
   }
 
   if (!tileRecord.gpuBindGroup || !tileRecord.gpuTextureView) {

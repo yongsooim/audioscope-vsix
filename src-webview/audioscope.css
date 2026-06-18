@@ -2023,6 +2023,9 @@ body {
 }
 
 .analysis-status {
+  /* Status badge fully suppressed (Ready / Loading… / Decoding… / errors and
+     the messages that flash on reload when experimental toggles change). */
+  display: none;
   justify-self: end;
   min-width: 0;
   max-width: min(34vw, 280px);

@@ -127,23 +127,31 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
       void prewarmEmbeddedDirectDecodeModule().catch(() => {});
     }
 
+    let disposed = false;
+    const postIfAlive = (message: HostToWebviewMessage): Thenable<boolean> => {
+      if (disposed) {
+        return Promise.resolve(false);
+      }
+      return postToWebview(webviewPanel.webview, message);
+    };
+
     const postAudioPayload = async (): Promise<void> => {
       const payload = await this.buildPayload(document, webviewPanel.webview);
-      await postToWebview(webviewPanel.webview, { type: 'loadAudio', body: payload });
+      await postIfAlive({ type: 'loadAudio', body: payload });
 
       if (!payload.externalTools.resolved) {
         void getOrStartExternalToolStatus()
-          .then(async (externalTools) => {
-            await postToWebview(webviewPanel.webview, {
+          .then((externalTools) =>
+            postIfAlive({
               type: 'externalToolStatus',
               body: externalTools,
-            });
-          })
+            }),
+          )
           .catch(() => {});
       }
     };
 
-    webviewPanel.webview.onDidReceiveMessage(async (raw: unknown) => {
+    const messageSubscription = webviewPanel.webview.onDidReceiveMessage(async (raw: unknown) => {
       const message = raw as WebviewToHostMessage | null | undefined;
       if (!message) {
         return;
@@ -266,6 +274,11 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           return;
         }
       }
+    });
+
+    webviewPanel.onDidDispose(() => {
+      disposed = true;
+      messageSubscription.dispose();
     });
   }
 

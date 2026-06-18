@@ -645,6 +645,19 @@ class AudioWorkletCopyTransport {
     }
   }
 
+  getOutputLatencySeconds(): number {
+    const context = this.audioContext;
+    if (!context) {
+      return 0;
+    }
+    const outputLatency = Number(context.outputLatency);
+    if (Number.isFinite(outputLatency) && outputLatency > 0) {
+      return outputLatency;
+    }
+    const baseLatency = Number(context.baseLatency);
+    return Number.isFinite(baseLatency) && baseLatency > 0 ? baseLatency : 0;
+  }
+
   projectFrameFromSnapshot(snapshotState: PlaybackSnapshotState | null): number {
     const sourceLength = this.playbackSession?.sourceLength ?? 0;
 
@@ -653,7 +666,12 @@ class AudioWorkletCopyTransport {
     }
 
     const nowContextTime = Number(this.audioContext?.currentTime) || 0;
-    const elapsedSeconds = Math.max(0, nowContextTime - (Number(snapshotState.contextTime) || 0));
+    // The worklet stamps each snapshot with the render-quantum time it is about
+    // to write; that audio is not audible until outputLatency later. Project to
+    // the audible "now" (nowContextTime - outputLatency) so the visual playhead
+    // matches what the user hears, matching the stretch backend's compensation.
+    const audibleContextTime = nowContextTime - this.getOutputLatencySeconds();
+    const elapsedSeconds = Math.max(0, audibleContextTime - (Number(snapshotState.contextTime) || 0));
     const projectedFrame = (Number(snapshotState.currentFrame) || 0) + (elapsedSeconds * this.getSourceSampleRate());
 
     if (this.loopRange && this.loopRange.end > this.loopRange.start) {

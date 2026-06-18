@@ -34,6 +34,14 @@ export function createAudioscopeTransportLoopController({
   state,
   syncPlaybackRateControl,
 }: AudioscopeTransportLoopDeps) {
+  // Cap the per-frame PlaybackClockTick worker round-trip. The threshold sits
+  // just under a 60 Hz frame interval (16.67 ms) so a true 60 Hz frame always
+  // posts, while 120/144 Hz displays are capped to ~60 Hz and no longer flood the
+  // engine worker (each tick is a postMessage + WASM follow-solver round-trip).
+  // Non-playing states bypass the gate so pause/seek/stop always reach the worker.
+  const CLOCK_TICK_MIN_INTERVAL_MS = 1000 / 65;
+  let lastClockTickTime = -Infinity;
+
   // Cache the last-written transport UI values so the per-frame syncTransport
   // only touches the DOM for things that actually changed (most don't).
   let lastTransportEnabled: boolean | null = null;
@@ -121,10 +129,14 @@ export function createAudioscopeTransportLoopController({
     syncPlaybackRateControl();
 
     if (state.engineWorker) {
-      state.engineWorker.postMessage({
-        type: 'PlaybackClockTick',
-        body: toWorkerClockState(clock),
-      });
+      const now = performance.now();
+      if (!clock?.playing || now - lastClockTickTime >= CLOCK_TICK_MIN_INTERVAL_MS) {
+        lastClockTickTime = now;
+        state.engineWorker.postMessage({
+          type: 'PlaybackClockTick',
+          body: toWorkerClockState(clock),
+        });
+      }
     }
 
     if (state.audioTransport?.isPlaying()) {

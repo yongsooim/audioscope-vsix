@@ -131,7 +131,9 @@ const SPECTROGRAM_SCALOGRAM_HOP_OPTIONS = [0, 256, 512, 1024, 2048, 4096];
 const SPECTROGRAM_SCALOGRAM_OMEGA_OPTIONS = [4, 5, 6, 7, 8, 10, 12];
 const SPECTROGRAM_SCALOGRAM_ROW_DENSITY_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 3, 4];
 const SPECTROGRAM_OVERLAP_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
-const HOVER_FLUSH_MIN_INTERVAL_MS = 1000 / 30;
+// Just under a 60 Hz frame interval (16.67 ms): a true 60 Hz frame always
+// passes the gate, while 120/144 Hz displays are capped to ~60 Hz.
+const HOVER_FLUSH_MIN_INTERVAL_MS = 1000 / 65;
 const SPECTROGRAM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const SPECTROGRAM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
 const SPECTROGRAM_RANGE_EPSILON_SECONDS = 1 / 2000;
@@ -540,6 +542,7 @@ const {
 const {
   destroySession,
   disposeAnalysisWorker,
+  disposeEngineWorker,
   disposeWaveformWorker,
 } = createAudioscopeLifecycleController({
   createInitialWaveformViewportState,
@@ -3386,7 +3389,7 @@ function scheduleSampleInfoRequestAtClientPoint(surface: SurfaceKind, clientX: n
     return;
   }
 
-  // Cap hover sample-info updates at ~30 Hz regardless of the display refresh
+  // Cap hover sample-info updates at ~60 Hz regardless of the display refresh
   // rate (rAF fires at 120/144 Hz on high-refresh monitors), so high-rate
   // pointer moves don't drive extra worker queries.
   const flush = (now: number): void => {
@@ -4043,6 +4046,7 @@ async function initializePlaybackFromPreparedData(
 
 const {
   acceptDecodeFallbackResult,
+  disposeDecodeWorker,
   loadAudioFile,
   rejectDecodeFallbackRequest,
 } = createAudioscopeLoadController({
@@ -4234,6 +4238,24 @@ function attachUiEvents(): void {
     updateMediaMetadataDetailPosition();
     closePlaybackRateMenu();
     positionPlaybackRateMenu();
+  });
+
+  // Terminal teardown when the editor panel is disposed. retainContextWhenHidden
+  // keeps this page alive while hidden, so the only reliable teardown signal is
+  // pagehide. Release every long-lived resource (workers + their GPU device,
+  // the decode AudioContext, and worker bootstrap object URLs) so repeated
+  // open/close cycles do not accumulate AudioContexts or hundreds of MB of GPU
+  // memory per session.
+  window.addEventListener('pagehide', () => {
+    destroySession();
+    disposeEngineWorker();
+    disposeAnalysisWorker();
+    disposeWaveformWorker();
+    disposeDecodeWorker();
+    if (state.decodeAudioContext && state.decodeAudioContext.state !== 'closed') {
+      void state.decodeAudioContext.close().catch(() => {});
+    }
+    state.decodeAudioContext = null;
   });
 
   document.addEventListener('pointerdown', (event) => {
