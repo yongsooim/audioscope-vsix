@@ -117,6 +117,14 @@ export function createAudioscopeLoadController({
   }
 
   function shouldPreferHostDecodeBeforeFetch(payload) {
+    // In remote workspaces, host decoding expands compressed audio into large
+    // PCM buffers before crossing the VS Code bridge. Fetching the source file
+    // first keeps the bridge payload compressed and lets the webview WASM
+    // decoder preserve native sample-rate analysis locally.
+    if (payload?.isRemote && shouldPreferEmbeddedDecode(payload)) {
+      return false;
+    }
+
     return Boolean(payload?.fileBacked)
       && shouldPreferFfmpegDecode(payload)
       && (!state.externalTools.resolved || state.externalTools.canDecodeFallback);

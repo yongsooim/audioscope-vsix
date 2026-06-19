@@ -51,6 +51,7 @@ export interface AudioscopePayload {
   fileExtension: string;
   fileName: string;
   fileSize: number | null;
+  isRemote: boolean;
   spectrogramDefaults: SpectrogramDefaultsPayload;
   spectrogramQuality: 'balanced' | 'high' | 'max';
   sourceUri: string;

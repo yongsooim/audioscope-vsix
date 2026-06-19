@@ -316,6 +316,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
       fileBacked: externalTools.fileBacked,
       fileName: path.posix.basename(document.uri.path),
       fileSize,
+      isRemote: Boolean(vscode.env.remoteName),
       spectrogramDefaults,
       spectrogramQuality,
       sourceUri: webview.asWebviewUri(document.uri).toString(),
