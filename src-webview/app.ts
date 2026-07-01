@@ -577,6 +577,7 @@ const {
   getDurationFrames,
   getEffectiveDurationSeconds,
   getSampleRate,
+  onPlayingChange: (playing) => { vscode.postMessage({ type: 'playbackState', body: { playing } }); },
   renderMediaMetadata,
   state,
   syncPlaybackRateControl,

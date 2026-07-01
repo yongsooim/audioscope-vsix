@@ -19,6 +19,7 @@ interface AudioscopeTransportLoopDeps {
   getDurationFrames: () => number;
   getEffectiveDurationSeconds: () => number;
   getSampleRate: () => number;
+  onPlayingChange?: (playing: boolean) => void;
   renderMediaMetadata: () => void;
   state: TransportLoopState;
   syncPlaybackRateControl: () => void;
@@ -30,6 +31,7 @@ export function createAudioscopeTransportLoopController({
   getDurationFrames,
   getEffectiveDurationSeconds,
   getSampleRate,
+  onPlayingChange,
   renderMediaMetadata,
   state,
   syncPlaybackRateControl,
@@ -107,6 +109,7 @@ export function createAudioscopeTransportLoopController({
     if (playLabel !== lastPlayLabel) {
       lastPlayLabel = playLabel;
       elements.playToggle.textContent = playLabel;
+      onPlayingChange?.(playLabel === 'Pause');
     }
 
     const rateEnabled = Boolean(state.audioTransport);

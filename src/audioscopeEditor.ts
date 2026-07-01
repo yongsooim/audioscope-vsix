@@ -128,6 +128,15 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     }
 
     let disposed = false;
+    // ponytail: iconPath can't render an emoji, so the play/pause state lives in
+    // the tab title text. It goes AFTER the name so the (proportional UI-font)
+    // width difference between ⏵/⏸ only moves the trailing icon, never the name.
+    // Shows ⏸ until the webview reports playback.
+    const baseTitle = path.posix.basename(document.uri.path);
+    const PLAY_ICON = '⏵︎';
+    const PAUSE_ICON = '⏸︎';
+    webviewPanel.title = `${baseTitle} ${PAUSE_ICON}`;
+
     const postIfAlive = (message: HostToWebviewMessage): Thenable<boolean> => {
       if (disposed) {
         return Promise.resolve(false);
@@ -255,6 +264,11 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
               },
             });
           }
+          return;
+        }
+
+        case 'playbackState': {
+          webviewPanel.title = `${baseTitle} ${message.body?.playing ? PLAY_ICON : PAUSE_ICON}`;
           return;
         }
 

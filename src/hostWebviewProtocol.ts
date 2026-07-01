@@ -194,6 +194,11 @@ export interface OpenExternalMessage {
   body: { url: string };
 }
 
+export interface PlaybackStateMessage {
+  type: 'playbackState';
+  body: { playing: boolean };
+}
+
 export type WebviewToHostMessage =
   | ReadyMessage
   | ReloadMessage
@@ -203,7 +208,8 @@ export type WebviewToHostMessage =
   | RequestMediaMetadataMessage
   | RequestDecodeFallbackMessage
   | RequestLoudnessSummaryMessage
-  | OpenExternalMessage;
+  | OpenExternalMessage
+  | PlaybackStateMessage;
 
 // --- Host → Webview messages ---
 
