@@ -10,6 +10,7 @@ src-wasm/**
 src-webview/**/*.ts
 src-webview/**/*.tsx
 src-webview/**/*.map
+images/*.webp
 .DS_Store
 .gitignore
 .gitmodules

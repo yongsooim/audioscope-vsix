@@ -3455,19 +3455,25 @@ function requestSampleInfoAtClientPoint(surface: SurfaceKind, clientX: number, c
 
   const pointerRatioX = clamp((clientX - rect.left) / rect.width, 0, 1);
 
-  // Split spectrogram with dB-valued analysis: query every channel's analysis
-  // worker so the readout shows each channel's actual value at this point.
-  // Loudness always routes here (each lane reports its own LUFS/sample peak; in
-  // non-split mode the single worker reports the program loudness).
+  // dB-valued analyses (spectrogram / mel / scalogram) and loudness read their
+  // value from the analysis worker(s), which hold the decoded PCM. The engine
+  // worker keeps no PCM copy, so it can only report time + frequency — routing
+  // here is what makes the hovered dB readout appear. In split mode every lane
+  // worker reports its own channel; in mono the single worker reports the
+  // downmix (loudness reports program loudness).
   const isLoudnessSurface = state.spectrogramConfig.analysisType === 'loudness';
-  if (surface === 'spectrogram' && ((laneCount > 1 && isPerChannelSpectrogramValueType()) || isLoudnessSurface)) {
-    const workers = getAnalysisChannelWorkers();
+  const analysisWorkers = getAnalysisChannelWorkers();
+  if (
+    surface === 'spectrogram'
+    && analysisWorkers.length > 0
+    && (isPerChannelSpectrogramValueType() || isLoudnessSurface)
+  ) {
     state.spectrogramChannelHover = {
       requestId,
       laneCount,
-      results: new Array(workers.length).fill(null),
+      results: new Array(analysisWorkers.length).fill(null),
     };
-    workers.forEach((worker, channelIndex) => {
+    analysisWorkers.forEach((worker, channelIndex) => {
       worker.postMessage({
         type: 'requestChannelSampleValue',
         body: { channelIndex, pointerRatioX, pointerRatioY: laneRatioY, requestId },

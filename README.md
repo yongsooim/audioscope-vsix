@@ -12,25 +12,37 @@
   <img src="./images/audioscope-full.png" alt="audioscope waveform and spectrogram screenshot">
 </p>
 
+**Sample-level inspection** — keep zooming until individual samples appear as dots; hovering shows the sample index and per-channel amplitude values.
+
+![Sample-level inspection](./images/02-sample-level-inspection.webp)
+
+**Follow playback** — with Follow enabled, the view auto-scrolls to keep the playhead centered at any zoom level, down to sample resolution.
+
+![Follow playback](./images/03-follow-playhead.webp)
+
+**Loop selection** — drag on the waveform to set a loop range and fine-tune it with the edge handles while playback cycles inside.
+
+![Loop selection](./images/04-loop-region.webp)
+
+**Spectrogram inspection** — hover to read the exact time and frequency under the cursor; the spectrogram stays in sync with the waveform zoom.
+
+![Spectrogram inspection](./images/05-spectrogram-hover-zoom.webp)
+
+**Analysis type and settings** — switch the analysis type (here, to mel-spectrogram) and tune FFT size, overlap, window function, and frequency scale from the settings panel.
+
+![Mel-spectrogram and analysis settings](./images/06-mel-spectrogram-settings.webp)
+
+**Loudness view** — momentary and short-term LUFS curves plotted against a reference level, with hover readouts for M/S loudness and sample peak.
+
+![Loudness LUFS view](./images/09-loudness-lufs.webp)
+
 ## Quick Start
+
+`audioscope` is a read-only custom editor for audio files inside VS Code.
 
 1. Install the extension.
 2. Open a supported audio file.
 3. If needed, right-click the file and choose **Open in audioscope**, or run **`audioscope: Open in audioscope`**.
-
-## What it does
-
-`audioscope` is a read-only custom editor for audio files inside VS Code.
-
-- Open supported audio files in a dedicated audio editor
-- Inspect synchronized waveform and spectrogram views
-- Switch between spectrogram, mel-spectrogram, MFCC, scalogram, and chroma analysis
-- Seek with the timeline or `-5s` / `+5s` buttons
-- Control playback speed from `0.5x` to `2x`
-- Zoom the waveform, follow playback, and set loop ranges by dragging
-- Review metadata such as codec, container, duration, sample rate, bitrate, channels, tags, and chapters
-- View loudness summary values including integrated LUFS, LRA, sample peak, and true peak
-- Use bundled FFmpeg and ffprobe WASM tools, so no system ffmpeg install is required at runtime
 
 > [!NOTE]
 > VS Code `Media Preview` can still take precedence for some extensions on first open, especially `.mp3`, `.wav`, and `.ogg` files.
