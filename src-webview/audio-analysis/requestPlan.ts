@@ -67,6 +67,8 @@ export interface SpectrogramRequest {
   scalogramMinFrequency?: number;
   scalogramOmega0?: number;
   scalogramRowDensity?: number;
+  spectrogramMaxFrequency?: number;
+  spectrogramMinFrequency?: number;
   pixelHeight?: number;
   pixelWidth?: number;
   requestEnd?: number;
@@ -273,6 +275,14 @@ export function createRequestPlan(
     request?.scalogramMinFrequency,
     request?.scalogramMaxFrequency,
   );
+  // General Y-axis frequency range for spectrogram/mel/mfcc (reuses the
+  // scalogram [MIN_FREQUENCY, nyquist] clamp). Defaults reproduce the historical
+  // 20 Hz .. min(20 kHz, nyquist) window when the user hasn't narrowed it.
+  const displayFrequencyRange = normalizeScalogramFrequencyRange(
+    context.maxFrequency,
+    request?.spectrogramMinFrequency,
+    request?.spectrogramMaxFrequency,
+  );
   const melBandCount = analysisType === 'mfcc'
     ? normalizeMfccMelBandCount(request?.mfccMelBandCount ?? request?.melBandCount)
     : normalizeMelBandCount(request?.melBandCount);
@@ -329,8 +339,12 @@ export function createRequestPlan(
       ? scalogramFrequencyRange.minFrequency
       : chromaAnalysis
         ? CQT_DEFAULT_FMIN
-        : context.minFrequency}`,
-    `max${analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : context.maxFrequency}`,
+        : displayFrequencyRange.minFrequency}`,
+    `max${analysisType === 'scalogram'
+      ? scalogramFrequencyRange.maxFrequency
+      : chromaAnalysis
+        ? context.maxFrequency
+        : displayFrequencyRange.maxFrequency}`,
     `omega${analysisType === 'scalogram' ? scalogramOmega0 : 0}`,
     `density${analysisType === 'scalogram' ? scalogramRowDensity : 0}`,
     `ov${Math.round(overlapRatio * 1000)}`,
@@ -354,7 +368,11 @@ export function createRequestPlan(
     hopSamples,
     hopSeconds: secondsPerColumn,
     maxDecibels: dbWindow.maxDecibels,
-    maxFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : context.maxFrequency,
+    maxFrequency: analysisType === 'scalogram'
+      ? scalogramFrequencyRange.maxFrequency
+      : chromaAnalysis
+        ? context.maxFrequency
+        : displayFrequencyRange.maxFrequency,
     melBandCount,
     mfccCoefficientCount,
     minDecibels: dbWindow.minDecibels,
@@ -362,7 +380,7 @@ export function createRequestPlan(
       ? scalogramFrequencyRange.minFrequency
       : chromaAnalysis
         ? CQT_DEFAULT_FMIN
-        : context.minFrequency,
+        : displayFrequencyRange.minFrequency,
     overlapRatio,
     pixelHeight,
     pixelWidth,

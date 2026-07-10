@@ -38,6 +38,8 @@ export interface SpectrogramDefaultsPayload {
   scalogramMinFrequency: number;
   scalogramOmega0: number;
   scalogramRowDensity: number;
+  spectrogramMaxFrequency: number;
+  spectrogramMinFrequency: number;
   windowFunction: 'blackman' | 'hamming' | 'hann' | 'rectangular';
 }
 

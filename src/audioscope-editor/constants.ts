@@ -36,6 +36,8 @@ export const DEFAULT_SPECTROGRAM_DEFAULTS: SpectrogramDefaultsPayload = {
   scalogramMinFrequency: 20,
   scalogramOmega0: 6,
   scalogramRowDensity: 1,
+  spectrogramMaxFrequency: 20_000,
+  spectrogramMinFrequency: 20,
   windowFunction: 'hann',
 };
 

@@ -265,6 +265,8 @@ interface EngineState {
     scalogramMinFrequency: number;
     scalogramOmega0: number;
     scalogramRowDensity: number;
+    spectrogramMaxFrequency: number;
+    spectrogramMinFrequency: number;
     minDecibels: number;
     overlapRatio: number;
   };
@@ -343,6 +345,8 @@ const state: EngineState = {
     scalogramMinFrequency: DEFAULT_SCALOGRAM_MIN_FREQUENCY,
     scalogramOmega0: DEFAULT_SCALOGRAM_OMEGA0,
     scalogramRowDensity: DEFAULT_SCALOGRAM_ROW_DENSITY,
+    spectrogramMaxFrequency: DEFAULT_SCALOGRAM_MAX_FREQUENCY,
+    spectrogramMinFrequency: DEFAULT_SCALOGRAM_MIN_FREQUENCY,
     minDecibels: -80,
     overlapRatio: 0.75,
   },
@@ -643,6 +647,8 @@ function handleSpectrogramConfig(config: {
   scalogramMinFrequency: number;
   scalogramOmega0: number;
   scalogramRowDensity: number;
+  spectrogramMaxFrequency?: number;
+  spectrogramMinFrequency?: number;
   minDecibels: number;
   overlapRatio: number;
 }): void {
@@ -677,6 +683,11 @@ function handleSpectrogramConfig(config: {
     config.scalogramMinFrequency,
     config.scalogramMaxFrequency,
   );
+  const nextSpectrogramFrequencyRange = normalizeScalogramFrequencyRange(
+    state.session.maxFrequency,
+    config.spectrogramMinFrequency,
+    config.spectrogramMaxFrequency,
+  );
   const nextDbWindow = normalizeSpectrogramDbWindow(
     config.minDecibels,
     config.maxDecibels,
@@ -701,6 +712,8 @@ function handleSpectrogramConfig(config: {
     || nextScalogramHopSamples !== state.spectrogramConfig.scalogramHopSamples
     || nextScalogramFrequencyRange.minFrequency !== state.spectrogramConfig.scalogramMinFrequency
     || nextScalogramFrequencyRange.maxFrequency !== state.spectrogramConfig.scalogramMaxFrequency
+    || nextSpectrogramFrequencyRange.minFrequency !== state.spectrogramConfig.spectrogramMinFrequency
+    || nextSpectrogramFrequencyRange.maxFrequency !== state.spectrogramConfig.spectrogramMaxFrequency
     || Math.abs(nextScalogramOmega0 - state.spectrogramConfig.scalogramOmega0) > 1e-9
     || Math.abs(nextScalogramRowDensity - state.spectrogramConfig.scalogramRowDensity) > 1e-9
     || Math.abs(nextOverlapRatio - state.spectrogramConfig.overlapRatio) > 1e-9
@@ -732,6 +745,8 @@ function handleSpectrogramConfig(config: {
     scalogramMinFrequency: nextScalogramFrequencyRange.minFrequency,
     scalogramOmega0: nextScalogramOmega0,
     scalogramRowDensity: nextScalogramRowDensity,
+    spectrogramMaxFrequency: nextSpectrogramFrequencyRange.maxFrequency,
+    spectrogramMinFrequency: nextSpectrogramFrequencyRange.minFrequency,
     minDecibels: nextDbWindow.minDecibels,
     overlapRatio: nextOverlapRatio,
   };
@@ -1598,6 +1613,11 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     state.spectrogramConfig.scalogramMinFrequency,
     state.spectrogramConfig.scalogramMaxFrequency,
   );
+  const displayFrequencyRange = normalizeScalogramFrequencyRange(
+    state.session.maxFrequency,
+    state.spectrogramConfig.spectrogramMinFrequency,
+    state.spectrogramConfig.spectrogramMaxFrequency,
+  );
   const scalogramOmega0 = normalizeScalogramOmega0(state.spectrogramConfig.scalogramOmega0);
   const scalogramRowDensity = normalizeScalogramRowDensity(state.spectrogramConfig.scalogramRowDensity);
   const pixelWidth = Math.max(1, state.spectrogramSurface.pixelWidth);
@@ -1643,8 +1663,12 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
       ? scalogramFrequencyRange.minFrequency
       : isChroma
         ? CQT_DEFAULT_FMIN
-        : state.session.minFrequency}`,
-    `max${analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : state.session.maxFrequency}`,
+        : displayFrequencyRange.minFrequency}`,
+    `max${analysisType === 'scalogram'
+      ? scalogramFrequencyRange.maxFrequency
+      : isChroma
+        ? state.session.maxFrequency
+        : displayFrequencyRange.maxFrequency}`,
     `omega${analysisType === 'scalogram' ? scalogramOmega0 : 0}`,
     `density${analysisType === 'scalogram' ? scalogramRowDensity : 0}`,
     `db${dbWindow.minDecibels}:${dbWindow.maxDecibels}`,
@@ -1665,14 +1689,18 @@ function createSpectrogramPlan(range: RangeFrames): SpectrogramPlan {
     hopSamples,
     hopSeconds,
     maxDecibels: dbWindow.maxDecibels,
-    maxFrequency: analysisType === 'scalogram' ? scalogramFrequencyRange.maxFrequency : state.session.maxFrequency,
+    maxFrequency: analysisType === 'scalogram'
+      ? scalogramFrequencyRange.maxFrequency
+      : isChroma
+        ? state.session.maxFrequency
+        : displayFrequencyRange.maxFrequency,
     melBandCount: effectiveMelBandCount,
     minDecibels: dbWindow.minDecibels,
     minFrequency: analysisType === 'scalogram'
       ? scalogramFrequencyRange.minFrequency
       : isChroma
         ? CQT_DEFAULT_FMIN
-        : state.session.minFrequency,
+        : displayFrequencyRange.minFrequency,
     overlapRatio,
     pixelHeight,
     pixelWidth,
@@ -2499,12 +2527,19 @@ function getActiveSpectrogramFrequencyRange(): {
     );
   }
 
-  return {
-    minFrequency: state.spectrogramConfig.analysisType === 'chroma'
-      ? CQT_DEFAULT_FMIN
-      : state.session.minFrequency,
-    maxFrequency: state.session.maxFrequency,
-  };
+  if (state.spectrogramConfig.analysisType === 'chroma') {
+    return {
+      minFrequency: CQT_DEFAULT_FMIN,
+      maxFrequency: state.session.maxFrequency,
+    };
+  }
+
+  // spectrogram / mel / mfcc share the general Y-axis frequency range.
+  return normalizeScalogramFrequencyRange(
+    state.session.maxFrequency,
+    state.spectrogramConfig.spectrogramMinFrequency,
+    state.spectrogramConfig.spectrogramMaxFrequency,
+  );
 }
 
 function getSpectrogramFrequencyAtPosition(positionRatio: number): number {

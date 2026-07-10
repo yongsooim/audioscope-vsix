@@ -109,6 +109,12 @@ export function normalizeSpectrogramDefaults(value: unknown): SpectrogramDefault
   const scalogramMaxFrequency = Number.isFinite(Number(input.scalogramMaxFrequency))
     ? Math.round(clamp(Number(input.scalogramMaxFrequency), scalogramMinFrequency + 1, 20_000))
     : DEFAULT_SPECTROGRAM_DEFAULTS.scalogramMaxFrequency;
+  const spectrogramMinFrequency = Number.isFinite(Number(input.spectrogramMinFrequency))
+    ? Math.round(clamp(Number(input.spectrogramMinFrequency), 20, 19_999))
+    : DEFAULT_SPECTROGRAM_DEFAULTS.spectrogramMinFrequency;
+  const spectrogramMaxFrequency = Number.isFinite(Number(input.spectrogramMaxFrequency))
+    ? Math.round(clamp(Number(input.spectrogramMaxFrequency), spectrogramMinFrequency + 1, 20_000))
+    : DEFAULT_SPECTROGRAM_DEFAULTS.spectrogramMaxFrequency;
 
   return {
     analysisType,
@@ -132,6 +138,8 @@ export function normalizeSpectrogramDefaults(value: unknown): SpectrogramDefault
     scalogramMinFrequency,
     scalogramOmega0,
     scalogramRowDensity,
+    spectrogramMaxFrequency,
+    spectrogramMinFrequency,
     windowFunction,
   };
 }

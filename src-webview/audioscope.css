@@ -988,6 +988,11 @@ body {
   min-width: 0;
 }
 
+.spectrogram-control-inline .spectrogram-control-input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 .spectrogram-control-slider {
   align-items: start;
 }

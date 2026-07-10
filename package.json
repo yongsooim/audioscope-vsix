@@ -162,9 +162,11 @@
             "scalogramMinFrequency": 20,
             "scalogramOmega0": 6,
             "scalogramRowDensity": 1,
+            "spectrogramMaxFrequency": 20000,
+            "spectrogramMinFrequency": 20,
             "windowFunction": "hann"
           },
-          "description": "Stores the default audioscope spectrogram settings that new files open with. Advanced scalogram frequency range and row density values can be edited in settings JSON.",
+          "description": "Stores the default audioscope spectrogram settings that new files open with. spectrogramMinFrequency/spectrogramMaxFrequency set the spectrogram/mel/mfcc Y-axis frequency range. Advanced scalogram frequency range and row density values can be edited in settings JSON.",
           "properties": {
             "analysisType": {
               "type": "string",
@@ -243,6 +245,16 @@
             "scalogramRowDensity": {
               "type": "number",
               "enum": [0.5, 0.75, 1, 1.5, 2, 3, 4]
+            },
+            "spectrogramMaxFrequency": {
+              "type": "number",
+              "minimum": 21,
+              "maximum": 20000
+            },
+            "spectrogramMinFrequency": {
+              "type": "number",
+              "minimum": 20,
+              "maximum": 19999
             },
             "windowFunction": {
               "type": "string",

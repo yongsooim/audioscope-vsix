@@ -252,6 +252,8 @@ type SpectrogramVisibleRequest = {
   scalogramMinFrequency: number;
   scalogramOmega0: number;
   scalogramRowDensity: number;
+  spectrogramMaxFrequency: number;
+  spectrogramMinFrequency: number;
   minDecibels: number;
   overlapRatio: number;
   pixelHeight: number;
@@ -479,6 +481,8 @@ const state = {
     scalogramMinFrequency: DEFAULT_SCALOGRAM_MIN_FREQUENCY,
     scalogramOmega0: DEFAULT_SCALOGRAM_OMEGA0,
     scalogramRowDensity: DEFAULT_SCALOGRAM_ROW_DENSITY,
+    spectrogramMaxFrequency: DEFAULT_SCALOGRAM_MAX_FREQUENCY,
+    spectrogramMinFrequency: DEFAULT_SCALOGRAM_MIN_FREQUENCY,
     minDecibels: -80,
     overlapRatio: 0.75,
     loudnessRefPreset: '-14' as LoudnessRefPreset,
@@ -2283,6 +2287,21 @@ function renderSpectrogramMeta(): void {
   elements.spectrogramMinDbSlider.disabled = !supportsDbWindow;
   elements.spectrogramMaxDbSlider.disabled = !supportsDbWindow;
 
+  // Frequency Y-axis range: spectrogram/mel/mfcc share it; scalogram has its own,
+  // chroma is pitch-class, loudness has no frequency axis.
+  const supportsFreqRange = analysisType === 'spectrogram' || analysisType === 'mel' || analysisType === 'mfcc';
+  elements.spectrogramFreqRangeControl.hidden = !supportsFreqRange;
+  elements.spectrogramFreqMinInput.disabled = !supportsFreqRange;
+  elements.spectrogramFreqMaxInput.disabled = !supportsFreqRange;
+  if (supportsFreqRange) {
+    const freqRange = normalizeSpectrogramScalogramFrequencyRange(
+      state.spectrogramConfig.spectrogramMinFrequency,
+      state.spectrogramConfig.spectrogramMaxFrequency,
+    );
+    elements.spectrogramFreqMinInput.value = String(freqRange.minFrequency);
+    elements.spectrogramFreqMaxInput.value = String(freqRange.maxFrequency);
+  }
+
   // Loudness-specific controls.
   const loudnessYAxisMode = normalizeLoudnessYAxisMode(state.spectrogramConfig.loudnessYAxisMode);
   const loudnessYAxisRange = normalizeLoudnessYAxisRange(
@@ -2356,6 +2375,12 @@ function getEffectiveSpectrogramRenderConfig() {
     state.spectrogramConfig.scalogramMinFrequency,
     state.spectrogramConfig.scalogramMaxFrequency,
   );
+  // Reuses the scalogram [20, nyquist] clamp; this is the general Y-axis
+  // frequency range applied to spectrogram/mel/mfcc views.
+  const spectrogramFrequencyRange = normalizeSpectrogramScalogramFrequencyRange(
+    state.spectrogramConfig.spectrogramMinFrequency,
+    state.spectrogramConfig.spectrogramMaxFrequency,
+  );
   const loudnessYAxisRange = normalizeLoudnessYAxisRange(
     state.spectrogramConfig.loudnessYAxisMin,
     state.spectrogramConfig.loudnessYAxisMax,
@@ -2381,6 +2406,8 @@ function getEffectiveSpectrogramRenderConfig() {
     scalogramMinFrequency: scalogramFrequencyRange.minFrequency,
     scalogramOmega0: normalizeSpectrogramScalogramOmega0(state.spectrogramConfig.scalogramOmega0),
     scalogramRowDensity: normalizeSpectrogramScalogramRowDensity(state.spectrogramConfig.scalogramRowDensity),
+    spectrogramMaxFrequency: spectrogramFrequencyRange.maxFrequency,
+    spectrogramMinFrequency: spectrogramFrequencyRange.minFrequency,
     minDecibels: dbWindow.minDecibels,
     overlapRatio,
     loudnessRefLevel: getConfiguredLoudnessRefLevel(),
@@ -2423,6 +2450,12 @@ function applyPersistedSpectrogramDefaults(defaults: any): void {
   );
   state.spectrogramConfig.scalogramMinFrequency = scalogramFrequencyRange.minFrequency;
   state.spectrogramConfig.scalogramMaxFrequency = scalogramFrequencyRange.maxFrequency;
+  const spectrogramFrequencyRange = normalizeSpectrogramScalogramFrequencyRange(
+    defaults?.spectrogramMinFrequency,
+    defaults?.spectrogramMaxFrequency,
+  );
+  state.spectrogramConfig.spectrogramMinFrequency = spectrogramFrequencyRange.minFrequency;
+  state.spectrogramConfig.spectrogramMaxFrequency = spectrogramFrequencyRange.maxFrequency;
   state.spectrogramConfig.scalogramOmega0 = normalizeSpectrogramScalogramOmega0(defaults?.scalogramOmega0);
   state.spectrogramConfig.scalogramRowDensity = normalizeSpectrogramScalogramRowDensity(defaults?.scalogramRowDensity);
   state.spectrogramConfig.windowFunction = normalizeSpectrogramWindowFunction(defaults?.windowFunction);
@@ -2450,6 +2483,8 @@ function resetCurrentSpectrogramTypeToDefaults(): void {
       state.spectrogramConfig.overlapRatio = DEFAULT_SPECTROGRAM_OVERLAP_RATIO;
       state.spectrogramConfig.windowFunction = DEFAULT_SPECTROGRAM_WINDOW_FUNCTION;
       state.spectrogramConfig.frequencyScale = DEFAULT_SPECTROGRAM_FREQUENCY_SCALE;
+      state.spectrogramConfig.spectrogramMinFrequency = DEFAULT_SCALOGRAM_MIN_FREQUENCY;
+      state.spectrogramConfig.spectrogramMaxFrequency = DEFAULT_SCALOGRAM_MAX_FREQUENCY;
       state.spectrogramConfig.minDecibels = dbWindow.minDecibels;
       state.spectrogramConfig.maxDecibels = dbWindow.maxDecibels;
       break;
@@ -2458,6 +2493,8 @@ function resetCurrentSpectrogramTypeToDefaults(): void {
       state.spectrogramConfig.overlapRatio = DEFAULT_SPECTROGRAM_OVERLAP_RATIO;
       state.spectrogramConfig.windowFunction = DEFAULT_SPECTROGRAM_WINDOW_FUNCTION;
       state.spectrogramConfig.melBandCount = DEFAULT_MEL_BAND_COUNT;
+      state.spectrogramConfig.spectrogramMinFrequency = DEFAULT_SCALOGRAM_MIN_FREQUENCY;
+      state.spectrogramConfig.spectrogramMaxFrequency = DEFAULT_SCALOGRAM_MAX_FREQUENCY;
       state.spectrogramConfig.minDecibels = dbWindow.minDecibels;
       state.spectrogramConfig.maxDecibels = dbWindow.maxDecibels;
       break;
@@ -2467,6 +2504,8 @@ function resetCurrentSpectrogramTypeToDefaults(): void {
       state.spectrogramConfig.windowFunction = DEFAULT_SPECTROGRAM_WINDOW_FUNCTION;
       state.spectrogramConfig.mfccCoefficientCount = DEFAULT_MFCC_COEFFICIENT_COUNT;
       state.spectrogramConfig.mfccMelBandCount = DEFAULT_MFCC_MEL_BAND_COUNT;
+      state.spectrogramConfig.spectrogramMinFrequency = DEFAULT_SCALOGRAM_MIN_FREQUENCY;
+      state.spectrogramConfig.spectrogramMaxFrequency = DEFAULT_SCALOGRAM_MAX_FREQUENCY;
       break;
     case 'scalogram':
       state.spectrogramConfig.overlapRatio = DEFAULT_SPECTROGRAM_OVERLAP_RATIO;
@@ -2725,6 +2764,10 @@ function isCompatibleVisibleRequest(
       && Math.abs(activeRequest.scalogramOmega0 - renderConfig.scalogramOmega0) <= 1e-6
       && Math.abs(activeRequest.scalogramRowDensity - renderConfig.scalogramRowDensity) <= 1e-6
     ))
+    && (renderConfig.analysisType === 'scalogram' || renderConfig.analysisType === 'chroma' || (
+      activeRequest.spectrogramMinFrequency === renderConfig.spectrogramMinFrequency
+      && activeRequest.spectrogramMaxFrequency === renderConfig.spectrogramMaxFrequency
+    ))
     && activeRequest.minDecibels === renderConfig.minDecibels
     && Math.abs(activeRequest.overlapRatio - renderConfig.overlapRatio) <= 1e-6
     && Math.abs(activeRequest.pixelWidth - size.pixelWidth) <= 1
@@ -2860,6 +2903,8 @@ function requestSpectrogramOverviewRender(renderConfig = getEffectiveSpectrogram
       scalogramHopSamples: renderConfig.scalogramHopSamples,
       scalogramMaxFrequency: renderConfig.scalogramMaxFrequency,
       scalogramMinFrequency: renderConfig.scalogramMinFrequency,
+      spectrogramMaxFrequency: renderConfig.spectrogramMaxFrequency,
+      spectrogramMinFrequency: renderConfig.spectrogramMinFrequency,
       scalogramOmega0: renderConfig.scalogramOmega0,
       scalogramRowDensity: renderConfig.scalogramRowDensity,
       windowFunction: renderConfig.windowFunction,
@@ -2929,6 +2974,8 @@ function syncSpectrogramView({ force = false } = {}): void {
       scalogramHopSamples: renderConfig.scalogramHopSamples,
       scalogramMaxFrequency: renderConfig.scalogramMaxFrequency,
       scalogramMinFrequency: renderConfig.scalogramMinFrequency,
+      spectrogramMaxFrequency: renderConfig.spectrogramMaxFrequency,
+      spectrogramMinFrequency: renderConfig.spectrogramMinFrequency,
       scalogramOmega0: renderConfig.scalogramOmega0,
       scalogramRowDensity: renderConfig.scalogramRowDensity,
       minDecibels: renderConfig.minDecibels,
@@ -2968,6 +3015,8 @@ function syncSpectrogramView({ force = false } = {}): void {
       scalogramHopSamples: renderConfig.scalogramHopSamples,
       scalogramMaxFrequency: renderConfig.scalogramMaxFrequency,
       scalogramMinFrequency: renderConfig.scalogramMinFrequency,
+      spectrogramMaxFrequency: renderConfig.spectrogramMaxFrequency,
+      spectrogramMinFrequency: renderConfig.spectrogramMinFrequency,
       scalogramOmega0: renderConfig.scalogramOmega0,
       scalogramRowDensity: renderConfig.scalogramRowDensity,
       minDecibels: renderConfig.minDecibels,
@@ -3750,6 +3799,12 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
       body.scalogramMinFrequency,
       body.scalogramMaxFrequency,
     );
+    // The layer-ready body reports the resolved min/max frequency, which for
+    // spectrogram/mel/mfcc is exactly the general display range that was rendered.
+    const spectrogramFrequencyRange = normalizeSpectrogramScalogramFrequencyRange(
+      body.minFrequency,
+      body.maxFrequency,
+    );
 
     state.analysis.activeVisibleRequest = {
       analysisType: normalizeSpectrogramAnalysisType(body.analysisType),
@@ -3769,6 +3824,8 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
       scalogramMinFrequency: scalogramFrequencyRange.minFrequency,
       scalogramOmega0: normalizeSpectrogramScalogramOmega0(body.scalogramOmega0),
       scalogramRowDensity: normalizeSpectrogramScalogramRowDensity(body.scalogramRowDensity),
+      spectrogramMaxFrequency: spectrogramFrequencyRange.maxFrequency,
+      spectrogramMinFrequency: spectrogramFrequencyRange.minFrequency,
       minDecibels: Math.round(Number(body.minDecibels) || 0),
       overlapRatio: Number(body.overlapRatio) || 0,
       pixelHeight: Number(body.pixelHeight) || 0,
@@ -4592,6 +4649,20 @@ function attachUiEvents(): void {
     renderSpectrogramDbWindowUi(dbWindow);
     scheduleSpectrogramConfigRefresh();
   });
+  // 'change' (not 'input') so the min<max clamp doesn't fight the user mid-typing.
+  const applySpectrogramFreqRange = () => {
+    const range = normalizeSpectrogramScalogramFrequencyRange(
+      elements.spectrogramFreqMinInput.value,
+      elements.spectrogramFreqMaxInput.value,
+    );
+    state.spectrogramConfig.spectrogramMinFrequency = range.minFrequency;
+    state.spectrogramConfig.spectrogramMaxFrequency = range.maxFrequency;
+    elements.spectrogramFreqMinInput.value = String(range.minFrequency);
+    elements.spectrogramFreqMaxInput.value = String(range.maxFrequency);
+    scheduleSpectrogramConfigRefresh();
+  };
+  elements.spectrogramFreqMinInput.addEventListener('change', applySpectrogramFreqRange);
+  elements.spectrogramFreqMaxInput.addEventListener('change', applySpectrogramFreqRange);
   elements.spectrogramMetaToggle.addEventListener('click', () => {
     setSpectrogramMetaOpen(!state.spectrogramMetaOpen);
     if (!state.spectrogramMetaOpen) {

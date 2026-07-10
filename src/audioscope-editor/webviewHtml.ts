@@ -254,6 +254,15 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                     <span id="spectrogram-db-range-value" class="spectrogram-control-slider-value">Min -80 / Max 0 dB</span>
                   </span>
                 </div>
+                <label id="spectrogram-freq-range-control" class="spectrogram-control">
+                  <span class="spectrogram-control-label">Freq</span>
+                  <span class="spectrogram-control-inline">
+                    <input id="spectrogram-freq-min-input" class="spectrogram-control-input" type="number" min="20" max="19999" step="1" value="20" aria-label="Spectrogram minimum frequency in Hz" />
+                    <span class="spectrogram-control-inline-sep" aria-hidden="true">–</span>
+                    <input id="spectrogram-freq-max-input" class="spectrogram-control-input" type="number" min="21" max="20000" step="1" value="20000" aria-label="Spectrogram maximum frequency in Hz" />
+                    <span class="spectrogram-control-unit" aria-hidden="true">Hz</span>
+                  </span>
+                </label>
                 <label id="spectrogram-loudness-ref-control" class="spectrogram-control" hidden>
                   <span class="spectrogram-control-label">Ref</span>
                   <span class="spectrogram-control-inline">
