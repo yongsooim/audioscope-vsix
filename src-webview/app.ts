@@ -2425,7 +2425,13 @@ function getPersistedSpectrogramDefaults() {
     ...persistedDefaults
   } = getEffectiveSpectrogramRenderConfig();
 
-  return persistedDefaults;
+  return {
+    ...persistedDefaults,
+    // The effective range is clamped to the current file's Nyquist frequency.
+    // Persist the requested global range so low-rate files do not narrow later files.
+    spectrogramMaxFrequency: state.spectrogramConfig.spectrogramMaxFrequency,
+    spectrogramMinFrequency: state.spectrogramConfig.spectrogramMinFrequency,
+  };
 }
 
 function applyPersistedSpectrogramDefaults(defaults: any): void {

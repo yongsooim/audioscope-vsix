@@ -2340,7 +2340,7 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
     : createSpectrogramPlan(range);
   if (state.spectrogramConfig.analysisType === 'mfcc') {
     const coefficient = getMfccCoefficientAtPosition(clamp01(pointerRatioY));
-    const coefficientValue = sampleMfccValueAtFrame(frame, coefficient);
+    const coefficientValue = sampleMfccValueAtFrame(frame, coefficient, activePlan);
     return {
       label: coefficientValue === null
         ? `${timeLabel} • MFCC C${coefficient}`
@@ -2444,7 +2444,7 @@ function getMfccCoefficientAtPosition(positionRatio: number): number {
   );
 }
 
-function sampleMfccValueAtFrame(frame: number, coefficient: number): number | null {
+function sampleMfccValueAtFrame(frame: number, coefficient: number, plan: SpectrogramPlan): number | null {
   const module = state.session.module;
   if (!module || !state.session.initialized || !state.session.waveformPcmPointer || state.spectrogramConfig.analysisType !== 'mfcc') {
     return null;
@@ -2463,8 +2463,8 @@ function sampleMfccValueAtFrame(frame: number, coefficient: number): number | nu
     coefficientCount,
     melBandCount,
     fftSize,
-    state.session.minFrequency,
-    state.session.maxFrequency,
+    plan.minFrequency,
+    plan.maxFrequency,
     WINDOW_FUNCTION_CODES[normalizeSpectrogramWindowFunction(state.spectrogramConfig.windowFunction)] ?? 0,
   );
   return Number.isFinite(value) ? value : null;
