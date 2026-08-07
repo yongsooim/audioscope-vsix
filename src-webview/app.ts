@@ -2157,11 +2157,24 @@ function formatWaveformAmplitudeMax(value: number): string {
   return String(Number(value.toFixed(3)));
 }
 
+// One step is ~1 dB, so the range stays fine-grained at both ends of the scale.
+// Rounding can swallow a step near the floor, hence the 0.001 nudge.
+function stepWaveformAmplitudeMax(direction: 'in' | 'out'): number {
+  const current = state.waveformAmplitudeMax;
+  const scaled = normalizeWaveformAmplitudeMax(direction === 'in' ? current / 1.122 : current * 1.122);
+  if (scaled !== current) {
+    return scaled;
+  }
+  return normalizeWaveformAmplitudeMax(direction === 'in' ? current - 0.001 : current + 0.001);
+}
+
 function renderWaveformAmplitudeUi(): void {
   const label = formatWaveformAmplitudeMax(state.waveformAmplitudeMax);
-  elements.waveAmpInput.value = label;
+  elements.waveAmpReset.textContent = label;
   elements.waveformLevelLabelPositive.textContent = label;
   elements.waveformLevelLabelNegative.textContent = `-${label}`;
+  elements.waveAmpIn.disabled = state.waveformAmplitudeMax <= WAVEFORM_AMPLITUDE_MAX_MIN;
+  elements.waveAmpOut.disabled = state.waveformAmplitudeMax >= 1;
 }
 
 // Fit: scale the Y axis so the loudest sample in the rendered window reaches the
@@ -4525,6 +4538,9 @@ function attachUiEvents(): void {
     elements.waveFollow,
     waveFollowToggle,
     elements.waveClearLoop,
+    elements.waveAmpReset,
+    elements.waveAmpOut,
+    elements.waveAmpIn,
     elements.spectrogramMetaToggle,
     elements.spectrogramResetTypeButton,
   ];
@@ -4975,9 +4991,9 @@ function attachUiEvents(): void {
   elements.waveZoomOut.addEventListener('click', () => sendViewportIntent({ direction: 'out', kind: 'zoomStep' }));
   elements.waveZoomReset.addEventListener('click', () => sendViewportIntent({ kind: 'resetZoom' }));
   elements.waveZoomIn.addEventListener('click', () => sendViewportIntent({ direction: 'in', kind: 'zoomStep' }));
-  elements.waveAmpInput.addEventListener('change', () => {
-    applyWaveformAmplitudeMax(normalizeWaveformAmplitudeMax(elements.waveAmpInput.value));
-  });
+  elements.waveAmpReset.addEventListener('click', () => applyWaveformAmplitudeMax(DEFAULT_WAVEFORM_AMPLITUDE_MAX));
+  elements.waveAmpOut.addEventListener('click', () => applyWaveformAmplitudeMax(stepWaveformAmplitudeMax('out')));
+  elements.waveAmpIn.addEventListener('click', () => applyWaveformAmplitudeMax(stepWaveformAmplitudeMax('in')));
   elements.waveAmpFit.addEventListener('click', () => {
     fitWaveformAmplitudeToView();
     scheduleKeyboardSurfaceFocus();

@@ -63,17 +63,15 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-amp wave-seg">
                 <span class="wave-seg-label">Amp ±</span>
-                <input
-                  id="wave-amp-input"
-                  class="wave-seg-input"
-                  type="number"
-                  min="0.001"
-                  max="1"
-                  step="0.01"
-                  value="1"
-                  aria-label="Waveform amplitude range"
-                  title="Full-scale amplitude of the waveform Y axis"
-                />
+                <button
+                  id="wave-amp-reset"
+                  class="wave-tool-button wave-seg-value"
+                  type="button"
+                  aria-label="Reset waveform amplitude range"
+                  title="Full-scale amplitude of the Y axis — click to reset to ±1.0"
+                >1</button>
+                <button id="wave-amp-out" class="wave-tool-button" type="button" aria-label="Widen the waveform amplitude range" title="Widen the amplitude range">-</button>
+                <button id="wave-amp-in" class="wave-tool-button" type="button" aria-label="Narrow the waveform amplitude range" title="Narrow the amplitude range">+</button>
                 <button
                   id="wave-amp-fit"
                   class="wave-tool-button"

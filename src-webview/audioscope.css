@@ -448,21 +448,8 @@ body {
   text-transform: uppercase;
 }
 
-.wave-seg-input {
-  width: 58px;
-  padding: 3px 0 3px 7px;
-  background: var(--chrome-surface);
-  color: var(--chrome-text-strong);
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-}
-
-.wave-seg-input:focus,
-.wave-seg-input:focus-visible {
-  outline: none;
-  background: var(--chrome-surface-hover);
+.wave-toolbar-group-amp > .wave-seg-value {
+  min-width: 46px;
 }
 
 .wave-seg-select {
@@ -959,7 +946,8 @@ body {
   padding: 0;
   width: 100%;
   height: 100%;
-  min-height: 140px;
+  /* No floor: the divider can collapse this pane completely, like the waveform. */
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--spectrogram-axis-border);
   border-left: 0;
