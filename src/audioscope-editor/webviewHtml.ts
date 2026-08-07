@@ -139,11 +139,10 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               <span class="surface-loading-spinner" aria-hidden="true"></span>
             </div>
           </div>
-          <div id="waveform-axis" class="waveform-axis" aria-hidden="true"></div>
         </div>
         <div
-          id="viewport-splitter"
-          class="viewport-splitter"
+          id="waveform-axis"
+          class="waveform-axis"
           role="separator"
           aria-controls="wave-panel spectrogram-panel"
           aria-label="Resize waveform and spectrogram panels"
@@ -153,9 +152,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           aria-valuenow="50"
           aria-valuetext="Waveform 50%, spectrogram 50%"
           tabindex="0"
-        >
-          <div class="viewport-splitter-handle" aria-hidden="true"></div>
-        </div>
+        ></div>
         <div id="spectrogram-panel" class="spectrogram-panel">
           <div id="spectrogram-axis" class="spectrogram-axis" aria-hidden="true"></div>
           <div id="spectrogram-stage" class="spectrogram-stage">

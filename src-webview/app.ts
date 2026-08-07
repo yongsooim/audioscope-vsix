@@ -206,7 +206,7 @@ let DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR
 const DEFAULT_VIEWPORT_SPLIT_RATIO = 0.5;
 const VIEWPORT_SPLIT_STEP = 0.05;
 // Must stay in sync with --viewport-splitter-size in audioscope.css.
-const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 8;
+const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 24;
 const VIEWPORT_RATIO_MAX = 1;
 const VIEWPORT_RATIO_MIN = 0;
 const DEFAULT_WAVEFORM_AMPLITUDE_MAX = 1;
@@ -594,7 +594,7 @@ const state = {
   spectrogramRenderForcePending: false,
   spectrogramSurfaceResetPromise: null as Promise<void> | null,
   spectrogramSurfaceReadyPromise: null as Promise<void> | null,
-  viewportResizeDrag: null as { pointerId: number } | null,
+  viewportResizeDrag: null as { pointerId: number; startClientY: number; startRatio: number } | null,
   viewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
   viewportSplitRatioPersistTimer: null as number | null,
   playbackVolume: 1,
@@ -2047,6 +2047,7 @@ function renderWaveformAxis(): void {
 
   const axisContent = document.createElement('div');
   axisContent.className = 'waveform-axis-content';
+  axisContent.setAttribute('aria-hidden', 'true');
   axisContent.style.width = `${renderWidthPx}px`;
 
   for (const tick of waveformAxisTicks) {
@@ -5174,24 +5175,29 @@ function attachUiEvents(): void {
     }
     event.preventDefault();
     elements.viewportSplitter.setPointerCapture(event.pointerId);
-    state.viewportResizeDrag = { pointerId: event.pointerId };
-    updateViewportSplitRatioFromClientY(event.clientY);
+    state.viewportResizeDrag = {
+      pointerId: event.pointerId,
+      startClientY: event.clientY,
+      startRatio: state.viewportSplitRatio,
+    };
   });
   elements.viewportSplitter.addEventListener('pointermove', (event) => {
-    if (!state.viewportResizeDrag || state.viewportResizeDrag.pointerId !== event.pointerId) {
+    const drag = state.viewportResizeDrag;
+    if (!drag || drag.pointerId !== event.pointerId) {
       return;
     }
-    updateViewportSplitRatioFromClientY(event.clientY);
+    updateViewportSplitRatioFromClientY(event.clientY, drag.startClientY, drag.startRatio);
   });
   elements.viewportSplitter.addEventListener('pointerup', (event) => {
-    if (!state.viewportResizeDrag || state.viewportResizeDrag.pointerId !== event.pointerId) {
+    const drag = state.viewportResizeDrag;
+    if (!drag || drag.pointerId !== event.pointerId) {
       return;
     }
     if (elements.viewportSplitter.hasPointerCapture?.(event.pointerId)) {
       elements.viewportSplitter.releasePointerCapture(event.pointerId);
     }
     state.viewportResizeDrag = null;
-    updateViewportSplitRatioFromClientY(event.clientY);
+    updateViewportSplitRatioFromClientY(event.clientY, drag.startClientY, drag.startRatio);
     schedulePersistViewportSplitRatio();
   });
   elements.viewportSplitter.addEventListener('pointercancel', (event) => {

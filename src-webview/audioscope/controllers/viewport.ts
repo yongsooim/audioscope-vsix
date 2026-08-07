@@ -69,7 +69,7 @@ export function createAudioscopeViewportController({
     return Math.max(
       1,
       elements.viewportSplitter?.offsetHeight
-        || getNumericStyleSize(elements.viewportSplitter, 'minHeight', splitterFallbackSizePx),
+        || getNumericStyleSize(elements.viewportSplitter, 'height', splitterFallbackSizePx),
     );
   }
 
@@ -85,7 +85,7 @@ export function createAudioscopeViewportController({
   }
 
   function getWavePanelChromeHeight(): number {
-    return Math.max(0, elements.waveToolbar?.offsetHeight || 0) + Math.max(0, elements.waveformAxis?.offsetHeight || 0);
+    return Math.max(0, elements.waveToolbar?.offsetHeight || 0);
   }
 
   function applyViewportSplit(force = false): void {
@@ -115,7 +115,11 @@ export function createAudioscopeViewportController({
     elements.viewport.style.gridTemplateRows = nextTemplate;
   }
 
-  function updateViewportSplitRatioFromClientY(clientY: number): void {
+  function updateViewportSplitRatioFromClientY(
+    clientY: number,
+    dragStartClientY: number,
+    dragStartRatio: number,
+  ): void {
     const splitterSize = getViewportSplitterSize();
     const wavePanelChromeHeight = getWavePanelChromeHeight();
     const viewportRect = elements.viewport.getBoundingClientRect();
@@ -125,7 +129,7 @@ export function createAudioscopeViewportController({
     }
 
     const proposedWaveHeight = clamp(
-      clientY - viewportRect.top - wavePanelChromeHeight - splitterSize / 2,
+      normalizeViewportSplitRatio(dragStartRatio) * availableHeight + clientY - dragStartClientY,
       0,
       availableHeight,
     );

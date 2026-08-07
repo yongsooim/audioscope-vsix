@@ -32,7 +32,7 @@
   --selection-border: rgba(191, 219, 254, 0.28);
   --cursor: rgba(191, 219, 254, 0.92);
   --surface-inline-padding: 20px;
-  --viewport-splitter-size: 8px;
+  --viewport-splitter-size: 24px;
 
   /* Pro-audio chrome tokens. */
   --mono: "JetBrains Mono", "SF Mono", "Menlo", "Cascadia Code", "Consolas", monospace;
@@ -280,58 +280,9 @@ body {
   overflow: hidden;
 }
 
-.viewport-splitter {
-  position: relative;
-  display: grid;
-  place-items: center;
-  min-height: var(--viewport-splitter-size);
-  cursor: row-resize;
-  touch-action: none;
-  -webkit-user-select: none;
-  user-select: none;
-  background: transparent;
-}
-
-.viewport-splitter::before {
-  content: "";
-  position: absolute;
-  inset-inline: 0;
-  top: 50%;
-  height: 1px;
-  transform: translateY(-50%);
-  background: var(--chrome-border);
-}
-
-.viewport-splitter-handle {
-  position: relative;
-  z-index: 1;
-  width: 28px;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--chrome-border-strong);
-  opacity: 0.6;
-  transition: opacity 120ms ease, background 120ms ease, width 120ms ease;
-}
-
-.viewport-splitter:hover .viewport-splitter-handle,
-.viewport-splitter[data-dragging="true"] .viewport-splitter-handle {
-  opacity: 1;
-  width: 44px;
-  background: var(--chrome-border-accent);
-}
-
-.viewport-splitter:focus,
-.viewport-splitter:focus-visible {
-  outline: none;
-}
-
-.viewport-splitter[data-dragging="true"]::before {
-  background: rgba(96, 165, 250, 0.35);
-}
-
 .wave-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   margin: 0 !important;
   padding: 0 var(--surface-inline-padding) !important;
   min-height: 0;
@@ -875,16 +826,29 @@ body {
 
 .waveform-axis {
   position: relative;
-  height: 24px;
+  height: var(--viewport-splitter-size);
   margin: 0;
   overflow: hidden;
   border-top: 1px solid rgba(116, 143, 189, 0.12);
   border-bottom: 1px solid rgba(116, 143, 189, 0.12);
+  cursor: row-resize;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.waveform-axis:focus {
+  outline: none;
+}
+
+.waveform-axis:focus-visible {
+  outline: 1px solid var(--chrome-border-accent);
+  outline-offset: -1px;
 }
 
 .waveform-axis-content {
   position: absolute;
-  inset: 0 auto 0 0;
+  inset: 0 auto 0 var(--surface-inline-padding);
   height: 100%;
   transform: translate3d(0, 0, 0);
   transform-origin: left center;

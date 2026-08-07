@@ -48,7 +48,7 @@ export function createAudioscopeElements() {
     waveformLevelLabelPositive: requireElement<HTMLElement>('waveform-level-label-positive'),
     waveformLevelLabelNegative: requireElement<HTMLElement>('waveform-level-label-negative'),
     waveFollow: requireElement<HTMLInputElement>('wave-follow'),
-    viewportSplitter: requireElement<HTMLElement>('viewport-splitter'),
+    viewportSplitter: requireElement<HTMLElement>('waveform-axis'),
     spectrogramPanel: requireElement<HTMLElement>('spectrogram-panel'),
     spectrogramStage: requireElement<HTMLElement>('spectrogram-stage'),
     spectrogram: requireElement<HTMLCanvasElement>('spectrogram'),
