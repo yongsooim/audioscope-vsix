@@ -1,5 +1,4 @@
 import { AUDIO_TRANSPORT_PROCESSOR_NAME } from './audioTransportShared';
-import SignalsmithStretch from '../vendor/SignalsmithStretch.mjs';
 
 const DEFAULT_SAMPLE_RATE = 48000;
 const DEFAULT_PLAYBACK_RATE = 1;
@@ -113,6 +112,20 @@ interface StretchNode extends AudioWorkletNode {
 interface SignalsmithStretchFactory {
   (audioContext: AudioContext, options?: AudioWorkletNodeOptions): Promise<StretchNode>;
   moduleUrl?: string;
+}
+
+let signalsmithStretchFactoryPromise: Promise<SignalsmithStretchFactory> | null = null;
+
+function loadSignalsmithStretchFactory(): Promise<SignalsmithStretchFactory> {
+  if (!signalsmithStretchFactoryPromise) {
+    signalsmithStretchFactoryPromise = import('../vendor/SignalsmithStretch.mjs')
+      .then((module) => module.default as SignalsmithStretchFactory)
+      .catch((error) => {
+        signalsmithStretchFactoryPromise = null;
+        throw error;
+      });
+  }
+  return signalsmithStretchFactoryPromise;
 }
 
 interface WorkletControlMessage {
@@ -1255,7 +1268,7 @@ class StretchAudioTransport implements AudioTransport {
 
     const context = await this.ensureAudioContext();
     const outputChannelCount = Math.max(1, Math.trunc(this.playbackSession?.numberOfChannels || 1));
-    const stretchFactory = SignalsmithStretch as SignalsmithStretchFactory;
+    const stretchFactory = await loadSignalsmithStretchFactory();
 
     if (this.stretchModuleUrl) {
       stretchFactory.moduleUrl = this.stretchModuleUrl;
@@ -1328,10 +1341,6 @@ class StretchAudioTransport implements AudioTransport {
 
     if (!audioContextPrototype || !('audioWorklet' in audioContextPrototype)) {
       return 'AudioWorklet is unavailable in this webview.';
-    }
-
-    if (typeof SignalsmithStretch !== 'function') {
-      return 'Signalsmith Stretch runtime is unavailable.';
     }
 
     return null;

@@ -586,6 +586,7 @@ self.onmessage = (event) => {
         body: {
           channelIndex: Number(message.body?.channelIndex) || 0,
           requestId: Number(message.body?.requestId) || 0,
+          sessionVersion: analysisState.attachedSessionVersion,
           result: computeChannelSampleValue(
             Number(message.body?.pointerRatioX) || 0,
             Number(message.body?.pointerRatioY) || 0,
@@ -1152,6 +1153,7 @@ function postAnalysisInitialized(): void {
       runtimeVariant: analysisState.runtimeVariant,
       sampleCount: analysisState.sampleCount,
       sampleRate: analysisState.sampleRate,
+      sessionVersion: analysisState.attachedSessionVersion,
     },
   });
 }
@@ -1177,7 +1179,10 @@ function requestAnalysisSurfaceReset(reason: SurfaceResetReason): void {
 
   self.postMessage({
     type: 'analysisSurfaceResetRequested',
-    body: { reason },
+    body: {
+      reason,
+      sessionVersion: analysisState.attachedSessionVersion,
+    },
   });
 }
 
@@ -1889,7 +1894,10 @@ async function pumpOverviewLoop() {
 
       self.postMessage({
         type: 'overviewReady',
-        body: createLayerReadyBody(analysisState.runtimeVariant, plan),
+        body: {
+          ...createLayerReadyBody(analysisState.runtimeVariant, plan),
+          sessionVersion: analysisState.attachedSessionVersion,
+        },
       });
     }
   } catch (error) {
@@ -1985,7 +1993,10 @@ async function pumpVisibleLoop() {
 
       self.postMessage({
         type: 'visibleReady',
-        body: createLayerReadyBody(analysisState.runtimeVariant, plan),
+        body: {
+          ...createLayerReadyBody(analysisState.runtimeVariant, plan),
+          sessionVersion: analysisState.attachedSessionVersion,
+        },
       });
     }
   } catch (error) {
@@ -2652,6 +2663,7 @@ function paintLoudnessDisplay(context: OffscreenCanvasRenderingContext2D): void 
       refLevel: cfg.refLevel,
       minLufs,
       maxLufs,
+      sessionVersion: analysisState.attachedSessionVersion,
     },
   });
 }
@@ -6435,7 +6447,10 @@ function postError(error: unknown): void {
 
   self.postMessage({
     type: 'error',
-    body: { message: text },
+    body: {
+      message: text,
+      sessionVersion: analysisState.attachedSessionVersion,
+    },
   });
 }
 

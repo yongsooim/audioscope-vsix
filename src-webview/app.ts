@@ -1,4 +1,5 @@
 import { DISPLAY_MIN_DPR } from './sharedBuffers';
+import { isCurrentWorkerMessage } from './workerMessageSession';
 import type { AudioTransport, PlaybackSession } from './transport/audioTransport';
 import { createAudioscopeElements } from './audioscope/core/elements';
 import { clamp, formatAxisLabel } from './audioscope/core/format';
@@ -68,7 +69,6 @@ const vscode = {
 const engineWorkerScriptUri = document.body.dataset.engineWorkerSrc || '';
 const analysisWorkerScriptUri = document.body.dataset.analysisWorkerSrc || '';
 const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc || '';
-const decodeBrowserModuleScriptUri = document.body.dataset.decodeModuleSrc;
 const decodeBrowserModuleWasmUri = document.body.dataset.decodeModuleWasmSrc;
 const decodeWorkerScriptUri = document.body.dataset.decodeWorkerSrc;
 const pcmDownmixWorkerScriptUri = document.body.dataset.pcmDownmixWorkerSrc;
@@ -78,6 +78,26 @@ const wasmCoreSimdScriptUri = document.body.dataset.wasmCoreSimdSrc || '';
 const wasmCoreFallbackScriptUri = document.body.dataset.wasmCoreFallbackSrc || '';
 
 let wasmCoreBytesPromise: Promise<{ fallback: ArrayBuffer | null; simd: ArrayBuffer | null }> | null = null;
+let decodeModuleWasmBytesPromise: Promise<ArrayBuffer> | null = null;
+
+function fetchDecodeModuleWasmBytes(): Promise<ArrayBuffer> {
+  if (!decodeModuleWasmBytesPromise) {
+    decodeModuleWasmBytesPromise = (async () => {
+      if (!decodeBrowserModuleWasmUri) {
+        throw new Error('Embedded decode worker WASM URL is missing.');
+      }
+      const response = await fetch(decodeBrowserModuleWasmUri, { credentials: 'same-origin' });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch embedded decode WASM: ${response.status}`);
+      }
+      return response.arrayBuffer();
+    })().catch((error) => {
+      decodeModuleWasmBytesPromise = null;
+      throw error;
+    });
+  }
+  return decodeModuleWasmBytesPromise;
+}
 
 function fetchWasmCoreBytes(): Promise<{ fallback: ArrayBuffer | null; simd: ArrayBuffer | null }> {
   if (!wasmCoreBytesPromise) {
@@ -95,10 +115,10 @@ function fetchWasmCoreBytes(): Promise<{ fallback: ArrayBuffer | null; simd: Arr
         return null;
       }
     };
-    wasmCoreBytesPromise = (async () => ({
-      simd: await fetchOne(wasmCoreSimdScriptUri),
-      fallback: await fetchOne(wasmCoreFallbackScriptUri),
-    }))();
+    wasmCoreBytesPromise = Promise.all([
+      fetchOne(wasmCoreSimdScriptUri),
+      fetchOne(wasmCoreFallbackScriptUri),
+    ]).then(([simd, fallback]) => ({ fallback, simd }));
   }
   return wasmCoreBytesPromise;
 }
@@ -120,6 +140,91 @@ function fetchWorkerSourceText(moduleUrl: string): Promise<string> {
   return cached;
 }
 
+interface PendingPcmDownmixRequest {
+  expectedChannelCount: number;
+  fail(error: unknown): void;
+  resolve(result: DownmixedPcm): void;
+}
+
+let nextPcmDownmixRequestId = 1;
+let pcmDownmixWorker: Worker | null = null;
+let pcmDownmixWorkerBootstrapUrl: string | null = null;
+let pcmDownmixWorkerPromise: Promise<Worker> | null = null;
+const pendingPcmDownmixRequests = new Map<number, PendingPcmDownmixRequest>();
+
+function disposePcmDownmixWorker(error: unknown = new Error('PCM downmix worker was reset.')): void {
+  const worker = pcmDownmixWorker;
+  const bootstrapUrl = pcmDownmixWorkerBootstrapUrl;
+  const pending = [...pendingPcmDownmixRequests.values()];
+  pcmDownmixWorker = null;
+  pcmDownmixWorkerBootstrapUrl = null;
+  pcmDownmixWorkerPromise = null;
+  pendingPcmDownmixRequests.clear();
+  worker?.terminate();
+  if (bootstrapUrl) {
+    URL.revokeObjectURL(bootstrapUrl);
+  }
+  for (const request of pending) {
+    request.fail(error);
+  }
+}
+
+function ensurePcmDownmixWorker(): Promise<Worker> {
+  if (pcmDownmixWorker) {
+    return Promise.resolve(pcmDownmixWorker);
+  }
+  if (pcmDownmixWorkerPromise) {
+    return pcmDownmixWorkerPromise;
+  }
+
+  pcmDownmixWorkerPromise = (async () => {
+    const sourceText = await fetchWorkerSourceText(pcmDownmixWorkerScriptUri || '');
+    const bootstrapUrl = URL.createObjectURL(new Blob([sourceText], { type: 'text/javascript' }));
+    const worker = new Worker(bootstrapUrl, { type: 'module' });
+    pcmDownmixWorker = worker;
+    pcmDownmixWorkerBootstrapUrl = bootstrapUrl;
+    worker.addEventListener('message', (event: MessageEvent) => {
+      const requestId = Math.max(0, Math.trunc(Number(event.data?.body?.requestId) || 0));
+      const pending = pendingPcmDownmixRequests.get(requestId);
+      if (!pending) {
+        return;
+      }
+      if (event.data?.type === 'error') {
+        pending.fail(new Error(event.data.body?.message || 'PCM downmix failed.'));
+        return;
+      }
+      if (event.data?.type !== 'downmixReady') {
+        return;
+      }
+
+      const channelBuffers = Array.isArray(event.data.body?.channelBuffers)
+        ? event.data.body.channelBuffers.filter((buffer) => buffer instanceof ArrayBuffer)
+        : [];
+      const monoBuffer = event.data.body?.monoBuffer;
+      const analysisBuffer = event.data.body?.analysisBuffer;
+      const waveformBuffer = event.data.body?.waveformBuffer;
+      if (
+        channelBuffers.length !== pending.expectedChannelCount
+        || !(monoBuffer instanceof ArrayBuffer)
+        || !(analysisBuffer instanceof ArrayBuffer)
+        || !(waveformBuffer instanceof ArrayBuffer)
+      ) {
+        pending.fail(new Error('PCM downmix worker returned invalid buffers.'));
+        return;
+      }
+      pending.resolve({ analysisBuffer, channelBuffers, monoBuffer, waveformBuffer });
+    });
+    worker.addEventListener('error', (event) => {
+      disposePcmDownmixWorker(new Error(event.message || 'PCM downmix worker failed.'));
+    });
+    return worker;
+  })().catch((error) => {
+    disposePcmDownmixWorker(error);
+    throw error;
+  });
+  return pcmDownmixWorkerPromise;
+}
+
 async function downmixPcmInWorker(
   channelBuffers: ArrayBuffer[],
   sampleCount: number,
@@ -130,16 +235,14 @@ async function downmixPcmInWorker(
   }
 
   const abortSignal = state.sourceFetchController?.signal ?? null;
-  const sourceText = await fetchWorkerSourceText(pcmDownmixWorkerScriptUri);
-  const bootstrapUrl = URL.createObjectURL(new Blob([sourceText], { type: 'text/javascript' }));
-  const worker = new Worker(bootstrapUrl, { type: 'module' });
+  const worker = await ensurePcmDownmixWorker();
+  const requestId = nextPcmDownmixRequestId++;
 
   return new Promise<DownmixedPcm>((resolve, reject) => {
     let settled = false;
 
     const cleanup = (): void => {
-      worker.terminate();
-      URL.revokeObjectURL(bootstrapUrl);
+      pendingPcmDownmixRequests.delete(requestId);
       abortSignal?.removeEventListener('abort', handleAbort);
     };
     const fail = (error: unknown): void => {
@@ -152,36 +255,19 @@ async function downmixPcmInWorker(
     };
     const handleAbort = (): void => {
       fail(new DOMException('PCM downmix was aborted.', 'AbortError'));
+      disposePcmDownmixWorker();
     };
-
-    worker.addEventListener('message', (event: MessageEvent) => {
-      if (settled) {
-        return;
-      }
-      if (event.data?.type === 'error') {
-        fail(new Error(event.data.body?.message || 'PCM downmix failed.'));
-        return;
-      }
-      if (event.data?.type !== 'downmixReady') {
-        return;
-      }
-
-      const resultBuffers = Array.isArray(event.data.body?.channelBuffers)
-        ? event.data.body.channelBuffers.filter((buffer) => buffer instanceof ArrayBuffer)
-        : [];
-      const monoBuffer = event.data.body?.monoBuffer;
-
-      if (resultBuffers.length !== channelBuffers.length || !(monoBuffer instanceof ArrayBuffer)) {
-        fail(new Error('PCM downmix worker returned invalid buffers.'));
-        return;
-      }
-
-      settled = true;
-      cleanup();
-      resolve({ channelBuffers: resultBuffers, monoBuffer });
-    });
-    worker.addEventListener('error', (event) => {
-      fail(new Error(event.message || 'PCM downmix worker failed.'));
+    pendingPcmDownmixRequests.set(requestId, {
+      expectedChannelCount: channelBuffers.length,
+      fail,
+      resolve: (result) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(result);
+      },
     });
     abortSignal?.addEventListener('abort', handleAbort, { once: true });
 
@@ -190,15 +276,20 @@ async function downmixPcmInWorker(
       return;
     }
 
-    worker.postMessage({
-      type: 'downmixPcm',
-      body: {
-        channelBuffers,
-        channelCount,
-        maxTotalSamples: MAX_TOTAL_ANALYSIS_SAMPLES,
-        sampleCount,
-      },
-    }, channelBuffers);
+    try {
+      worker.postMessage({
+        type: 'downmixPcm',
+        body: {
+          channelBuffers,
+          channelCount,
+          maxTotalSamples: MAX_TOTAL_ANALYSIS_SAMPLES,
+          requestId,
+          sampleCount,
+        },
+      }, channelBuffers);
+    } catch (error) {
+      fail(error);
+    }
   });
 }
 
@@ -380,6 +471,7 @@ type AnalysisWorkerToMainMessage =
         runtimeVariant?: string | null;
         sampleCount?: number;
         sampleRate?: number;
+        sessionVersion?: number;
       };
       type: 'analysisInitialized';
     }
@@ -437,6 +529,7 @@ type WaveformWorkerToMainMessage =
         generation?: number;
         height?: number;
         peak?: number;
+        sessionVersion?: number;
         viewEnd?: number;
         viewStart?: number;
         width?: number;
@@ -446,6 +539,7 @@ type WaveformWorkerToMainMessage =
   | {
       body: {
         message?: string;
+        sessionVersion?: number;
       };
       type: 'error';
     };
@@ -638,7 +732,6 @@ const {
   movePlaybackRateFocus,
   openPlaybackRateMenu,
   positionPlaybackRateMenu,
-  stepPlaybackRateSelection,
   syncPlaybackRateControl,
 } = createAudioscopePlaybackRateController({
   elements,
@@ -1159,7 +1252,10 @@ async function ensureWaveformWorker(loadToken: number): Promise<Worker | null> {
     return null;
   }
 
-  const worker = await createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl');
+  const [worker, wasmBytes] = await Promise.all([
+    createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl'),
+    fetchWasmCoreBytes(),
+  ]);
   if (loadToken !== state.loadToken) {
     worker.terminate();
     return null;
@@ -1175,10 +1271,6 @@ async function ensureWaveformWorker(loadToken: number): Promise<Worker | null> {
     disposeWaveformWorker();
     setFatalStatus(`Waveform worker failed: ${event.message || 'Unknown worker error.'}`);
   });
-  const wasmBytes = await fetchWasmCoreBytes();
-  if (loadToken !== state.loadToken) {
-    return null;
-  }
   worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
   return worker;
 }
@@ -1192,7 +1284,10 @@ async function ensureAnalysisWorker(loadToken: number): Promise<Worker | null> {
     return null;
   }
 
-  const worker = await createModuleWorker(analysisWorkerScriptUri, 'analysisWorkerBootstrapUrl');
+  const [worker, wasmBytes] = await Promise.all([
+    createModuleWorker(analysisWorkerScriptUri, 'analysisWorkerBootstrapUrl'),
+    fetchWasmCoreBytes(),
+  ]);
   if (loadToken !== state.loadToken) {
     worker.terminate();
     return null;
@@ -1202,7 +1297,7 @@ async function ensureAnalysisWorker(loadToken: number): Promise<Worker | null> {
   });
   state.analysisWorker = worker;
   worker.addEventListener('message', (event: MessageEvent<AnalysisWorkerToMainMessage>) => {
-    handleAnalysisWorkerMessage(loadToken, event.data);
+    handleAnalysisWorkerMessage(state.loadToken, event.data);
   });
   worker.addEventListener('error', (event) => {
     if (loadToken !== state.loadToken) {
@@ -1211,10 +1306,6 @@ async function ensureAnalysisWorker(loadToken: number): Promise<Worker | null> {
     disposeAnalysisWorker();
     setAnalysisStatus(`Spectrogram failed: ${event.message || 'Unknown worker error.'}`, true);
   });
-  const wasmBytes = await fetchWasmCoreBytes();
-  if (loadToken !== state.loadToken) {
-    return null;
-  }
   worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
   return worker;
 }
@@ -1336,7 +1427,10 @@ async function createSpectrogramSatellite(
   elements.spectrogram.insertAdjacentElement('afterend', canvas);
   state.spectrogramLaneCanvases.push(canvas);
 
-  const worker = await createModuleWorker(analysisWorkerScriptUri, 'analysisWorkerBootstrapUrl');
+  const [worker, wasmBytes] = await Promise.all([
+    createModuleWorker(analysisWorkerScriptUri, 'analysisWorkerBootstrapUrl'),
+    fetchWasmCoreBytes(),
+  ]);
   if (loadToken !== state.loadToken) {
     worker.terminate();
     canvas.remove();
@@ -1363,11 +1457,6 @@ async function createSpectrogramSatellite(
     worker.addEventListener('message', handler);
   });
 
-  const wasmBytes = await fetchWasmCoreBytes();
-  if (loadToken !== state.loadToken) {
-    worker.terminate();
-    return;
-  }
   worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
   await runtimeReady;
   if (loadToken !== state.loadToken) {
@@ -1534,7 +1623,10 @@ async function createWaveformSatellite(
   elements.waveformCanvasHost.appendChild(canvas);
   state.waveformLaneCanvases.push(canvas);
 
-  const worker = await createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl');
+  const [worker, wasmBytes] = await Promise.all([
+    createModuleWorker(waveformWorkerScriptUri, 'waveformWorkerBootstrapUrl'),
+    fetchWasmCoreBytes(),
+  ]);
   if (loadToken !== state.loadToken) {
     worker.terminate();
     canvas.remove();
@@ -1554,11 +1646,6 @@ async function createWaveformSatellite(
     worker.addEventListener('message', handler);
   });
 
-  const wasmBytes = await fetchWasmCoreBytes();
-  if (loadToken !== state.loadToken) {
-    worker.terminate();
-    return;
-  }
   worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
   await runtimeReady;
   if (loadToken !== state.loadToken) {
@@ -1841,7 +1928,7 @@ function applyChannelModeChange(): void {
     );
   });
 
-  void setupWaveformChannels(loadToken, prepared.monoSamples.slice(), state.playbackSession);
+  void setupWaveformChannels(loadToken, prepared.waveformSamples, state.playbackSession);
 }
 
 function applyTransportCommand(command: TransportCommand | null): void {
@@ -2327,7 +2414,7 @@ function normalizePlaybackVolume(value: unknown): number {
 function renderPlaybackVolumeUi(): void {
   const percent = `${Math.round(state.playbackVolume * 100)}%`;
   elements.volumeSlider.value = String(state.playbackVolume);
-  elements.volumeSlider.title = `Volume ${percent}`;
+  elements.volumeSlider.title = `Volume ${percent} (Up/Down Arrow)`;
   // ponytail: :hover/:focus double as the "show the value" flag — no extra state to sync
   elements.volumeLabel.textContent = elements.volumeSlider.matches(':hover, :focus') ? percent : 'Vol';
 }
@@ -2344,6 +2431,18 @@ function schedulePersistPlaybackVolume(): void {
       body: { volume: state.playbackVolume },
     });
   }, 160);
+}
+
+function applyPlaybackVolume(value: unknown): void {
+  state.playbackVolume = normalizePlaybackVolume(value);
+  renderPlaybackVolumeUi();
+  state.audioTransport?.setVolume(state.playbackVolume);
+  schedulePersistPlaybackVolume();
+}
+
+function stepPlaybackVolume(direction: -1 | 1): void {
+  const currentPercent = Math.round(state.playbackVolume * 100);
+  applyPlaybackVolume((currentPercent + (direction * 5)) / 100);
 }
 
 // Export range: the committed loop selection. No selection, nothing to export.
@@ -3989,7 +4088,12 @@ function bindLoopHandle(handle: HTMLElement, edge: 'end' | 'start', target: HTML
 }
 
 function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerToMainMessage): void {
-  if (loadToken !== state.loadToken) {
+  if (!isCurrentWorkerMessage(
+    loadToken,
+    state.loadToken,
+    state.spectrogramSessionRevision,
+    (message.body as { sessionVersion?: number } | undefined)?.sessionVersion,
+  )) {
     return;
   }
 
@@ -4128,7 +4232,12 @@ function handleWaveformSurfaceReady(): void {
 }
 
 function handleWaveformWorkerMessage(loadToken: number, message: WaveformWorkerToMainMessage): void {
-  if (loadToken !== state.loadToken) {
+  if (!isCurrentWorkerMessage(
+    loadToken,
+    state.loadToken,
+    state.waveformSessionRevision,
+    (message.body as { sessionVersion?: number } | undefined)?.sessionVersion,
+  )) {
     return;
   }
 
@@ -4372,9 +4481,13 @@ async function initializeDecodedPlayback(loadToken: number, payload: any, decode
 async function initializePlaybackFromPreparedData(
   loadToken: number,
   payload: any,
-  preparedPlaybackData: { monoSamples: Float32Array; playbackSession: PlaybackSession },
+  preparedPlaybackData: {
+    monoSamples: Float32Array;
+    playbackSession: PlaybackSession;
+    waveformSamples: Float32Array;
+  },
 ): Promise<void> {
-  const { monoSamples, playbackSession } = preparedPlaybackData;
+  const { monoSamples, playbackSession, waveformSamples } = preparedPlaybackData;
 
   // Refuse files beyond the analysis ceiling: holding per-channel PCM across the
   // transport + waveform + spectrogram workers would multiply into several GB
@@ -4425,10 +4538,9 @@ async function initializePlaybackFromPreparedData(
       sessionRevision: state.engineSessionRevision,
     },
   });
-  // Sets up the primary waveform lane (channel 0 in split mode, mono downmix
-  // otherwise) plus any per-channel satellite lanes. A copy is passed so the
-  // original mono buffer survives for the spectrogram session below.
-  void setupWaveformChannels(loadToken, monoSamples.slice(), playbackSession);
+  // Sets up the primary waveform lane with the worker-created fan-out buffer;
+  // the analysis copy remains available for the spectrogram session below.
+  void setupWaveformChannels(loadToken, waveformSamples, playbackSession);
 
   state.pendingAnalysisSession = {
     loadToken,
@@ -4475,12 +4587,12 @@ const {
   createPlaybackSessionFromPcmFallback,
   createMediaMetadataState,
   decodeAudioData,
-  decodeBrowserModuleScriptUri,
   decodeBrowserModuleWasmUri,
   decodeWorkerScriptUri,
   downmixPcm: downmixPcmInWorker,
   destroySession,
   embeddedMediaToolsGuidance: EMBEDDED_MEDIA_TOOLS_GUIDANCE,
+  fetchDecodeModuleWasmBytes,
   initializeDecodedPlayback,
   initializePlaybackFromPreparedData,
   initializeWaveformSurface,
@@ -4708,6 +4820,7 @@ function attachUiEvents(): void {
   // memory per session.
   window.addEventListener('pagehide', () => {
     destroySession();
+    disposePcmDownmixWorker();
     disposeEngineWorker();
     disposeAnalysisWorker();
     disposeWaveformWorker();
@@ -4741,7 +4854,13 @@ function attachUiEvents(): void {
       return;
     }
 
-    if (event.ctrlKey || event.metaKey || event.altKey || isTextEditableTarget(event.target)) {
+    if (
+      event.ctrlKey
+      || event.metaKey
+      || event.altKey
+      || isTextEditableTarget(event.target)
+      || isPlaybackRateUiTarget(event.target)
+    ) {
       return;
     }
 
@@ -4768,14 +4887,14 @@ function attachUiEvents(): void {
 
     if (event.code === 'ArrowUp') {
       handleGlobalShortcut(event, () => {
-        stepPlaybackRateSelection(1);
+        stepPlaybackVolume(1);
       });
       return;
     }
 
     if (event.code === 'ArrowDown') {
       handleGlobalShortcut(event, () => {
-        stepPlaybackRateSelection(-1);
+        stepPlaybackVolume(-1);
       });
       return;
     }
@@ -5107,10 +5226,7 @@ function attachUiEvents(): void {
     });
   });
   elements.volumeSlider.addEventListener('input', () => {
-    state.playbackVolume = normalizePlaybackVolume(elements.volumeSlider.value);
-    renderPlaybackVolumeUi();
-    state.audioTransport?.setVolume(state.playbackVolume);
-    schedulePersistPlaybackVolume();
+    applyPlaybackVolume(elements.volumeSlider.value);
   });
   for (const type of ['pointerenter', 'pointerleave', 'focus', 'blur']) {
     elements.volumeSlider.addEventListener(type, renderPlaybackVolumeUi);

@@ -1,4 +1,5 @@
 import { createAudioTransport } from '../../transport/audioTransport';
+import { selectDecodeFallbackTarget } from './decodeStrategy';
 import {
   createMediaMetadataState,
 } from './media';
@@ -20,12 +21,12 @@ interface AudioscopeLoadControllerDeps {
   createPlaybackSessionFromPcmFallback: typeof createPlaybackSessionFromPcmFallback;
   createMediaMetadataState: typeof createMediaMetadataState;
   decodeAudioData: (arrayBuffer: ArrayBuffer) => Promise<AudioBuffer>;
-  decodeBrowserModuleScriptUri?: string;
   decodeBrowserModuleWasmUri?: string;
   decodeWorkerScriptUri?: string;
   downmixPcm: DownmixPcm;
   destroySession: () => void;
   embeddedMediaToolsGuidance: string;
+  fetchDecodeModuleWasmBytes: () => Promise<ArrayBuffer>;
   initializeDecodedPlayback: (loadToken: number, payload: any, decodedAudio: AudioBuffer) => Promise<void>;
   initializePlaybackFromPreparedData: (loadToken: number, payload: any, preparedPlaybackData: any) => Promise<void>;
   initializeWaveformSurface: (loadToken: number) => Promise<void>;
@@ -54,12 +55,12 @@ export function createAudioscopeLoadController({
   createPlaybackSessionFromPcmFallback,
   createMediaMetadataState,
   decodeAudioData,
-  decodeBrowserModuleScriptUri,
   decodeBrowserModuleWasmUri,
   decodeWorkerScriptUri,
   downmixPcm,
   destroySession,
   embeddedMediaToolsGuidance,
+  fetchDecodeModuleWasmBytes,
   initializeDecodedPlayback,
   initializePlaybackFromPreparedData,
   initializeWaveformSurface,
@@ -114,7 +115,7 @@ export function createAudioscopeLoadController({
       return false;
     }
 
-    if (!decodeWorkerScriptUri || !decodeBrowserModuleScriptUri || !decodeBrowserModuleWasmUri) {
+    if (!decodeWorkerScriptUri || !decodeBrowserModuleWasmUri) {
       return false;
     }
 
@@ -333,11 +334,15 @@ export function createAudioscopeLoadController({
       return state.decodeWorker;
     }
 
-    if (!decodeWorkerScriptUri || !decodeBrowserModuleScriptUri || !decodeBrowserModuleWasmUri) {
+    if (!decodeWorkerScriptUri || !decodeBrowserModuleWasmUri) {
       return null;
     }
 
-    const worker = await createModuleWorker(decodeWorkerScriptUri, 'decodeWorkerBootstrapUrl');
+    const [worker, cachedWasmBytes] = await Promise.all([
+      createModuleWorker(decodeWorkerScriptUri, 'decodeWorkerBootstrapUrl'),
+      fetchDecodeModuleWasmBytes(),
+    ]);
+    const wasmBytes = cachedWasmBytes.slice(0);
     state.decodeWorker = worker;
     state.decodeWorkerReady = false;
     state.decodeWorkerPrewarmed = false;
@@ -359,10 +364,9 @@ export function createAudioscopeLoadController({
     worker.postMessage({
       type: 'bootstrapRuntime',
       body: {
-        moduleUrl: decodeBrowserModuleScriptUri,
-        wasmUrl: decodeBrowserModuleWasmUri,
+        wasmBytes,
       },
-    });
+    }, [wasmBytes]);
 
     return worker;
   }
@@ -466,7 +470,9 @@ export function createAudioscopeLoadController({
       return Promise.reject(new Error(state.decodeFallbackError.message));
     }
 
-    if (state.externalTools.resolved && !state.externalTools.canDecodeFallback) {
+    const canUseWebviewDecode = sourceBytes instanceof ArrayBuffer
+      && shouldPreferEmbeddedDecode(payload);
+    if (state.externalTools.resolved && !state.externalTools.canDecodeFallback && !canUseWebviewDecode) {
       return Promise.reject(new Error(state.externalTools.guidance || embeddedMediaToolsGuidance));
     }
 
@@ -510,8 +516,9 @@ export function createAudioscopeLoadController({
     });
     renderMediaMetadata();
 
-    const preferHostDecode = Boolean(payload?.fileBacked)
-      && (!state.externalTools.resolved || state.externalTools.canDecodeFallback);
+    const decodeTarget = selectDecodeFallbackTarget({
+      sourceBytes,
+    });
 
     void createDecodeWorker()
       .then((worker) => {
@@ -519,7 +526,7 @@ export function createAudioscopeLoadController({
           return;
         }
 
-        if (!preferHostDecode && worker && sourceBytes instanceof ArrayBuffer) {
+        if (decodeTarget === 'webview-worker' && worker && sourceBytes instanceof ArrayBuffer) {
           worker.postMessage({
             type: 'decodeAudioData',
             body: {

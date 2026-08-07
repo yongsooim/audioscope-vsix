@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import * as vscode from 'vscode';
 
 const EMBEDDED_TOOL_DIRECTORY = path.resolve(__dirname, '..', 'dist', 'embedded-tools');
@@ -43,40 +45,6 @@ require(toolPath);
 `;
 
 type EmbeddedToolName = 'ffmpeg' | 'ffprobe';
-
-interface DirectDecodeModule {
-  FS: {
-    unlink(path: string): void;
-    writeFile(path: string, data: Uint8Array | Buffer): void;
-  };
-  HEAPU8: Uint8Array;
-  _free(pointer: number): void;
-  _malloc(byteLength: number): number;
-  _wave_clear_decode_output(): void;
-  _wave_decode_file(pathPointer: number): number;
-  _wave_measure_loudness_from_decoded_output(): number;
-  _wave_get_last_error_length(): number;
-  _wave_get_last_error_ptr(): number;
-  _wave_get_output_channel_byte_length(): number;
-  _wave_get_output_channel_count(): number;
-  _wave_get_output_channel_layout_length(): number;
-  _wave_get_output_channel_layout_ptr(): number;
-  _wave_get_output_channel_ptr(channelIndex: number): number;
-  _wave_get_output_frame_count(): number;
-  _wave_get_loudness_integrated_lufs(): number;
-  _wave_get_loudness_integrated_threshold_lufs(): number;
-  _wave_get_loudness_lra_high_lufs(): number;
-  _wave_get_loudness_lra_low_lufs(): number;
-  _wave_get_loudness_range_lu(): number;
-  _wave_get_loudness_range_threshold_lufs(): number;
-  _wave_get_loudness_sample_peak_dbfs(): number;
-  _wave_get_loudness_true_peak_dbtp(): number;
-  _wave_get_output_sample_rate(): number;
-}
-
-interface DirectDecodeModuleFactory {
-  (options?: Record<string, unknown>): Promise<DirectDecodeModule>;
-}
 
 interface EmbeddedToolManifest {
   builtAt?: string;
@@ -125,13 +93,11 @@ export interface EmbeddedLoudnessSummaryPayload {
 
 const DIRECT_DECODE_MODULE_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffdecode_module.js');
 const DIRECT_DECODE_WASM_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffdecode_module.wasm');
+const DIRECT_DECODE_WORKER_PATH = path.join(__dirname, 'embeddedDecodeWorkerThread.js');
 const LOUDNESS_EXECUTABLE_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffloudness');
 const LOUDNESS_EXECUTABLE_WASM_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffloudness.wasm');
 
-let directDecodeModulePromise: Promise<DirectDecodeModule> | null = null;
-let directDecodeQueue = Promise.resolve();
 let manifestCache: EmbeddedToolManifest | null | undefined;
-let directDecodeLogMessages: string[] = [];
 
 function getEmbeddedScriptPath(toolName: EmbeddedToolName): string {
   return path.join(EMBEDDED_TOOL_DIRECTORY, toolName);
@@ -237,38 +203,255 @@ function getExecErrorMessage(error: unknown): string {
 }
 
 function hasDirectDecodeModule(): boolean {
-  return fs.existsSync(DIRECT_DECODE_MODULE_PATH) && fs.existsSync(DIRECT_DECODE_WASM_PATH);
+  return fs.existsSync(DIRECT_DECODE_MODULE_PATH)
+    && fs.existsSync(DIRECT_DECODE_WASM_PATH)
+    && fs.existsSync(DIRECT_DECODE_WORKER_PATH);
 }
 
 function hasLoudnessExecutable(): boolean {
   return fs.existsSync(LOUDNESS_EXECUTABLE_PATH) && fs.existsSync(LOUDNESS_EXECUTABLE_WASM_PATH);
 }
 
-async function loadDirectDecodeModule(): Promise<DirectDecodeModule> {
-  if (!directDecodeModulePromise) {
-    const requiredModule = require(DIRECT_DECODE_MODULE_PATH) as DirectDecodeModuleFactory | { default?: DirectDecodeModuleFactory };
-    const factory = typeof requiredModule === 'function'
-      ? requiredModule
-      : requiredModule.default;
+interface DecodeWorkerMessage {
+  body?: Record<string, unknown>;
+  requestId?: number;
+  type?: 'decodeReady' | 'loudnessReady' | 'runtimeReady' | 'taskError';
+}
 
-    if (typeof factory !== 'function') {
-      throw new Error('Embedded direct FFmpeg decode module factory is unavailable.');
-    }
+interface DecodeWorkerInput {
+  fileExtension: string;
+  hostPath: string | null;
+  inputBytes: ArrayBuffer | null;
+}
 
-    directDecodeModulePromise = factory({
-      locateFile: (fileName: string) => path.join(EMBEDDED_TOOL_DIRECTORY, fileName),
-      noInitialRun: true,
-      print: () => {},
-      printErr: (message: unknown) => {
-        directDecodeLogMessages.push(String(message ?? ''));
-      },
-    }).catch((error) => {
-      directDecodeModulePromise = null;
-      throw error;
+interface PendingDecodeWorkerRequest {
+  complete(): void;
+  loudnessPromise: Promise<EmbeddedLoudnessSummaryPayload>;
+  pipelineResolved: boolean;
+  rejectLoudness(error: unknown): void;
+  rejectPipeline(error: unknown): void;
+  resolveLoudness(value: EmbeddedLoudnessSummaryPayload): void;
+  resolvePipeline(value: EmbeddedPcmDecodeLoudnessPipelinePayload): void;
+}
+
+let nextDecodeWorkerRequestId = 1;
+
+class BackgroundDecodeWorker {
+  private pendingRequests = new Map<number, PendingDecodeWorkerRequest>();
+  private queueTail = Promise.resolve();
+  private readyPromise: Promise<void> | null = null;
+  private readyReject: ((error: unknown) => void) | null = null;
+  private readyRequestId = 0;
+  private readyResolve: (() => void) | null = null;
+  private worker: Worker | null = null;
+  public queuedTaskCount = 0;
+
+  public prewarm(): Promise<void> {
+    return this.ensureWorker().then(() => {
+      this.unrefIfIdle();
     });
   }
 
-  return directDecodeModulePromise;
+  public enqueue(input: DecodeWorkerInput): Promise<EmbeddedPcmDecodeLoudnessPipelinePayload> {
+    let resolvePipeline!: (value: EmbeddedPcmDecodeLoudnessPipelinePayload) => void;
+    let rejectPipeline!: (error: unknown) => void;
+    let resolveLoudness!: (value: EmbeddedLoudnessSummaryPayload) => void;
+    let rejectLoudness!: (error: unknown) => void;
+    const loudnessPromise = new Promise<EmbeddedLoudnessSummaryPayload>((resolve, reject) => {
+      resolveLoudness = resolve;
+      rejectLoudness = reject;
+    });
+    const pipelinePromise = new Promise<EmbeddedPcmDecodeLoudnessPipelinePayload>((resolve, reject) => {
+      resolvePipeline = resolve;
+      rejectPipeline = reject;
+    });
+
+    this.queuedTaskCount += 1;
+    this.worker?.ref();
+    const queued = this.queueTail.then(async () => {
+      try {
+        await this.ensureWorker();
+        await this.dispatch(input, {
+          complete: () => {},
+          loudnessPromise,
+          pipelineResolved: false,
+          rejectLoudness,
+          rejectPipeline,
+          resolveLoudness,
+          resolvePipeline,
+        });
+      } catch (error) {
+        rejectPipeline(error);
+      } finally {
+        this.queuedTaskCount -= 1;
+        this.unrefIfIdle();
+      }
+    });
+    this.queueTail = queued.catch(() => {});
+
+    return pipelinePromise;
+  }
+
+  private ensureWorker(): Promise<void> {
+    if (this.readyPromise) {
+      return this.readyPromise;
+    }
+
+    const worker = new Worker(DIRECT_DECODE_WORKER_PATH);
+    this.worker = worker;
+    this.readyRequestId = nextDecodeWorkerRequestId++;
+    this.readyPromise = new Promise<void>((resolve, reject) => {
+      this.readyResolve = resolve;
+      this.readyReject = reject;
+    });
+    worker.on('message', (message: DecodeWorkerMessage) => this.handleMessage(message));
+    worker.on('error', (error) => this.handleWorkerFailure(worker, error));
+    worker.on('exit', (code) => {
+      if (this.worker === worker) {
+        this.handleWorkerFailure(worker, new Error(`Embedded decode worker exited with code ${code}.`));
+      }
+    });
+    worker.postMessage({
+      type: 'prewarm',
+      requestId: this.readyRequestId,
+      body: {
+        modulePath: DIRECT_DECODE_MODULE_PATH,
+        wasmPath: DIRECT_DECODE_WASM_PATH,
+      },
+    });
+    return this.readyPromise;
+  }
+
+  private unrefIfIdle(): void {
+    if (this.queuedTaskCount === 0) {
+      this.worker?.unref();
+    }
+  }
+
+  private dispatch(input: DecodeWorkerInput, callbacks: PendingDecodeWorkerRequest): Promise<void> {
+    const worker = this.worker;
+    if (!worker) {
+      return Promise.reject(new Error('Embedded decode worker is unavailable.'));
+    }
+
+    const requestId = nextDecodeWorkerRequestId++;
+    return new Promise<void>((complete) => {
+      callbacks.complete = complete;
+      this.pendingRequests.set(requestId, callbacks);
+      try {
+        const transferList = input.inputBytes ? [input.inputBytes] : [];
+        worker.postMessage({
+          type: 'decode',
+          requestId,
+          body: {
+            ...input,
+            modulePath: DIRECT_DECODE_MODULE_PATH,
+            wasmPath: DIRECT_DECODE_WASM_PATH,
+          },
+        }, transferList);
+      } catch (error) {
+        this.pendingRequests.delete(requestId);
+        complete();
+        callbacks.rejectPipeline(error);
+      }
+    });
+  }
+
+  private handleMessage(message: DecodeWorkerMessage): void {
+    const requestId = Number(message?.requestId) || 0;
+    if (requestId === this.readyRequestId) {
+      if (message.type === 'runtimeReady') {
+        this.readyResolve?.();
+      } else if (message.type === 'taskError') {
+        this.readyReject?.(new Error(String(message.body?.message || 'Embedded decode worker failed to initialize.')));
+        this.resetWorker();
+      }
+      this.readyResolve = null;
+      this.readyReject = null;
+      return;
+    }
+
+    const pending = this.pendingRequests.get(requestId);
+    if (!pending) {
+      return;
+    }
+
+    if (message.type === 'decodeReady') {
+      const channelBuffers = Array.isArray(message.body?.channelBuffers)
+        ? message.body.channelBuffers.filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer)
+        : [];
+      const decode: EmbeddedPcmDecodePayload = {
+        byteLength: Number(message.body?.byteLength) || 0,
+        channelBuffers,
+        frameCount: Number(message.body?.frameCount) || 0,
+        numberOfChannels: Number(message.body?.numberOfChannels) || channelBuffers.length,
+        sampleRate: Number(message.body?.sampleRate) || 0,
+        source: 'ffmpeg',
+      };
+      pending.pipelineResolved = true;
+      pending.resolvePipeline({ decode, loudnessPromise: pending.loudnessPromise });
+      return;
+    }
+
+    if (message.type === 'loudnessReady') {
+      pending.resolveLoudness(message.body as unknown as EmbeddedLoudnessSummaryPayload);
+      this.finishRequest(requestId, pending);
+      return;
+    }
+
+    if (message.type === 'taskError') {
+      const error = new Error(String(message.body?.message || 'Embedded decode worker failed.'));
+      if (pending.pipelineResolved) {
+        pending.rejectLoudness(error);
+      } else {
+        pending.rejectPipeline(error);
+      }
+      this.finishRequest(requestId, pending);
+    }
+  }
+
+  private finishRequest(requestId: number, pending: PendingDecodeWorkerRequest): void {
+    this.pendingRequests.delete(requestId);
+    pending.complete();
+  }
+
+  private handleWorkerFailure(worker: Worker, error: unknown): void {
+    if (this.worker !== worker) {
+      return;
+    }
+
+    this.readyReject?.(error);
+    for (const [requestId, pending] of this.pendingRequests) {
+      if (pending.pipelineResolved) {
+        pending.rejectLoudness(error);
+      } else {
+        pending.rejectPipeline(error);
+      }
+      this.finishRequest(requestId, pending);
+    }
+    this.resetWorker();
+  }
+
+  private resetWorker(): void {
+    const worker = this.worker;
+    this.worker = null;
+    this.readyPromise = null;
+    this.readyRequestId = 0;
+    this.readyResolve = null;
+    this.readyReject = null;
+    void worker?.terminate();
+  }
+}
+
+const decodeWorkerPool = Array.from(
+  { length: Math.max(1, Math.min(2, os.availableParallelism() - 1)) },
+  () => new BackgroundDecodeWorker(),
+);
+
+function selectDecodeWorker(): BackgroundDecodeWorker {
+  return decodeWorkerPool.reduce((selected, candidate) => (
+    candidate.queuedTaskCount < selected.queuedTaskCount ? candidate : selected
+  ));
 }
 
 export async function prewarmEmbeddedDirectDecodeModule(): Promise<void> {
@@ -276,34 +459,7 @@ export async function prewarmEmbeddedDirectDecodeModule(): Promise<void> {
     return;
   }
 
-  await loadDirectDecodeModule();
-}
-
-function allocateUtf8(module: DirectDecodeModule, value: string): number {
-  const encoded = Buffer.from(`${value}\0`, 'utf8');
-  const pointer = module._malloc(encoded.byteLength);
-  module.HEAPU8.set(encoded, pointer);
-  return pointer;
-}
-
-function readUtf8(module: DirectDecodeModule, pointer: number, byteLength: number): string {
-  if (!pointer || byteLength <= 0) {
-    return '';
-  }
-
-  return Buffer.from(module.HEAPU8.slice(pointer, pointer + byteLength)).toString('utf8').replace(/\0+$/u, '');
-}
-
-function enqueueDirectDecodeTask<T>(task: () => Promise<T>): Promise<T> {
-  const nextTask = directDecodeQueue.then(task, task);
-  directDecodeQueue = nextTask.then(() => undefined, () => undefined);
-  return nextTask;
-}
-
-function yieldToHostEventLoop(): Promise<void> {
-  return new Promise((resolve) => {
-    setImmediate(resolve);
-  });
+  await Promise.all(decodeWorkerPool.map((worker) => worker.prewarm()));
 }
 
 function copyToArrayBuffer(bytes: Uint8Array | Buffer): ArrayBuffer {
@@ -567,142 +723,18 @@ export async function runEmbeddedFfmpegMeasureLoudness(
   }
 }
 
-export function runEmbeddedFfmpegDecodeLoudnessPipeline(
+export async function runEmbeddedFfmpegDecodeLoudnessPipeline(
   resource: vscode.Uri,
 ): Promise<EmbeddedPcmDecodeLoudnessPipelinePayload> {
-  let resolvePipeline!: (value: EmbeddedPcmDecodeLoudnessPipelinePayload) => void;
-  let rejectPipeline!: (error: unknown) => void;
-  const pipelinePromise = new Promise<EmbeddedPcmDecodeLoudnessPipelinePayload>((resolve, reject) => {
-    resolvePipeline = resolve;
-    rejectPipeline = reject;
-  });
-
-  void enqueueDirectDecodeTask(async () => {
-    let rejectLoudness!: (error: unknown) => void;
-    let pipelineResolved = false;
-
-    if (!hasDirectDecodeModule()) {
-      rejectPipeline(new Error('Direct FFmpeg decode module is unavailable.'));
-      return;
-    }
-
-    const module = await loadDirectDecodeModule();
-    const inputBytes = await readResourceBytes(resource);
-    const virtualInputPath = `/input${path.extname(resource.path) || '.bin'}`;
-    directDecodeLogMessages = [];
-
-    try {
-      module.FS.writeFile(virtualInputPath, inputBytes);
-      const pathPointer = allocateUtf8(module, virtualInputPath);
-      const decodeResult = module._wave_decode_file(pathPointer);
-      module._free(pathPointer);
-
-      if (decodeResult !== 0) {
-        throw new Error(readUtf8(
-          module,
-          module._wave_get_last_error_ptr(),
-          module._wave_get_last_error_length(),
-        ) || 'Direct FFmpeg decode failed.');
-      }
-
-      const decode = readDirectDecodePayload(module);
-      let resolveLoudness!: (value: EmbeddedLoudnessSummaryPayload) => void;
-      const loudnessPromise = new Promise<EmbeddedLoudnessSummaryPayload>((resolve, reject) => {
-        resolveLoudness = resolve;
-        rejectLoudness = reject;
-      });
-
-      resolvePipeline({ decode, loudnessPromise });
-      pipelineResolved = true;
-
-      // Let the decode result reach the webview first. Loudness then runs against
-      // the retained PCM while waveform/analysis setup proceeds in parallel.
-      await yieldToHostEventLoop();
-      const loudnessResult = module._wave_measure_loudness_from_decoded_output();
-
-      if (loudnessResult !== 0) {
-        throw new Error(readUtf8(
-          module,
-          module._wave_get_last_error_ptr(),
-          module._wave_get_last_error_length(),
-        ) || 'Direct FFmpeg loudness analysis failed.');
-      }
-
-      resolveLoudness(readDirectDecodeLoudnessSummary(module, decode.numberOfChannels));
-    } catch (error) {
-      if (pipelineResolved) {
-        rejectLoudness(error);
-      } else {
-        rejectPipeline(error);
-      }
-    } finally {
-      try {
-        module._wave_clear_decode_output();
-      } catch {}
-      try {
-        module.FS.unlink(virtualInputPath);
-      } catch {}
-    }
-  }).catch(rejectPipeline);
-
-  return pipelinePromise;
-}
-
-function readDirectDecodePayload(module: DirectDecodeModule): EmbeddedPcmDecodePayload {
-  const channelCount = Math.max(0, module._wave_get_output_channel_count());
-  const frameCount = Math.max(0, module._wave_get_output_frame_count());
-  const sampleRate = Math.max(1, module._wave_get_output_sample_rate());
-  const channelByteLength = Math.max(0, module._wave_get_output_channel_byte_length());
-  const channelBuffers: ArrayBuffer[] = [];
-
-  for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
-    const channelPointer = module._wave_get_output_channel_ptr(channelIndex);
-    if (!channelPointer || channelByteLength <= 0) {
-      throw new Error(`Embedded direct FFmpeg decode returned an invalid channel buffer at index ${channelIndex}.`);
-    }
-
-    const copiedBytes = module.HEAPU8.slice(channelPointer, channelPointer + channelByteLength);
-    channelBuffers.push(copiedBytes.buffer);
+  if (!hasDirectDecodeModule()) {
+    throw new Error('Background FFmpeg decode worker is unavailable.');
   }
 
-  return {
-    byteLength: channelBuffers.reduce((total, buffer) => total + buffer.byteLength, 0),
-    channelBuffers,
-    frameCount,
-    numberOfChannels: channelCount,
-    sampleRate,
-    source: 'ffmpeg',
-  };
-}
-
-function normalizeDirectDecodeLoudnessValue(value: number | null | undefined): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function readDirectDecodeLoudnessSummary(
-  module: DirectDecodeModule,
-  channelCount: number,
-): EmbeddedLoudnessSummaryPayload {
-  const channelLayoutPointer = module._wave_get_output_channel_layout_ptr();
-  const channelLayoutLength = module._wave_get_output_channel_layout_length();
-  const channelLayout = channelLayoutPointer && channelLayoutLength > 0
-    ? readUtf8(module, channelLayoutPointer, channelLayoutLength)
-    : '';
-
-  const thresholdMatches = [...directDecodeLogMessages.join('\n').matchAll(/Threshold:\s+(-?\d+(?:\.\d+)?) LUFS/gu)];
-  const integratedThresholdLufs = thresholdMatches[0] ? Number(thresholdMatches[0][1]) : null;
-  const rangeThresholdLufs = thresholdMatches[1] ? Number(thresholdMatches[1][1]) : null;
-
-  return {
-    channelCount: channelCount > 0 ? channelCount : null,
-    channelLayout: channelLayout.trim().length > 0 ? channelLayout.trim() : null,
-    integratedLufs: normalizeDirectDecodeLoudnessValue(module._wave_get_loudness_integrated_lufs()),
-    integratedThresholdLufs: normalizeDirectDecodeLoudnessValue(integratedThresholdLufs),
-    loudnessRangeLu: normalizeDirectDecodeLoudnessValue(module._wave_get_loudness_range_lu()),
-    lraHighLufs: normalizeDirectDecodeLoudnessValue(module._wave_get_loudness_lra_high_lufs()),
-    lraLowLufs: normalizeDirectDecodeLoudnessValue(module._wave_get_loudness_lra_low_lufs()),
-    rangeThresholdLufs: normalizeDirectDecodeLoudnessValue(rangeThresholdLufs),
-    samplePeakDbfs: normalizeDirectDecodeLoudnessValue(module._wave_get_loudness_sample_peak_dbfs()),
-    truePeakDbtp: normalizeDirectDecodeLoudnessValue(module._wave_get_loudness_true_peak_dbtp()),
-  };
+  const hostPath = await getCliReadablePath(resource);
+  const inputBytes = hostPath ? null : copyToArrayBuffer(await readResourceBytes(resource));
+  return selectDecodeWorker().enqueue({
+    fileExtension: path.extname(resource.path).replace(/^\./u, '') || 'bin',
+    hostPath,
+    inputBytes,
+  });
 }

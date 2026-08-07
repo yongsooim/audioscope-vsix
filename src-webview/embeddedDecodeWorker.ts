@@ -1,6 +1,7 @@
+import createDecodeModule from '../dist/embedded-tools/ffdecode_browser_module.js';
+
 let decodeModulePromise = null;
-let decodeModuleScriptUrl = '';
-let decodeModuleWasmUrl = '';
+let decodeModuleWasmBytes = null;
 let decodeQueue = Promise.resolve();
 
 function readErrorMessage(module) {
@@ -50,27 +51,19 @@ function readLoudnessSummary(module, numberOfChannels) {
 }
 
 async function ensureDecodeModule() {
-  if (!decodeModuleScriptUrl || !decodeModuleWasmUrl) {
-    throw new Error('Embedded decode worker module URLs are missing.');
+  if (!(decodeModuleWasmBytes instanceof ArrayBuffer)) {
+    throw new Error('Embedded decode worker WASM bytes are missing.');
   }
 
   if (!decodeModulePromise) {
-    decodeModulePromise = import(decodeModuleScriptUrl)
-      .then(async (moduleRecord) => {
-        const createModule = typeof moduleRecord?.default === 'function'
-          ? moduleRecord.default
-          : null;
-
-        if (!createModule) {
-          throw new Error('Embedded decode worker module factory is unavailable.');
-        }
-
-        const module = await createModule({
-          locateFile: () => decodeModuleWasmUrl,
-          noInitialRun: true,
-        });
-        return module;
-      })
+    const wasmBinary = new Uint8Array(decodeModuleWasmBytes);
+    decodeModulePromise = Promise.resolve()
+      .then(() => createDecodeModule({
+        noInitialRun: true,
+        print: () => {},
+        printErr: () => {},
+        wasmBinary,
+      }))
       .catch((error) => {
         decodeModulePromise = null;
         throw error;
@@ -86,8 +79,9 @@ self.onmessage = async (event) => {
   try {
     switch (message.type) {
       case 'bootstrapRuntime':
-        decodeModuleScriptUrl = typeof message.body?.moduleUrl === 'string' ? message.body.moduleUrl : '';
-        decodeModuleWasmUrl = typeof message.body?.wasmUrl === 'string' ? message.body.wasmUrl : '';
+        decodeModuleWasmBytes = message.body?.wasmBytes instanceof ArrayBuffer
+          ? message.body.wasmBytes
+          : null;
         self.postMessage({
           type: 'runtimeReady',
         });
@@ -110,8 +104,7 @@ self.onmessage = async (event) => {
         return;
       case 'dispose':
         decodeModulePromise = null;
-        decodeModuleScriptUrl = '';
-        decodeModuleWasmUrl = '';
+        decodeModuleWasmBytes = null;
         return;
       default:
         return;

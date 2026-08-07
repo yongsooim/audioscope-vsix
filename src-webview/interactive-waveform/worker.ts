@@ -416,6 +416,7 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
       runtimeVariant: analysisState.runtimeVariant,
       sampleCount,
       sampleRate,
+      sessionVersion: analysisState.attachedSessionVersion,
     },
   });
 }
@@ -425,6 +426,14 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
 // quickly. Coarser levels finish last, refining repeated renders/zoom.
 const WAVEFORM_PYRAMID_STEP_BLOCKS = 8192;
 let waveformPyramidBuildActive = false;
+let waveformPyramidRequestedSessionVersion = -1;
+
+function postWaveformPyramidReady(): void {
+  self.postMessage({
+    type: 'waveformPyramidReady',
+    body: { sessionVersion: analysisState.attachedSessionVersion },
+  });
+}
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => {
@@ -436,8 +445,9 @@ async function buildWaveformPyramidProgressive(runtime: WaveCoreRuntime): Promis
   if (!analysisState.initialized) {
     return;
   }
+  waveformPyramidRequestedSessionVersion = analysisState.attachedSessionVersion;
   if (analysisState.waveformBuilt) {
-    self.postMessage({ type: 'waveformPyramidReady' });
+    postWaveformPyramidReady();
     return;
   }
   if (waveformPyramidBuildActive) {
@@ -450,7 +460,7 @@ async function buildWaveformPyramidProgressive(runtime: WaveCoreRuntime): Promis
     const levelCount = runtime.module._wave_begin_waveform_pyramid_build();
     if (levelCount <= 0) {
       analysisState.waveformBuilt = true;
-      self.postMessage({ type: 'waveformPyramidReady' });
+      postWaveformPyramidReady();
       return;
     }
 
@@ -468,11 +478,19 @@ async function buildWaveformPyramidProgressive(runtime: WaveCoreRuntime): Promis
 
     analysisState.waveformBuilt = true;
     // One final render now that the full pyramid is available (fast path).
-    self.postMessage({ type: 'waveformPyramidReady' });
+    postWaveformPyramidReady();
   } catch (error) {
     postError(error);
   } finally {
     waveformPyramidBuildActive = false;
+    if (
+      analysisState.initialized
+      && !analysisState.waveformBuilt
+      && buildToken !== waveformPyramidRequestedSessionVersion
+      && waveformPyramidRequestedSessionVersion === analysisState.attachedSessionVersion
+    ) {
+      void buildWaveformPyramidProgressive(runtime);
+    }
   }
 }
 async function pumpRenderLoop() {
@@ -650,7 +668,10 @@ function getPathPointsPeak(pathPoints: Float32Array): number {
 function postWaveformPresented(body: WaveformPresentedBody): void {
   self.postMessage({
     type: 'waveformPresented',
-    body,
+    body: {
+      ...body,
+      sessionVersion: analysisState.attachedSessionVersion,
+    },
   });
 }
 
@@ -725,6 +746,7 @@ function disposeSession(runtime: WaveCoreRuntime) {
   }
 
   analysisState = createEmptyAnalysisState();
+  waveformPyramidRequestedSessionVersion = -1;
 }
 
 let pendingWasmBytes: WaveCoreWasmBytes | null = null;
@@ -746,7 +768,10 @@ function postError(error: unknown): void {
 
   self.postMessage({
     type: 'error',
-    body: { message: text },
+    body: {
+      message: text,
+      sessionVersion: analysisState.attachedSessionVersion,
+    },
   });
 }
 

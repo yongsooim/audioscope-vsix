@@ -4,34 +4,34 @@
   --panel: rgba(7, 11, 22, 0.96);
   --fg: #e2ecff;
   --fg-muted: rgba(180, 196, 224, 0.78);
-  --border: rgba(116, 143, 189, 0.18);
+  --border: rgba(116, 143, 189, 0.3);
   --accent: #4f8cff;
   --accent-strong: #3b82f6;
   --accent-warm: #f97316;
   --status-bg: rgba(5, 9, 18, 0.94);
   --status-error: #f87171;
   --wave-surface: #020617;
-  --wave-surface-border: rgba(93, 122, 167, 0.22);
+  --wave-surface-border: rgba(93, 122, 167, 0.34);
   --wave-track: rgba(12, 19, 36, 0.96);
   --spectrogram-surface-top: #161126;
   --spectrogram-surface-mid: #0e0c1c;
   --spectrogram-surface-bottom: #04050c;
   --spectrogram-axis-bg: rgba(7, 8, 18, 0.04);
-  --spectrogram-axis-border: rgba(179, 136, 255, 0.14);
+  --spectrogram-axis-border: rgba(179, 136, 255, 0.28);
   --spectrogram-guide: rgba(251, 146, 60, 0.12);
   --spectrogram-tick: rgba(255, 196, 136, 0.28);
   --spectrogram-label: rgba(255, 255, 255, 0.96);
   --overview-shell: linear-gradient(180deg, #08101d 0%, #050b16 100%);
   --overview-track: #18233c;
-  --overview-track-border: rgba(103, 129, 178, 0.22);
+  --overview-track-border: rgba(103, 129, 178, 0.34);
   --overview-thumb-start: #4f8cff;
   --overview-thumb-end: #2f6df3;
   --loop-accent: rgba(255, 223, 154, 0.8);
   --loop-accent-glow: rgba(251, 191, 36, 0.32);
   --selection-fill: rgba(96, 165, 250, 0.14);
-  --selection-border: rgba(191, 219, 254, 0.28);
+  --selection-border: rgba(191, 219, 254, 0.42);
   --cursor: rgba(191, 219, 254, 0.92);
-  --surface-inline-padding: 20px;
+  --surface-inline-padding: 10px;
   --viewport-splitter-size: 24px;
 
   /* Pro-audio chrome tokens. */
@@ -39,9 +39,9 @@
   --chrome-surface: rgba(11, 17, 31, 0.92);
   --chrome-surface-hover: rgba(20, 30, 52, 0.96);
   --chrome-surface-active: rgba(36, 56, 96, 0.96);
-  --chrome-border: rgba(255, 255, 255, 0.13);
-  --chrome-border-strong: rgba(255, 255, 255, 0.26);
-  --chrome-border-accent: rgba(125, 211, 252, 0.45);
+  --chrome-border: rgba(255, 255, 255, 0.23);
+  --chrome-border-strong: rgba(255, 255, 255, 0.4);
+  --chrome-border-accent: rgba(125, 211, 252, 0.62);
   --chrome-text: rgba(220, 232, 255, 0.92);
   --chrome-text-dim: rgba(160, 178, 212, 0.62);
   --chrome-text-strong: #f0f6ff;
@@ -158,7 +158,7 @@ body {
   padding: 10px 12px;
   overflow-x: hidden;
   overflow-y: scroll;
-  border: 1px solid rgba(191, 219, 254, 0.18);
+  border: 1px solid rgba(191, 219, 254, 0.32);
   border-radius: 12px;
   background: rgb(3, 6, 12);
   box-shadow:
@@ -255,7 +255,7 @@ body {
 .media-metadata-link {
   color: #93c5fd;
   text-decoration: none;
-  border-bottom: 1px solid rgba(147, 197, 253, 0.28);
+  border-bottom: 1px solid rgba(147, 197, 253, 0.42);
 }
 
 .media-metadata-link:hover {
@@ -352,7 +352,7 @@ body {
 }
 
 .wave-toolbar-pill-loop {
-  border-color: rgba(251, 191, 36, 0.28);
+  border-color: rgba(251, 191, 36, 0.42);
   color: var(--loop-accent);
   cursor: default;
   pointer-events: none;
@@ -640,13 +640,13 @@ body {
 }
 
 .wave-tool-button-quiet:not(:disabled) {
-  border-color: rgba(251, 191, 36, 0.32);
+  border-color: rgba(251, 191, 36, 0.46);
   background: var(--chrome-surface);
   color: var(--loop-accent);
 }
 
 .wave-tool-button-quiet:hover:not(:disabled) {
-  border-color: rgba(251, 191, 36, 0.55);
+  border-color: rgba(251, 191, 36, 0.68);
   background: var(--chrome-surface-hover);
   color: var(--chrome-text-strong);
 }
@@ -829,8 +829,8 @@ body {
   height: var(--viewport-splitter-size);
   margin: 0;
   overflow: hidden;
-  border-top: 1px solid rgba(116, 143, 189, 0.12);
-  border-bottom: 1px solid rgba(116, 143, 189, 0.12);
+  border-top: 1px solid rgba(116, 143, 189, 0.26);
+  border-bottom: 1px solid rgba(116, 143, 189, 0.26);
   cursor: row-resize;
   touch-action: none;
   -webkit-user-select: none;
@@ -1508,7 +1508,7 @@ body {
   z-index: 7;
   max-width: calc(100% - 24px);
   padding: 5px 8px;
-  border: 1px solid rgba(191, 219, 254, 0.14);
+  border: 1px solid rgba(191, 219, 254, 0.3);
   border-radius: 8px;
   background: rgba(5, 9, 18, 0.58);
   color: rgba(239, 246, 255, 0.96);
@@ -1585,7 +1585,7 @@ body {
   width: 100%;
   max-width: 100%;
   margin: 0 !important;
-  padding: 5px var(--surface-inline-padding) 5px !important;
+  padding: 3px var(--surface-inline-padding) !important;
   overflow: visible;
   border-top: 1px solid var(--chrome-border);
   background: var(--bg);
@@ -1614,7 +1614,7 @@ body {
 
 .transport-button {
   min-width: 38px;
-  padding: 5px 9px;
+  padding: 3px 9px;
   border: 1px solid var(--chrome-border);
   border-radius: var(--chrome-radius);
   background: var(--chrome-surface);
@@ -1640,7 +1640,7 @@ body {
 
 .play-toggle {
   min-width: 68px;
-  padding: 5px 14px;
+  padding: 3px 14px;
   border: 1px solid var(--chrome-border-accent);
   border-radius: var(--chrome-radius);
   background: #2f6df3;
@@ -1706,7 +1706,7 @@ body {
 
 .transport-volume-slider {
   width: 84px;
-  height: 22px;
+  height: 20px;
   margin: 0;
   appearance: none;
   background: transparent;
@@ -1750,7 +1750,7 @@ body {
 .transport-rate-button,
 .transport-rate-select {
   min-width: 64px;
-  padding: 5px 22px 5px 10px;
+  padding: 3px 22px 3px 10px;
   border: 1px solid var(--chrome-border);
   border-radius: var(--chrome-radius);
   background-color: var(--chrome-surface);
@@ -2062,7 +2062,7 @@ body {
   display: grid;
   gap: 2px;
   min-width: 88px;
-  padding: 4px 8px;
+  padding: 3px 8px;
   border: 1px solid var(--chrome-border);
   border-radius: var(--chrome-radius);
   background: var(--chrome-surface);

@@ -18,7 +18,6 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'interactiveWaveformWorker.js'));
     const decodeWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'embeddedDecodeWorker.js'));
     const pcmDownmixWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'pcmDownmixWorker.js'));
-    const decodeBrowserModuleUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_browser_module.js'));
     const decodeBrowserModuleWasmUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_module.wasm'));
     const audioTransportProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioTransportProcessor.js'));
     const stretchProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'src-webview', 'vendor', 'SignalsmithStretch.mjs'));
@@ -37,7 +36,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     <link rel="stylesheet" href="${styleUri}" />
     <title>audioscope</title>
   </head>
-  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-decode-module-src="${decodeBrowserModuleUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-pcm-downmix-worker-src="${pcmDownmixWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}" data-wasm-core-simd-src="${wasmCoreSimdUri}" data-wasm-core-fallback-src="${wasmCoreFallbackUri}">
+  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-pcm-downmix-worker-src="${pcmDownmixWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}" data-wasm-core-simd-src="${wasmCoreSimdUri}" data-wasm-core-fallback-src="${wasmCoreFallbackUri}">
     <main class="app-shell">
       <section id="audioscope-viewport" class="viewport" aria-label="audioscope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">
@@ -416,8 +415,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               aria-controls="playback-rate-menu"
               aria-expanded="false"
               aria-label="Playback speed"
-              aria-keyshortcuts="ArrowUp ArrowDown"
-              title="Adjust playback speed (Up/Down Arrow)"
+              title="Choose playback speed"
               disabled
             >1x</button>
             <select id="playback-rate-select" class="transport-rate-select" aria-label="Playback speed" disabled tabindex="-1">
@@ -441,7 +439,8 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             step="0.01"
             value="1"
             aria-label="Playback volume"
-            title="Volume 100%"
+            aria-keyshortcuts="ArrowUp ArrowDown"
+            title="Volume 100% (Up/Down Arrow)"
           />
         </div>
         <div id="time-readout" class="time-readout">0:00.00 / --:--.--</div>

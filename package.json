@@ -110,12 +110,12 @@
         },
         "audioscope.experimental.enableWebGpuRendering": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
           "tags": [
             "experimental"
           ],
-          "markdownDescription": "(Experimental) Render the spectrogram with WebGPU compute when available, falling back to the CPU/WASM path otherwise. WebGPU is several times faster but allocates a few hundred MB of GPU memory per session. Reopen audio files for changes to take effect."
+          "markdownDescription": "Automatically render analysis with WebGPU compute when validation succeeds, falling back to the CPU/WASM path otherwise. Disable this to reduce GPU memory usage. Reopen audio files for changes to take effect."
         },
         "audioscope.experimental.splitChannels": {
           "type": "boolean",
@@ -361,6 +361,7 @@
     "build:wasm-core": "tsx ./scripts/build-wasm.mts",
     "build:webview": "tsx ./scripts/build-webview.mts",
     "compile": "bun run clean && bun run build:embedded-media-tools && bun run build:wasm-core && bun run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
+    "test:performance": "tsx --test ./scripts/performance-regressions.test.mts",
     "watch": "tsc -w -p ./"
   },
   "devDependencies": {

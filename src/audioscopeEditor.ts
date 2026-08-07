@@ -25,7 +25,6 @@ import {
 import { DEFAULT_SPECTROGRAM_DEFAULTS } from './audioscope-editor/constants';
 import { AudioscopeDocument } from './audioscope-editor/document';
 import { evaluateAudioscopeTarget, getActiveResource } from './audioscope-editor/editorTarget';
-import { cloneDecodeFallbackPayload } from './audioscope-editor/payloadClone';
 import { normalizeSpectrogramDefaults } from './audioscope-editor/spectrogramDefaults';
 import { getAudioscopeWebviewHtml } from './audioscope-editor/webviewHtml';
 
@@ -295,7 +294,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
               }));
             await postIfAlive({
               type: 'decodeFallbackReady',
-              body: { ...cloneDecodeFallbackPayload(pipeline.decode), loadToken },
+              body: { ...pipeline.decode, loadToken },
             });
           } catch (error) {
             const toolStatus = await getExternalToolStatus(document.uri);
@@ -425,7 +424,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     );
     const enableWebGpuRendering = vscode.workspace
       .getConfiguration('audioscope', document.uri)
-      .get<boolean>('experimental.enableWebGpuRendering', false);
+      .get<boolean>('experimental.enableWebGpuRendering', true);
     const splitChannels = vscode.workspace
       .getConfiguration('audioscope', document.uri)
       .get<boolean>('experimental.splitChannels', false);

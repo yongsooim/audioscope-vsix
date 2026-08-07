@@ -2,6 +2,7 @@ interface DownmixRequestBody {
   channelBuffers?: ArrayBuffer[];
   channelCount?: number;
   maxTotalSamples?: number;
+  requestId?: number;
   sampleCount?: number;
 }
 
@@ -17,23 +18,35 @@ self.onmessage = (event: MessageEvent<{ body?: DownmixRequestBody; type?: string
   const channelCount = Math.max(1, Math.trunc(Number(body?.channelCount) || channelBuffers.length || 0));
   const sampleCount = Math.max(0, Math.trunc(Number(body?.sampleCount) || 0));
   const maxTotalSamples = Math.max(0, Math.trunc(Number(body?.maxTotalSamples) || 0));
+  const requestId = Math.max(0, Math.trunc(Number(body?.requestId) || 0));
 
   if (channelBuffers.length === 0) {
-    self.postMessage({ type: 'error', body: { message: 'PCM downmix worker received no channel buffers.' } });
+    self.postMessage({
+      type: 'error',
+      body: {
+        message: 'PCM downmix worker received no channel buffers.',
+        requestId,
+      },
+    });
     return;
   }
 
   const monoSamples = sampleCount <= 0 || sampleCount * channelCount > maxTotalSamples
     ? new Float32Array(0)
     : downmixToMono(channelBuffers, sampleCount, channelCount);
+  const analysisSamples = monoSamples.slice();
+  const waveformSamples = monoSamples.slice();
 
   self.postMessage({
     type: 'downmixReady',
     body: {
+      analysisBuffer: analysisSamples.buffer,
       channelBuffers,
       monoBuffer: monoSamples.buffer,
+      requestId,
+      waveformBuffer: waveformSamples.buffer,
     },
-  }, [...channelBuffers, monoSamples.buffer]);
+  }, [...channelBuffers, monoSamples.buffer, analysisSamples.buffer, waveformSamples.buffer]);
 };
 
 function downmixToMono(channelBuffers: ArrayBuffer[], sampleCount: number, channelCount: number): Float32Array {

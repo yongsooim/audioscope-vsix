@@ -8,8 +8,16 @@ import type { PlaybackSession } from '../../transport/audioTransport';
 export const MAX_TOTAL_ANALYSIS_SAMPLES = 600_000_000;
 
 export interface DownmixedPcm {
+  analysisBuffer: ArrayBuffer;
   channelBuffers: ArrayBuffer[];
   monoBuffer: ArrayBuffer;
+  waveformBuffer: ArrayBuffer;
+}
+
+export interface PreparedPlaybackAnalysisData {
+  monoSamples: Float32Array;
+  playbackSession: PlaybackSession;
+  waveformSamples: Float32Array;
 }
 
 export type DownmixPcm = (
@@ -21,7 +29,7 @@ export type DownmixPcm = (
 export async function createPlaybackAnalysisData(
   audioBuffer: AudioBuffer,
   downmixPcm: DownmixPcm,
-): Promise<{ monoSamples: Float32Array; playbackSession: PlaybackSession }> {
+): Promise<PreparedPlaybackAnalysisData> {
   const channelCount = Math.max(1, audioBuffer.numberOfChannels);
   const channelBuffers: ArrayBuffer[] = [];
 
@@ -41,7 +49,7 @@ export async function createPlaybackAnalysisData(
 export async function preparePlaybackAnalysisData(
   playbackSession: PlaybackSession,
   downmixPcm: DownmixPcm,
-): Promise<{ monoSamples: Float32Array; playbackSession: PlaybackSession }> {
+): Promise<PreparedPlaybackAnalysisData> {
   if (playbackSession.monoBuffer instanceof ArrayBuffer) {
     return createPlaybackAnalysisDataFromPlaybackSession(playbackSession);
   }
@@ -56,23 +64,27 @@ export async function preparePlaybackAnalysisData(
     ...playbackSession,
     channelBuffers: downmixed.channelBuffers,
     monoBuffer: downmixed.monoBuffer,
-  });
+  }, downmixed.analysisBuffer, downmixed.waveformBuffer);
 }
 
-export function createPlaybackAnalysisDataFromPlaybackSession(playbackSession: PlaybackSession): {
-  monoSamples: Float32Array;
-  playbackSession: PlaybackSession;
-} {
+export function createPlaybackAnalysisDataFromPlaybackSession(
+  playbackSession: PlaybackSession,
+  analysisBuffer?: ArrayBuffer,
+  waveformBuffer?: ArrayBuffer,
+): PreparedPlaybackAnalysisData {
   const monoBuffer = playbackSession.monoBuffer;
+  const createMonoCopy = (): Float32Array => monoBuffer instanceof ArrayBuffer
+    ? new Float32Array(monoBuffer.slice(0))
+    : new Float32Array(0);
 
   return {
-    // Keep the retained mono buffer available for channel-mode changes. The
-    // native ArrayBuffer copy is synchronous, but the per-sample mix now runs
-    // entirely in pcmDownmixWorker.
-    monoSamples: monoBuffer instanceof ArrayBuffer
-      ? new Float32Array(monoBuffer.slice(0))
-      : new Float32Array(0),
+    monoSamples: analysisBuffer instanceof ArrayBuffer
+      ? new Float32Array(analysisBuffer)
+      : createMonoCopy(),
     playbackSession,
+    waveformSamples: waveformBuffer instanceof ArrayBuffer
+      ? new Float32Array(waveformBuffer)
+      : createMonoCopy(),
   };
 }
 
