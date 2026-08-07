@@ -39,6 +39,7 @@ interface WaveformPresentedBody {
   columnCount: number;
   generation: number;
   height: number;
+  peak: number;
   viewEnd: number;
   viewStart: number;
   visibleSpan: number;
@@ -622,11 +623,28 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     columnCount,
     generation,
     height,
+    peak: getPathPointsPeak(pathPoints),
     viewEnd,
     viewStart,
     visibleSpan,
     width,
   });
+}
+
+// Loudest |sample| in the points just drawn — feeds the toolbar's amplitude Fit.
+// Points are (sampleOffset, value) pairs; a negative offset means "unused slot".
+function getPathPointsPeak(pathPoints: Float32Array): number {
+  let peak = 0;
+  for (let index = 0; index + 1 < pathPoints.length; index += 2) {
+    if (!(pathPoints[index] >= 0)) {
+      continue;
+    }
+    const magnitude = Math.abs(pathPoints[index + 1]);
+    if (magnitude > peak) {
+      peak = magnitude;
+    }
+  }
+  return peak;
 }
 
 function postWaveformPresented(body: WaveformPresentedBody): void {

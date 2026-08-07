@@ -48,17 +48,38 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               </div>
             </div>
             <div class="wave-toolbar-actions">
-              <div class="wave-toolbar-group wave-toolbar-group-zoom">
-                <div id="wave-zoom-chip" class="wave-toolbar-pill wave-toolbar-pill-zoom" aria-live="polite">Zoom 1.0x</div>
+              <div class="wave-toolbar-group wave-toolbar-group-zoom wave-seg">
+                <span class="wave-seg-label">Window</span>
+                <button
+                  id="wave-zoom-reset"
+                  class="wave-tool-button wave-seg-value"
+                  type="button"
+                  aria-label="Reset waveform zoom"
+                  aria-live="polite"
+                  title="Length of the visible time window — click to fit the whole file"
+                >1.0x</button>
                 <button id="wave-zoom-out" class="wave-tool-button" type="button" aria-label="Zoom out waveform" title="Zoom out waveform (-)">-</button>
-                <button id="wave-zoom-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform zoom">1.0x</button>
                 <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform" title="Zoom in waveform (+)">+</button>
               </div>
-              <div class="wave-toolbar-group wave-toolbar-group-amp">
-                <div id="wave-amp-chip" class="wave-toolbar-pill wave-toolbar-pill-amp" aria-live="polite">Amp ±1.0</div>
-                <button id="wave-amp-out" class="wave-tool-button" type="button" aria-label="Show a wider waveform amplitude range" title="Show a wider amplitude range">-</button>
-                <button id="wave-amp-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform amplitude range">±1</button>
-                <button id="wave-amp-in" class="wave-tool-button" type="button" aria-label="Show a narrower waveform amplitude range" title="Show a narrower amplitude range">+</button>
+              <div class="wave-toolbar-group wave-toolbar-group-amp wave-seg">
+                <span class="wave-seg-label">Amp ±</span>
+                <input
+                  id="wave-amp-input"
+                  class="wave-seg-input"
+                  type="number"
+                  min="0.001"
+                  max="1"
+                  step="0.01"
+                  value="1"
+                  aria-label="Waveform amplitude range"
+                  title="Full-scale amplitude of the waveform Y axis"
+                />
+                <button
+                  id="wave-amp-fit"
+                  class="wave-tool-button"
+                  type="button"
+                  title="Fit the Y axis to the loudest visible sample"
+                >Fit</button>
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-follow">
                 <label class="wave-follow-toggle" title="Toggle follow playback (F)">
@@ -71,24 +92,34 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                   </span>
                 </label>
               </div>
-              <div class="wave-toolbar-group wave-toolbar-group-loop">
+              <div class="wave-toolbar-group wave-toolbar-group-loop wave-seg">
                 <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Drag to set loop</div>
                 <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" aria-hidden="false" disabled>Clear</button>
               </div>
-              <div class="wave-toolbar-group wave-toolbar-group-export">
+              <div class="wave-toolbar-group wave-toolbar-group-export wave-seg">
+                <button
+                  id="wave-export"
+                  class="wave-tool-button wave-tool-button-wide"
+                  type="button"
+                  title="Export the loop selection (drag on the waveform to set one)"
+                  disabled
+                >Export selected</button>
                 <select id="wave-export-format" class="wave-export-format" aria-label="Export format" disabled>
                   <option value="wav" selected>wav</option>
                   <option value="mp3">mp3</option>
                   <option value="m4a">m4a</option>
                   <option value="flac">flac</option>
                 </select>
+              </div>
+              <div class="wave-toolbar-group wave-toolbar-group-settings">
                 <button
-                  id="wave-export"
+                  id="spectrogram-meta-toggle"
                   class="wave-tool-button wave-tool-button-wide"
                   type="button"
-                  title="Export the loop selection (entire file when no loop is set)"
-                  disabled
-                >Export</button>
+                  aria-controls="spectrogram-meta-controls"
+                  aria-expanded="false"
+                  aria-label="Toggle spectrogram settings"
+                >Settings</button>
               </div>
             </div>
           </div>
@@ -131,14 +162,6 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           <div id="spectrogram-stage" class="spectrogram-stage">
             <canvas id="spectrogram" class="spectrogram-canvas" aria-label="Spectrogram"></canvas>
             <div id="spectrogram-meta" class="spectrogram-meta" data-open="false">
-              <button
-                id="spectrogram-meta-toggle"
-                class="spectrogram-meta-toggle"
-                type="button"
-                aria-controls="spectrogram-meta-controls"
-                aria-expanded="false"
-                aria-label="Toggle spectrogram settings"
-              >Settings</button>
               <div id="spectrogram-meta-controls" class="spectrogram-meta-controls" hidden>
                 <label id="spectrogram-type-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Type</span>
@@ -412,7 +435,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           </div>
         </div>
         <div class="transport-volume" role="group" aria-label="Playback volume">
-          <span class="transport-volume-label">Vol</span>
+          <span id="volume-label" class="transport-volume-label">Vol</span>
           <input
             id="volume-slider"
             class="transport-volume-slider"

@@ -410,28 +410,76 @@ body {
   -webkit-user-drag: none;
 }
 
-.wave-toolbar-pill-zoom {
-  justify-content: center;
-  min-width: 148px;
-  color: var(--chrome-text-strong);
-  text-align: center;
-  cursor: default;
-  pointer-events: none;
-  -webkit-user-select: none;
-  user-select: none;
-  -webkit-user-drag: none;
+/* One bordered pill per feature: the readout and its controls become segments
+   sharing a single outline, split by hairline dividers. */
+.wave-toolbar-group.wave-seg {
+  align-items: stretch;
+  gap: 0;
+  border: 1px solid var(--chrome-border);
+  border-radius: var(--chrome-radius);
+  overflow: hidden;
 }
 
-.wave-toolbar-pill-amp {
-  justify-content: center;
-  min-width: 72px;
+/* :is() keeps these above the per-control border rules further down the sheet. */
+.wave-seg > :is(button, select, span, div) {
+  border: 0;
+  border-radius: 0;
+}
+
+.wave-seg > * + :is(button, select, span, div) {
+  border-left: 1px solid var(--chrome-border);
+}
+
+.wave-seg > .wave-seg-value {
+  min-width: 74px;
   color: var(--chrome-text-strong);
-  text-align: center;
-  cursor: default;
-  pointer-events: none;
-  -webkit-user-select: none;
-  user-select: none;
-  -webkit-user-drag: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.wave-seg-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+  color: var(--chrome-text-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.wave-seg-input {
+  width: 58px;
+  padding: 3px 0 3px 7px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text-strong);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.wave-seg-input:focus,
+.wave-seg-input:focus-visible {
+  outline: none;
+  background: var(--chrome-surface-hover);
+}
+
+.wave-seg-select {
+  min-width: 62px;
+  padding: 3px 7px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.wave-seg-select:hover {
+  background: var(--chrome-surface-hover);
+  color: var(--chrome-text-strong);
 }
 
 .wave-toolbar-actions {
@@ -930,11 +978,11 @@ body {
   transform-origin: left center;
 }
 
+/* Anchored under the toolbar Settings button by setSpectrogramMetaOpen; fixed so
+   it can overlay both panels without the stage clipping it. */
 .spectrogram-meta {
-  position: absolute;
-  top: 10px;
-  right: 12px;
-  z-index: 6;
+  position: fixed;
+  z-index: 20;
   display: grid;
   gap: 7px;
   justify-items: stretch;
@@ -950,60 +998,24 @@ body {
   -webkit-user-drag: none;
 }
 
+/* The toggle lives in the wave toolbar now, so the floating panel is either open or gone. */
 .spectrogram-meta[data-open="false"] {
-  padding: 4px 6px;
-  border-radius: var(--chrome-radius);
+  display: none;
 }
 
 .spectrogram-meta[data-open="true"] {
   padding: 8px 10px;
   border-radius: var(--chrome-radius);
-  /* Keep the panel within the spectrogram stage; the toggle stays pinned and
-     the controls scroll when the window is too short to show them all. */
-  max-height: calc(100% - 20px);
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
 }
 
-.spectrogram-meta-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-width: 0;
-  padding: 3px 8px;
-  border: 1px solid var(--chrome-border);
-  border-radius: var(--chrome-radius);
-  background: var(--chrome-surface);
-  color: var(--chrome-text);
-  font-family: var(--mono);
-  font-size: 9px;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  line-height: 1.2;
-  cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-
-.spectrogram-meta-toggle::after {
-  content: "+";
+#spectrogram-meta-toggle::after {
+  content: " +";
   color: var(--chrome-text-dim);
 }
 
-.spectrogram-meta[data-open="true"] .spectrogram-meta-toggle::after {
-  content: "\2212";
-}
-
-.spectrogram-meta-toggle:hover {
-  border-color: var(--chrome-border-strong);
-  background: var(--chrome-surface-hover);
-}
-
-.spectrogram-meta-toggle:focus,
-.spectrogram-meta-toggle:focus-visible {
-  outline: none !important;
-  border-color: var(--chrome-border-strong);
-  box-shadow: none !important;
+#spectrogram-meta-toggle[aria-expanded="true"]::after {
+  content: " \2212";
 }
 
 .spectrogram-meta-controls {
@@ -1730,6 +1742,8 @@ body {
 }
 
 .transport-volume-label {
+  min-width: 30px;
+  text-align: center;
   color: var(--chrome-text-dim);
   font-family: var(--mono);
   font-size: 9px;

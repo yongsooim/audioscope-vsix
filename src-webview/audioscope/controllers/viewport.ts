@@ -88,11 +88,10 @@ export function createAudioscopeViewportController({
     return Math.max(0, elements.waveToolbar?.offsetHeight || 0) + Math.max(0, elements.waveformAxis?.offsetHeight || 0);
   }
 
-  // Keep the floating spectrogram Settings toggle reachable even when the
-  // divider is dragged all the way down (10px stage offset + toggle box + slack).
+  // Keep a sliver of the spectrogram stage visible even when the divider is
+  // dragged all the way down, so the settings panel has somewhere to open.
   function getMinSpectrogramPaneHeight(availableHeight: number): number {
-    const toggleHeight = elements.spectrogramMetaToggle?.offsetHeight || 0;
-    return Math.min(availableHeight, (toggleHeight > 0 ? toggleHeight : 22) + 24);
+    return Math.min(availableHeight, 46);
   }
 
   function applyViewportSplit(force = false): void {

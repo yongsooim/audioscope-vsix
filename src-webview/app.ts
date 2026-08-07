@@ -125,8 +125,7 @@ const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 8;
 const VIEWPORT_RATIO_MAX = 1;
 const VIEWPORT_RATIO_MIN = 0;
 const DEFAULT_WAVEFORM_AMPLITUDE_MAX = 1;
-// Descending 1-2-5 steps for the waveform vertical zoom (± displayed amplitude).
-const WAVEFORM_AMPLITUDE_MAX_OPTIONS = [1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
+const WAVEFORM_AMPLITUDE_MAX_MIN = 0.001;
 const LOOP_HANDLE_WIDTH_PX = 8;
 const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. Rebuild or reinstall audioscope to restore metadata and decoding.';
 const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
@@ -201,6 +200,7 @@ function createInitialWaveformViewportState() {
     pendingRenderRange: null as TimeRange | null,
     pendingRenderWidthPx: 0,
     pendingRenderHeightPx: 0,
+    presentedPeak: 0,
     presentedRange: { end: 0, start: 0 },
     renderedRange: { end: 0, start: 0 },
     renderWidthPx: 0,
@@ -351,6 +351,7 @@ type WaveformWorkerToMainMessage =
       body: {
         generation?: number;
         height?: number;
+        peak?: number;
         viewEnd?: number;
         viewStart?: number;
         width?: number;
@@ -2124,8 +2125,8 @@ function formatWaveformZoomLabel(uiState: ViewportUiState): string {
 
 function renderWaveformUi(): void {
   const uiState = state.engineUiState;
-  elements.waveZoomReset.textContent = 'Reset';
-  elements.waveZoomChip.textContent = uiState ? formatWaveformZoomLabel(uiState) : formatVisibleDuration(0);
+  // The zoom readout is the reset button — clicking the value fits the whole file.
+  elements.waveZoomReset.textContent = uiState ? formatWaveformZoomLabel(uiState) : formatVisibleDuration(0);
   elements.waveFollow.checked = state.followPlayback;
 
   const selection = uiState?.selection;
@@ -2136,9 +2137,8 @@ function renderWaveformUi(): void {
 
   elements.waveLoopLabel.textContent = selectionLabel;
   elements.waveClearLoop.disabled = !(selection?.committed);
-  const canExport = getDurationFrames() > 0;
-  elements.waveExport.disabled = !canExport;
-  elements.waveExportFormat.disabled = !canExport;
+  elements.waveExport.disabled = getExportRangeSeconds() === null;
+  elements.waveExportFormat.disabled = !(getDurationFrames() > 0);
   renderWaveformAxis();
   renderSelectionAndLoop(uiState);
   renderPlaybackIndicators(uiState);
@@ -2149,39 +2149,29 @@ function normalizeWaveformAmplitudeMax(value: unknown): number {
   if (!Number.isFinite(numeric)) {
     return DEFAULT_WAVEFORM_AMPLITUDE_MAX;
   }
-  return clamp(
-    numeric,
-    WAVEFORM_AMPLITUDE_MAX_OPTIONS[WAVEFORM_AMPLITUDE_MAX_OPTIONS.length - 1],
-    WAVEFORM_AMPLITUDE_MAX_OPTIONS[0],
-  );
-}
-
-function stepWaveformAmplitudeMax(direction: 'in' | 'out'): number {
-  const current = state.waveformAmplitudeMax;
-  if (direction === 'in') {
-    const next = WAVEFORM_AMPLITUDE_MAX_OPTIONS.find((option) => option < current - 1e-9);
-    return next ?? WAVEFORM_AMPLITUDE_MAX_OPTIONS[WAVEFORM_AMPLITUDE_MAX_OPTIONS.length - 1];
-  }
-  for (let index = WAVEFORM_AMPLITUDE_MAX_OPTIONS.length - 1; index >= 0; index -= 1) {
-    if (WAVEFORM_AMPLITUDE_MAX_OPTIONS[index] > current + 1e-9) {
-      return WAVEFORM_AMPLITUDE_MAX_OPTIONS[index];
-    }
-  }
-  return WAVEFORM_AMPLITUDE_MAX_OPTIONS[0];
+  // Same bounds the renderer clamps to; 3 decimals keeps the input readable.
+  return Number(clamp(numeric, WAVEFORM_AMPLITUDE_MAX_MIN, 1).toFixed(3));
 }
 
 function formatWaveformAmplitudeMax(value: number): string {
-  return value.toFixed(2).replace(/(\.\d)0$/, '$1');
+  return String(Number(value.toFixed(3)));
 }
 
 function renderWaveformAmplitudeUi(): void {
   const label = formatWaveformAmplitudeMax(state.waveformAmplitudeMax);
-  elements.waveAmpChip.textContent = `Amp ±${label}`;
+  elements.waveAmpInput.value = label;
   elements.waveformLevelLabelPositive.textContent = label;
   elements.waveformLevelLabelNegative.textContent = `-${label}`;
-  elements.waveAmpIn.disabled = state.waveformAmplitudeMax
-    <= WAVEFORM_AMPLITUDE_MAX_OPTIONS[WAVEFORM_AMPLITUDE_MAX_OPTIONS.length - 1] + 1e-9;
-  elements.waveAmpOut.disabled = state.waveformAmplitudeMax >= WAVEFORM_AMPLITUDE_MAX_OPTIONS[0] - 1e-9;
+}
+
+// Fit: scale the Y axis so the loudest sample in the rendered window reaches the
+// guide lines. The worker reports that peak with every presented frame.
+function fitWaveformAmplitudeToView(): void {
+  const peak = state.waveformViewport.presentedPeak;
+  if (!(peak > 0)) {
+    return;
+  }
+  applyWaveformAmplitudeMax(normalizeWaveformAmplitudeMax(peak));
 }
 
 // Drops the request dedupe state so the next requestWaveformRender re-sends
@@ -2241,8 +2231,11 @@ function normalizePlaybackVolume(value: unknown): number {
 }
 
 function renderPlaybackVolumeUi(): void {
+  const percent = `${Math.round(state.playbackVolume * 100)}%`;
   elements.volumeSlider.value = String(state.playbackVolume);
-  elements.volumeSlider.title = `Volume ${Math.round(state.playbackVolume * 100)}%`;
+  elements.volumeSlider.title = `Volume ${percent}`;
+  // ponytail: :hover/:focus double as the "show the value" flag — no extra state to sync
+  elements.volumeLabel.textContent = elements.volumeSlider.matches(':hover, :focus') ? percent : 'Vol';
 }
 
 function schedulePersistPlaybackVolume(): void {
@@ -2259,11 +2252,10 @@ function schedulePersistPlaybackVolume(): void {
   }, 160);
 }
 
-// Export range: the committed loop selection when one exists, else the whole file.
+// Export range: the committed loop selection. No selection, nothing to export.
 function getExportRangeSeconds(): { end: number; start: number } | null {
   const sampleRate = getSampleRate();
-  const durationFrames = getDurationFrames();
-  if (!(sampleRate > 0) || !(durationFrames > 0)) {
+  if (!(sampleRate > 0) || !(getDurationFrames() > 0)) {
     return null;
   }
 
@@ -2277,7 +2269,7 @@ function getExportRangeSeconds(): { end: number; start: number } | null {
     return { end: selection.endFrame / sampleRate, start: selection.startFrame / sampleRate };
   }
 
-  return { end: durationFrames / sampleRate, start: 0 };
+  return null;
 }
 
 function renderSpectrogramScale(): void {
@@ -2508,6 +2500,14 @@ function setSpectrogramMetaOpen(open: boolean): void {
   state.spectrogramMetaOpen = open;
   elements.spectrogramMeta.dataset.open = open ? 'true' : 'false';
   elements.spectrogramMetaControls.hidden = !open;
+  if (open) {
+    // Drop the panel right under its toolbar button and let it use the rest of the window.
+    const trigger = elements.spectrogramMetaToggle.getBoundingClientRect();
+    const top = Math.round(trigger.bottom + 4);
+    elements.spectrogramMeta.style.top = `${top}px`;
+    elements.spectrogramMeta.style.right = `${Math.round(Math.max(8, window.innerWidth - trigger.right))}px`;
+    elements.spectrogramMeta.style.maxHeight = `${Math.max(120, window.innerHeight - top - 12)}px`;
+  }
   elements.spectrogramMetaToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
   elements.spectrogramMetaToggle.setAttribute(
     'aria-label',
@@ -4057,6 +4057,7 @@ function handleWaveformWorkerMessage(loadToken: number, message: WaveformWorkerT
         Math.round(Number(message.body?.width) || state.waveformViewport.renderWidthPx || 1),
       );
       state.waveformViewport.activeRenderHeightPx = Math.max(1, Math.round(Number(message.body?.height) || 1));
+      state.waveformViewport.presentedPeak = Number(message.body?.peak) || 0;
       state.waveformViewport.pendingRenderRange = null;
       state.waveformViewport.pendingRenderWidthPx = 0;
       state.waveformViewport.pendingRenderHeightPx = 0;
@@ -4974,9 +4975,13 @@ function attachUiEvents(): void {
   elements.waveZoomOut.addEventListener('click', () => sendViewportIntent({ direction: 'out', kind: 'zoomStep' }));
   elements.waveZoomReset.addEventListener('click', () => sendViewportIntent({ kind: 'resetZoom' }));
   elements.waveZoomIn.addEventListener('click', () => sendViewportIntent({ direction: 'in', kind: 'zoomStep' }));
-  elements.waveAmpOut.addEventListener('click', () => applyWaveformAmplitudeMax(stepWaveformAmplitudeMax('out')));
-  elements.waveAmpReset.addEventListener('click', () => applyWaveformAmplitudeMax(DEFAULT_WAVEFORM_AMPLITUDE_MAX));
-  elements.waveAmpIn.addEventListener('click', () => applyWaveformAmplitudeMax(stepWaveformAmplitudeMax('in')));
+  elements.waveAmpInput.addEventListener('change', () => {
+    applyWaveformAmplitudeMax(normalizeWaveformAmplitudeMax(elements.waveAmpInput.value));
+  });
+  elements.waveAmpFit.addEventListener('click', () => {
+    fitWaveformAmplitudeToView();
+    scheduleKeyboardSurfaceFocus();
+  });
   elements.waveFollow.addEventListener('change', () => {
     sendViewportIntent({
       enabled: elements.waveFollow.checked,
@@ -5003,10 +5008,13 @@ function attachUiEvents(): void {
   });
   elements.volumeSlider.addEventListener('input', () => {
     state.playbackVolume = normalizePlaybackVolume(elements.volumeSlider.value);
-    elements.volumeSlider.title = `Volume ${Math.round(state.playbackVolume * 100)}%`;
+    renderPlaybackVolumeUi();
     state.audioTransport?.setVolume(state.playbackVolume);
     schedulePersistPlaybackVolume();
   });
+  for (const type of ['pointerenter', 'pointerleave', 'focus', 'blur']) {
+    elements.volumeSlider.addEventListener(type, renderPlaybackVolumeUi);
+  }
 
   // One wheel listener for the whole viewport — the waveform window, the shared time strip
   // and splitter between the panels, and the spectrogram window. Pick the surface from
