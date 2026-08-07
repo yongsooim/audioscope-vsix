@@ -787,15 +787,6 @@ EMSCRIPTEN_KEEPALIVE int wave_measure_loudness_from_decoded_output(void) {
     return result;
 }
 
-EMSCRIPTEN_KEEPALIVE int wave_decode_file_with_loudness(const char *input_path) {
-    int result = wave_decode_file_internal(input_path);
-    if (result != 0) {
-        return result;
-    }
-
-    return wave_measure_loudness_from_decoded_output();
-}
-
 EMSCRIPTEN_KEEPALIVE int wave_get_output_channel_count(void) {
     return g_channel_count;
 }

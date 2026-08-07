@@ -7,66 +7,71 @@ import type { PlaybackSession } from '../../transport/audioTransport';
 // 1.7-hour 48kHz stereo file (or ~3.5h mono).
 export const MAX_TOTAL_ANALYSIS_SAMPLES = 600_000_000;
 
-// Downmix every channel to a single mono signal. A mono source is copied
-// directly (no per-sample accumulation), and oversized files skip the loop
-// entirely (the caller refuses them) so a pathologically long file cannot
-// freeze the main thread for seconds during the downmix.
-function downmixToMono(channelBuffers: ArrayBuffer[], sampleCount: number, channelCount: number): Float32Array {
-  if (sampleCount <= 0 || sampleCount * channelCount > MAX_TOTAL_ANALYSIS_SAMPLES) {
-    return new Float32Array(0);
-  }
-
-  if (channelCount === 1) {
-    const buffer = channelBuffers[0];
-    return buffer instanceof ArrayBuffer ? new Float32Array(buffer).slice() : new Float32Array(sampleCount);
-  }
-
-  const mono = new Float32Array(sampleCount);
-  const channelWeight = 1 / channelCount;
-  for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
-    const buffer = channelBuffers[channelIndex];
-    if (!(buffer instanceof ArrayBuffer)) {
-      continue;
-    }
-    const channelData = new Float32Array(buffer);
-    const limit = Math.min(sampleCount, channelData.length);
-    for (let sampleIndex = 0; sampleIndex < limit; sampleIndex += 1) {
-      mono[sampleIndex] += channelData[sampleIndex] * channelWeight;
-    }
-  }
-  return mono;
+export interface DownmixedPcm {
+  channelBuffers: ArrayBuffer[];
+  monoBuffer: ArrayBuffer;
 }
 
-export function createPlaybackAnalysisData(audioBuffer: AudioBuffer): { monoSamples: Float32Array; playbackSession: PlaybackSession } {
+export type DownmixPcm = (
+  channelBuffers: ArrayBuffer[],
+  sampleCount: number,
+  channelCount: number,
+) => Promise<DownmixedPcm>;
+
+export async function createPlaybackAnalysisData(
+  audioBuffer: AudioBuffer,
+  downmixPcm: DownmixPcm,
+): Promise<{ monoSamples: Float32Array; playbackSession: PlaybackSession }> {
   const channelCount = Math.max(1, audioBuffer.numberOfChannels);
-  const sampleCount = Math.max(0, audioBuffer.length);
   const channelBuffers: ArrayBuffer[] = [];
 
   for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
     channelBuffers.push(audioBuffer.getChannelData(channelIndex).slice().buffer);
   }
 
-  return {
-    monoSamples: downmixToMono(channelBuffers, sampleCount, channelCount),
-    playbackSession: {
-      channelBuffers,
-      durationSeconds: audioBuffer.duration,
-      numberOfChannels: audioBuffer.numberOfChannels,
-      sourceLength: audioBuffer.length,
-      sourceSampleRate: audioBuffer.sampleRate,
-    },
-  };
+  return preparePlaybackAnalysisData({
+    channelBuffers,
+    durationSeconds: audioBuffer.duration,
+    numberOfChannels: channelCount,
+    sourceLength: audioBuffer.length,
+    sourceSampleRate: audioBuffer.sampleRate,
+  }, downmixPcm);
+}
+
+export async function preparePlaybackAnalysisData(
+  playbackSession: PlaybackSession,
+  downmixPcm: DownmixPcm,
+): Promise<{ monoSamples: Float32Array; playbackSession: PlaybackSession }> {
+  if (playbackSession.monoBuffer instanceof ArrayBuffer) {
+    return createPlaybackAnalysisDataFromPlaybackSession(playbackSession);
+  }
+
+  const downmixed = await downmixPcm(
+    playbackSession.channelBuffers,
+    Math.max(0, playbackSession.sourceLength),
+    Math.max(1, playbackSession.numberOfChannels),
+  );
+
+  return createPlaybackAnalysisDataFromPlaybackSession({
+    ...playbackSession,
+    channelBuffers: downmixed.channelBuffers,
+    monoBuffer: downmixed.monoBuffer,
+  });
 }
 
 export function createPlaybackAnalysisDataFromPlaybackSession(playbackSession: PlaybackSession): {
   monoSamples: Float32Array;
   playbackSession: PlaybackSession;
 } {
-  const channelCount = Math.max(1, playbackSession.numberOfChannels);
-  const sampleCount = Math.max(0, playbackSession.sourceLength);
+  const monoBuffer = playbackSession.monoBuffer;
 
   return {
-    monoSamples: downmixToMono(playbackSession.channelBuffers, sampleCount, channelCount),
+    // Keep the retained mono buffer available for channel-mode changes. The
+    // native ArrayBuffer copy is synchronous, but the per-sample mix now runs
+    // entirely in pcmDownmixWorker.
+    monoSamples: monoBuffer instanceof ArrayBuffer
+      ? new Float32Array(monoBuffer.slice(0))
+      : new Float32Array(0),
     playbackSession,
   };
 }

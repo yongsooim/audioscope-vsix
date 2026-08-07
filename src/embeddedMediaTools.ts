@@ -54,7 +54,6 @@ interface DirectDecodeModule {
   _malloc(byteLength: number): number;
   _wave_clear_decode_output(): void;
   _wave_decode_file(pathPointer: number): number;
-  _wave_decode_file_with_loudness(pathPointer: number): number;
   _wave_measure_loudness_from_decoded_output(): number;
   _wave_get_last_error_length(): number;
   _wave_get_last_error_ptr(): number;
@@ -104,11 +103,6 @@ export interface EmbeddedPcmDecodePayload {
   numberOfChannels: number;
   sampleRate: number;
   source: 'ffmpeg';
-}
-
-export interface EmbeddedPcmDecodeWithLoudnessPayload {
-  decode: EmbeddedPcmDecodePayload;
-  loudness: EmbeddedLoudnessSummaryPayload;
 }
 
 export interface EmbeddedPcmDecodeLoudnessPipelinePayload {
@@ -573,22 +567,25 @@ export async function runEmbeddedFfmpegMeasureLoudness(
   }
 }
 
-export async function runEmbeddedFfmpegDecodeToPcm(
+export function runEmbeddedFfmpegDecodeLoudnessPipeline(
   resource: vscode.Uri,
-): Promise<EmbeddedPcmDecodePayload> {
-  const result = await runEmbeddedDirectDecode(resource);
-  return result.decode;
-}
+): Promise<EmbeddedPcmDecodeLoudnessPipelinePayload> {
+  let resolvePipeline!: (value: EmbeddedPcmDecodeLoudnessPipelinePayload) => void;
+  let rejectPipeline!: (error: unknown) => void;
+  const pipelinePromise = new Promise<EmbeddedPcmDecodeLoudnessPipelinePayload>((resolve, reject) => {
+    resolvePipeline = resolve;
+    rejectPipeline = reject;
+  });
 
-async function runEmbeddedDirectDecode(
-  resource: vscode.Uri,
-  withLoudness = false,
-): Promise<EmbeddedPcmDecodeWithLoudnessPayload> {
-  if (!hasDirectDecodeModule()) {
-    throw new Error('Direct FFmpeg decode module is unavailable.');
-  }
+  void enqueueDirectDecodeTask(async () => {
+    let rejectLoudness!: (error: unknown) => void;
+    let pipelineResolved = false;
 
-  return enqueueDirectDecodeTask(async () => {
+    if (!hasDirectDecodeModule()) {
+      rejectPipeline(new Error('Direct FFmpeg decode module is unavailable.'));
+      return;
+    }
+
     const module = await loadDirectDecodeModule();
     const inputBytes = await readResourceBytes(resource);
     const virtualInputPath = `/input${path.extname(resource.path) || '.bin'}`;
@@ -597,9 +594,7 @@ async function runEmbeddedDirectDecode(
     try {
       module.FS.writeFile(virtualInputPath, inputBytes);
       const pathPointer = allocateUtf8(module, virtualInputPath);
-      const decodeResult = withLoudness
-        ? module._wave_decode_file_with_loudness(pathPointer)
-        : module._wave_decode_file(pathPointer);
+      const decodeResult = module._wave_decode_file(pathPointer);
       module._free(pathPointer);
 
       if (decodeResult !== 0) {
@@ -611,13 +606,35 @@ async function runEmbeddedDirectDecode(
       }
 
       const decode = readDirectDecodePayload(module);
+      let resolveLoudness!: (value: EmbeddedLoudnessSummaryPayload) => void;
+      const loudnessPromise = new Promise<EmbeddedLoudnessSummaryPayload>((resolve, reject) => {
+        resolveLoudness = resolve;
+        rejectLoudness = reject;
+      });
 
-      return {
-        decode,
-        loudness: readDirectDecodeLoudnessSummary(module, decode.numberOfChannels),
-      };
+      resolvePipeline({ decode, loudnessPromise });
+      pipelineResolved = true;
+
+      // Let the decode result reach the webview first. Loudness then runs against
+      // the retained PCM while waveform/analysis setup proceeds in parallel.
+      await yieldToHostEventLoop();
+      const loudnessResult = module._wave_measure_loudness_from_decoded_output();
+
+      if (loudnessResult !== 0) {
+        throw new Error(readUtf8(
+          module,
+          module._wave_get_last_error_ptr(),
+          module._wave_get_last_error_length(),
+        ) || 'Direct FFmpeg loudness analysis failed.');
+      }
+
+      resolveLoudness(readDirectDecodeLoudnessSummary(module, decode.numberOfChannels));
     } catch (error) {
-      throw error;
+      if (pipelineResolved) {
+        rejectLoudness(error);
+      } else {
+        rejectPipeline(error);
+      }
     } finally {
       try {
         module._wave_clear_decode_output();
@@ -626,7 +643,9 @@ async function runEmbeddedDirectDecode(
         module.FS.unlink(virtualInputPath);
       } catch {}
     }
-  });
+  }).catch(rejectPipeline);
+
+  return pipelinePromise;
 }
 
 function readDirectDecodePayload(module: DirectDecodeModule): EmbeddedPcmDecodePayload {

@@ -1,6 +1,7 @@
 let decodeModulePromise = null;
 let decodeModuleScriptUrl = '';
 let decodeModuleWasmUrl = '';
+let decodeQueue = Promise.resolve();
 
 function readErrorMessage(module) {
   const pointer = module._wave_get_last_error_ptr?.() ?? 0;
@@ -11,6 +12,41 @@ function readErrorMessage(module) {
   }
 
   return module.UTF8ToString(pointer, length) || 'Embedded decode worker failed.';
+}
+
+function readUtf8(module, pointer, length) {
+  if (!pointer || length <= 0 || typeof module.UTF8ToString !== 'function') {
+    return '';
+  }
+
+  return module.UTF8ToString(pointer, length) || '';
+}
+
+function readLoudnessValue(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readLoudnessSummary(module, numberOfChannels) {
+  const channelLayout = readUtf8(
+    module,
+    module._wave_get_output_channel_layout_ptr?.() ?? 0,
+    module._wave_get_output_channel_layout_length?.() ?? 0,
+  ).trim();
+
+  return {
+    channelCount: numberOfChannels > 0 ? numberOfChannels : null,
+    channelLayout: channelLayout || null,
+    channelMode: 'source layout',
+    integratedLufs: readLoudnessValue(module._wave_get_loudness_integrated_lufs?.()),
+    integratedThresholdLufs: readLoudnessValue(module._wave_get_loudness_integrated_threshold_lufs?.()),
+    loudnessRangeLu: readLoudnessValue(module._wave_get_loudness_range_lu?.()),
+    lraHighLufs: readLoudnessValue(module._wave_get_loudness_lra_high_lufs?.()),
+    lraLowLufs: readLoudnessValue(module._wave_get_loudness_lra_low_lufs?.()),
+    rangeThresholdLufs: readLoudnessValue(module._wave_get_loudness_range_threshold_lufs?.()),
+    samplePeakDbfs: readLoudnessValue(module._wave_get_loudness_sample_peak_dbfs?.()),
+    source: 'FFmpeg ebur128',
+    truePeakDbtp: readLoudnessValue(module._wave_get_loudness_true_peak_dbtp?.()),
+  };
 }
 
 async function ensureDecodeModule() {
@@ -66,7 +102,11 @@ self.onmessage = async (event) => {
         });
         return;
       case 'decodeAudioData':
-        await handleDecodeRequest(message.body ?? {});
+        {
+          const decodeTask = decodeQueue.then(() => handleDecodeRequest(message.body ?? {}));
+          decodeQueue = decodeTask.catch(() => {});
+          await decodeTask;
+        }
         return;
       case 'dispose':
         decodeModulePromise = null;
@@ -142,13 +182,6 @@ async function handleDecodeRequest(body) {
     channelBuffers.push(copiedBytes.buffer);
   }
 
-  try {
-    module.FS.unlink(virtualInputPath);
-  } catch {}
-  try {
-    module._wave_clear_decode_output();
-  } catch {}
-
   self.postMessage({
     type: 'decodeReady',
     body: {
@@ -162,4 +195,38 @@ async function handleDecodeRequest(body) {
       source: 'ffmpeg',
     },
   }, channelBuffers);
+
+  try {
+    module.FS.unlink(virtualInputPath);
+  } catch {}
+
+  // Yield so decodeReady can start waveform setup before loudness consumes the
+  // retained PCM in this worker.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  try {
+    const loudnessResult = module._wave_measure_loudness_from_decoded_output();
+    if (loudnessResult !== 0) {
+      throw new Error(readErrorMessage(module));
+    }
+    self.postMessage({
+      type: 'loudnessReady',
+      body: {
+        ...readLoudnessSummary(module, numberOfChannels),
+        loadToken,
+      },
+    });
+  } catch (error) {
+    self.postMessage({
+      type: 'loudnessError',
+      body: {
+        loadToken,
+        message: error instanceof Error ? error.message : String(error),
+      },
+    });
+  } finally {
+    try {
+      module._wave_clear_decode_output();
+    } catch {}
+  }
 }

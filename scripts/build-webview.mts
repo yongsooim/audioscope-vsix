@@ -10,6 +10,7 @@ const sharedOutput = {
   dir: outputDir,
   entryFileNames: '[name].js',
   format: 'esm' as const,
+  minify: true,
   sourcemap: false,
 };
 
@@ -36,6 +37,7 @@ const workerEntries: Array<[string, string]> = [
   ['audioAnalysisWorker', path.join(projectRoot, 'src-webview', 'audio-analysis', 'worker.ts')],
   ['embeddedDecodeWorker', path.join(projectRoot, 'src-webview', 'embeddedDecodeWorker.ts')],
   ['interactiveWaveformWorker', path.join(projectRoot, 'src-webview', 'interactive-waveform', 'worker.ts')],
+  ['pcmDownmixWorker', path.join(projectRoot, 'src-webview', 'pcmDownmixWorker.ts')],
 ];
 
 for (const [name, entry] of workerEntries) {

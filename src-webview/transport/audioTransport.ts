@@ -16,6 +16,7 @@ type TransportKind = 'audio-worklet-copy' | 'audio-worklet-stretch' | 'unavailab
 export interface PlaybackSession {
   channelBuffers: ArrayBuffer[];
   durationSeconds: number;
+  monoBuffer?: ArrayBuffer;
   numberOfChannels: number;
   sourceLength: number;
   sourceSampleRate: number;
@@ -1573,6 +1574,7 @@ function normalizePlaybackSession(session: PlaybackSession | null | undefined, a
   return {
     channelBuffers: buffers,
     durationSeconds,
+    monoBuffer: session?.monoBuffer instanceof ArrayBuffer ? session.monoBuffer : undefined,
     numberOfChannels,
     sourceLength,
     sourceSampleRate,

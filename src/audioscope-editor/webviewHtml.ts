@@ -17,6 +17,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     const analysisWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioAnalysisWorker.js'));
     const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'interactiveWaveformWorker.js'));
     const decodeWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'embeddedDecodeWorker.js'));
+    const pcmDownmixWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'pcmDownmixWorker.js'));
     const decodeBrowserModuleUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_browser_module.js'));
     const decodeBrowserModuleWasmUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_module.wasm'));
     const audioTransportProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioTransportProcessor.js'));
@@ -36,7 +37,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     <link rel="stylesheet" href="${styleUri}" />
     <title>audioscope</title>
   </head>
-  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-decode-module-src="${decodeBrowserModuleUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}" data-wasm-core-simd-src="${wasmCoreSimdUri}" data-wasm-core-fallback-src="${wasmCoreFallbackUri}">
+  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-decode-module-src="${decodeBrowserModuleUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-pcm-downmix-worker-src="${pcmDownmixWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}" data-wasm-core-simd-src="${wasmCoreSimdUri}" data-wasm-core-fallback-src="${wasmCoreFallbackUri}">
     <main class="app-shell">
       <section id="audioscope-viewport" class="viewport" aria-label="audioscope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">

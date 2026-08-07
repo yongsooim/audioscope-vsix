@@ -12,6 +12,7 @@ import {
   getMixedFrequencyPosition,
 } from './audioscope/math/spectrogramMath';
 import { computeLoudnessData, type LoudnessData } from './audio-engine-worker/loudnessAnalysis';
+import { planWaveformFollowRender } from './audio-engine-worker/followPlanner';
 import { formatAxisLabel, getNiceTimeStep } from './audioscope/core/format';
 import type {
   EngineMainToWorkerMessage,
@@ -36,12 +37,10 @@ import {
 } from './sharedBuffers';
 import {
   heapF32View,
-  heapF64View,
   heapU8View,
   loadWaveCoreRuntime,
   type WaveCoreModule,
   type WaveCoreRuntime,
-  type WaveCoreWasmBytes,
 } from './waveCoreRuntime';
 import { normalizeSpectrogramWindowFunction, WINDOW_FUNCTION_CODES } from './windowShared';
 import {
@@ -218,9 +217,6 @@ interface EngineSessionState {
   maxFrequency: number;
   minFrequency: number;
   module: WaveCoreModule | null;
-  plannerOutput: Float64Array | null;
-  plannerOutputCapacity: number;
-  plannerOutputPointer: number;
   quality: 'balanced' | 'high' | 'max';
   runtimeVariant: string | null;
   sampleRate: number;
@@ -304,13 +300,10 @@ const spectrogramSurface: SpectrogramSurfaceState = {
 };
 
 let runtimePromise: Promise<WaveCoreRuntime> | null = null;
-let requestQueue = Promise.resolve();
 let cachedFrequencyTickKey = '';
 let cachedFrequencyTicks: FrequencyTickUi[] = [];
 let cachedWaveformAxisTickKey = '';
 let cachedWaveformAxisTicks: ViewportUiState['waveformAxisTicks'] = [];
-
-const WAVEFORM_FOLLOW_PLANNER_OUTPUT_VALUE_COUNT = 3;
 
 const state: EngineState = {
   dragState: null,
@@ -375,17 +368,6 @@ self.onmessage = (event: MessageEvent<EngineMainToWorkerMessage>) => {
   }
 
   switch (message.type) {
-    case 'bootstrapRuntime':
-      if (message.body?.wasmBytes) {
-        pendingWasmBytes = {
-          fallback: message.body.wasmBytes.fallback ?? null,
-          simd: message.body.wasmBytes.simd ?? null,
-        };
-      }
-      enqueueRequest(async () => {
-        await getRuntime();
-      });
-      return;
     case 'DisposeSession':
       handleDisposeSession();
       return;
@@ -393,9 +375,7 @@ self.onmessage = (event: MessageEvent<EngineMainToWorkerMessage>) => {
       handleInitSurfaces(message);
       return;
     case 'LoadAnalysisSession':
-      enqueueRequest(async () => {
-        await handleLoadAnalysisSession(message);
-      });
+      handleLoadAnalysisSession(message);
       return;
     case 'PlaybackClockTick':
       handlePlaybackClockTick(message.body);
@@ -436,9 +416,6 @@ function createEmptySessionState(): EngineSessionState {
     maxFrequency: MAX_FREQUENCY,
     minFrequency: MIN_FREQUENCY,
     module: null,
-    plannerOutput: null,
-    plannerOutputCapacity: 0,
-    plannerOutputPointer: 0,
     quality: 'high',
     runtimeVariant: null,
     sampleRate: 0,
@@ -452,11 +429,6 @@ function createEmptySessionState(): EngineSessionState {
 }
 
 function handleDisposeSession(): void {
-  if (state.session.module) {
-    disposeWasmSession(state.session.module);
-  }
-
-  clearTileCache();
   state.session = createEmptySessionState();
   state.playbackClock = createEmptyPlaybackClock();
   state.loopRangeFrames = null;
@@ -464,8 +436,6 @@ function handleDisposeSession(): void {
   state.dragState = null;
   state.hoverWaveformRatioX = null;
   state.pendingTransportCommand = null;
-  state.renderScheduled = false;
-  state.renderToken += 1;
   state.viewport.followEnabled = false;
   state.viewport.plotMode = 'envelope';
   state.viewport.presentedStartFrame = 0;
@@ -476,19 +446,9 @@ function handleDisposeSession(): void {
   state.viewport.targetEndFrame = 0;
 }
 
-function enqueueRequest(task: () => Promise<void>): void {
-  requestQueue = requestQueue
-    .then(task)
-    .catch((error) => {
-      postError(error);
-    });
-}
-
-let pendingWasmBytes: WaveCoreWasmBytes | null = null;
-
 async function getRuntime(): Promise<WaveCoreRuntime> {
   if (!runtimePromise) {
-    runtimePromise = loadWaveCoreRuntime(pendingWasmBytes);
+    runtimePromise = loadWaveCoreRuntime();
   }
 
   return runtimePromise;
@@ -509,18 +469,12 @@ function areRangeFramesEqual(left: RangeFrames | null, right: RangeFrames | null
 function handleInitSurfaces(message: EngineMainToWorkerMessage & { type: 'InitSurfaces' }): void {
   const { body } = message;
 
-  if (body.spectrogramOffscreenCanvas) {
-    state.spectrogramSurface.canvas = body.spectrogramOffscreenCanvas;
-  }
-
   state.waveformSurface.widthCssPx = Math.max(1, Math.round(Number(body.waveformWidthCssPx) || state.waveformSurface.widthCssPx || 1));
   state.waveformSurface.heightCssPx = Math.max(1, Math.round(Number(body.waveformHeightCssPx) || state.waveformSurface.heightCssPx || 1));
   state.waveformSurface.renderScale = Math.max(1, Number(body.waveformRenderScale) || state.waveformSurface.renderScale || 1);
   state.spectrogramSurface.pixelWidth = Math.max(1, Math.round(Number(body.spectrogramPixelWidth) || state.spectrogramSurface.pixelWidth || 1));
   state.spectrogramSurface.pixelHeight = Math.max(1, Math.round(Number(body.spectrogramPixelHeight) || state.spectrogramSurface.pixelHeight || 1));
 
-  resizeSpectrogramSurface();
-  state.renderSurfacesRevision += 1;
   if (state.viewport.followEnabled) {
     applyFollowSolver();
   } else {
@@ -530,39 +484,14 @@ function handleInitSurfaces(message: EngineMainToWorkerMessage & { type: 'InitSu
   scheduleRender();
 }
 
-async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { type: 'LoadAnalysisSession' }): Promise<void> {
-  const runtime = await getRuntime();
+function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { type: 'LoadAnalysisSession' }): void {
   const body = message.body;
   const sampleRate = Math.max(1, Math.round(Number(body.sampleRate) || 0));
   const durationFrames = Math.max(0, Math.round(Number(body.durationFrames) || 0));
   const sessionRevision = Math.max(0, Math.round(Number(body.sessionRevision) || 0));
-  const quality = body.quality === 'balanced' || body.quality === 'max' ? body.quality : 'high';
 
   if (sampleRate <= 0 || durationFrames <= 0) {
     throw new Error('LoadAnalysisSession provided invalid audio metadata.');
-  }
-
-  disposeWasmSession(runtime.module);
-  clearTileCache();
-
-  const durationSeconds = durationFrames / sampleRate;
-  let pcmPointer = 0;
-  if (body.monoSamplesBuffer instanceof ArrayBuffer) {
-    if (!runtime.module._wave_prepare_session(durationFrames, sampleRate, durationSeconds)) {
-      throw new Error('Failed to allocate audio engine session.');
-    }
-
-    pcmPointer = runtime.module._wave_get_pcm_ptr();
-    if (!pcmPointer) {
-      throw new Error('Audio engine PCM allocation failed.');
-    }
-
-    const monoSamples = new Float32Array(body.monoSamplesBuffer);
-    if (monoSamples.length !== durationFrames) {
-      throw new Error('LoadAnalysisSession PCM length did not match durationFrames.');
-    }
-
-    getHeapF32View(runtime.module, pcmPointer, durationFrames).set(monoSamples);
   }
 
   state.session = {
@@ -571,12 +500,8 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
     initialized: true,
     maxFrequency: Math.min(MAX_FREQUENCY, sampleRate / 2),
     minFrequency: MIN_FREQUENCY,
-    module: runtime.module,
-    quality,
-    runtimeVariant: runtime.variant,
     sampleRate,
     sessionRevision,
-    waveformPcmPointer: pcmPointer,
   };
 
   state.playbackClock = {
@@ -590,7 +515,6 @@ async function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { 
   state.dragState = null;
   state.hoverWaveformRatioX = null;
   state.pendingTransportCommand = null;
-  state.renderConfigRevision += 1;
   const fullRange = createFullRange();
   setTargetRange(fullRange.startFrame, fullRange.endFrame);
   state.viewport.presentedStartFrame = 0;
@@ -750,9 +674,6 @@ function handleSpectrogramConfig(config: {
     minDecibels: nextDbWindow.minDecibels,
     overlapRatio: nextOverlapRatio,
   };
-  clearTileCache();
-  state.lastSpectrogramPlan = null;
-  state.renderConfigRevision += 1;
   emitUiState();
   scheduleRender();
 }
@@ -802,7 +723,6 @@ function applyViewportIntent(intent: ViewportIntent): void {
       state.waveformSurface.renderScale = waveformRenderScale;
       state.spectrogramSurface.pixelWidth = spectrogramPixelWidth;
       state.spectrogramSurface.pixelHeight = spectrogramPixelHeight;
-      resizeSpectrogramSurface();
       clampViewportToDuration();
       if (state.viewport.followEnabled) {
         applyFollowSolver();
@@ -810,7 +730,6 @@ function applyViewportIntent(intent: ViewportIntent): void {
         syncRenderedRangeToTarget();
       }
       if (changed) {
-        state.renderSurfacesRevision += 1;
         emitUiState();
         scheduleRender();
       } else {
@@ -1009,9 +928,6 @@ function handleWheelIntent(intent: Extract<ViewportIntent, { kind: 'wheel' }>): 
 // drops one redundant ViewportUiState post per burst frame without losing any update or
 // hurting first-event responsiveness.
 function emitInteractionUiState(): void {
-  if (state.renderInFlight) {
-    return;
-  }
   emitUiState();
 }
 
@@ -1246,9 +1162,8 @@ function applyFollowSolver(): boolean {
     return clampViewportToDuration();
   }
 
-  const module = state.session.module;
   const sampleRate = state.session.sampleRate;
-  if (!module || !(sampleRate > 0)) {
+  if (!(sampleRate > 0)) {
     return clampViewportToDuration();
   }
 
@@ -1262,34 +1177,32 @@ function applyFollowSolver(): boolean {
   );
   const desiredVisibleEndFrame = desiredVisibleStartFrame + spanFrames;
   const renderedRange = getRenderedRange();
-  const plannerOutput = ensurePlannerOutputCapacity(module, WAVEFORM_FOLLOW_PLANNER_OUTPUT_VALUE_COUNT);
-  const plannerApplied = module._wave_plan_waveform_follow_render(
-    framesToSeconds(desiredVisibleStartFrame),
-    framesToSeconds(desiredVisibleEndFrame),
-    framesToSeconds(state.session.durationFrames),
-    Math.max(1, state.waveformSurface.widthCssPx),
-    Math.max(1, state.waveformSurface.renderScale),
-    framesToSeconds(renderedRange.startFrame),
-    framesToSeconds(renderedRange.endFrame),
-    renderedRange.endFrame > renderedRange.startFrame ? 1 : 0,
-    WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR,
-    WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO,
-    1 / sampleRate,
-    state.session.plannerOutputPointer,
-  ) !== 0;
+  const plan = planWaveformFollowRender({
+    bufferFactor: WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR,
+    displayEndSeconds: framesToSeconds(desiredVisibleEndFrame),
+    displayStartSeconds: framesToSeconds(desiredVisibleStartFrame),
+    displayWidth: Math.max(1, state.waveformSurface.widthCssPx),
+    durationSeconds: framesToSeconds(state.session.durationFrames),
+    epsilonSeconds: 1 / sampleRate,
+    marginRatio: WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO,
+    preferredEndSeconds: framesToSeconds(renderedRange.endFrame),
+    preferredStartSeconds: framesToSeconds(renderedRange.startFrame),
+    preferredValid: renderedRange.endFrame > renderedRange.startFrame,
+    renderScale: Math.max(1, state.waveformSurface.renderScale),
+  });
 
-  const plannedRenderStartFrame = plannerApplied
-    ? clampFrame(plannerOutput[0] * sampleRate)
+  const plannedRenderStartFrame = plan
+    ? clampFrame(plan.startSeconds * sampleRate)
     : quantizeFollowStartFrame(desiredVisibleStartFrame, spanFrames);
-  const plannedRenderEndFrame = plannerApplied
-    ? clampFrame(plannerOutput[1] * sampleRate)
+  const plannedRenderEndFrame = plan
+    ? clampFrame(plan.endSeconds * sampleRate)
     : plannedRenderStartFrame + spanFrames;
   const visibleChanged = setTargetRange(desiredVisibleStartFrame, desiredVisibleEndFrame);
   const renderedChanged = setRenderedRange(
     plannedRenderStartFrame,
     plannedRenderEndFrame,
-    plannerApplied
-      ? Math.max(1, Math.round(Number(plannerOutput[2]) || state.waveformSurface.widthCssPx || 1))
+    plan
+      ? Math.max(1, Math.round(Number(plan.renderWidth) || state.waveformSurface.widthCssPx || 1))
       : state.waveformSurface.widthCssPx,
   );
   const changed = visibleChanged || renderedChanged;
@@ -1448,32 +1361,15 @@ function getSurfaceWidthPx(surface: SurfaceKind): number {
     : Math.max(1, state.spectrogramSurface.pixelWidth);
 }
 
-function resizeSpectrogramSurface(): void {
-  if (!state.spectrogramSurface.canvas) {
-    return;
-  }
-
-  state.spectrogramSurface.canvas.width = Math.max(1, state.spectrogramSurface.pixelWidth);
-  state.spectrogramSurface.canvas.height = Math.max(1, state.spectrogramSurface.pixelHeight);
-  state.spectrogramSurface.context = state.spectrogramSurface.canvas.getContext('2d', { alpha: false });
-}
-
 function scheduleRender(): void {
-  // renderToken/renderRevision advance on every request so an in-flight render can detect
-  // it has been superseded and bail (the tile builder checks the token between tiles).
-  state.renderToken += 1;
-  state.renderRevision += 1;
-  state.renderScheduled = true;
-
-  // Single-flight: if a render is already running, just leave the dirty bit set — the
-  // running loop re-reads the latest view when it finishes its current pass. Without this,
-  // a schedule that arrived mid-render (renderScheduled is cleared before the await) would
-  // start a SECOND concurrent pump, so a fast wheel/pan burst spawned several overlapping
-  // spectrogram renders whose results were mostly discarded.
-  if (state.renderInFlight) {
+  if (!state.session.initialized) {
     return;
   }
-  void pumpRenderLoop();
+
+  const presentedRange = snapPresentedRangeToFrames(getTargetRange());
+  state.viewport.presentedStartFrame = presentedRange.startFrame;
+  state.viewport.presentedEndFrame = presentedRange.endFrame;
+  emitUiState();
 }
 
 // Snap the presented (displayed) view origin to a whole sample so the spectrogram,
@@ -2313,38 +2209,10 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
   );
   const timeLabel = formatAxisLabel(frame / sampleRate);
 
-  if (state.spectrogramConfig.analysisType === 'loudness') {
-    const loudness = ensureLoudnessCache();
-    if (loudness) {
-      const blockSeconds = loudness.blockSamples / sampleRate;
-      const blockIndex = clamp(Math.floor((frame / sampleRate) / blockSeconds), 0, loudness.blockCount - 1);
-      const momentaryVal = loudness.momentary[blockIndex];
-      const shortTermVal = loudness.shortTerm[blockIndex];
-      const peakVal = loudness.samplePeak[blockIndex];
-      const fmtM = momentaryVal <= -100 ? '-\u221E' : `${momentaryVal.toFixed(1)}`;
-      const fmtS = shortTermVal <= -100 ? '-\u221E' : `${shortTermVal.toFixed(1)}`;
-      const fmtP = peakVal <= -100 ? '-\u221E' : `${peakVal.toFixed(1)}`;
-      return {
-        label: `${timeLabel} \u2022 M ${fmtM} LUFS \u2022 S ${fmtS} LUFS \u2022 Sample Peak ${fmtP} dBFS`,
-        markerVisible: false,
-        markerXRatio: ratioX,
-        markerYRatio: clamp01(pointerRatioY),
-        requestId,
-        surface: 'spectrogram',
-      };
-    }
-  }
-
-  const activePlan = state.lastSpectrogramPlan?.analysisType === state.spectrogramConfig.analysisType
-    ? state.lastSpectrogramPlan
-    : createSpectrogramPlan(range);
   if (state.spectrogramConfig.analysisType === 'mfcc') {
     const coefficient = getMfccCoefficientAtPosition(clamp01(pointerRatioY));
-    const coefficientValue = sampleMfccValueAtFrame(frame, coefficient, activePlan);
     return {
-      label: coefficientValue === null
-        ? `${timeLabel} • MFCC C${coefficient}`
-        : `${timeLabel} • MFCC C${coefficient} = ${formatMfccValue(coefficientValue)}`,
+      label: `${timeLabel} • MFCC C${coefficient}`,
       markerVisible: false,
       markerXRatio: ratioX,
       markerYRatio: clamp01(pointerRatioY),
@@ -2355,37 +2223,14 @@ function buildSpectrogramSampleInfo(pointerRatioX: number, pointerRatioY: number
 
   if (isChromaAnalysisType(state.spectrogramConfig.analysisType)) {
     const chroma = getChromaBinAtPosition(clamp01(pointerRatioY));
-    const analysisSample = activePlan
-      ? sampleSpectrogramAnalysisValue(frame, getSpectrogramAnalysisRowIndex(clamp01(pointerRatioY), activePlan.rowCount), activePlan)
-      : null;
     return {
-      label: analysisSample
-        ? `${timeLabel} • ${getChromaLabel(chroma)} • ${formatDecibelValue(analysisSample.valueDb)}`
-        : `${timeLabel} • ${getChromaLabel(chroma)}`,
+      label: `${timeLabel} • ${getChromaLabel(chroma)}`,
       markerVisible: false,
       markerXRatio: ratioX,
       markerYRatio: clamp01(pointerRatioY),
       requestId,
       surface: 'spectrogram',
     };
-  }
-
-  if (activePlan) {
-    const rowIndex = getSpectrogramAnalysisRowIndex(clamp01(pointerRatioY), activePlan.rowCount);
-    const analysisSample = sampleSpectrogramAnalysisValue(frame, rowIndex, activePlan);
-    if (analysisSample) {
-      const rangeLabel = formatFrequencyRangeLabel(analysisSample.frequencyStart, analysisSample.frequencyEnd);
-      return {
-        label: rangeLabel
-          ? `${timeLabel} • ${rangeLabel} • ${formatDecibelValue(analysisSample.valueDb)}`
-          : `${timeLabel} • ${formatDecibelValue(analysisSample.valueDb)}`,
-        markerVisible: false,
-        markerXRatio: ratioX,
-        markerYRatio: clamp01(pointerRatioY),
-        requestId,
-        surface: 'spectrogram',
-      };
-    }
   }
 
   const frequency = getSpectrogramFrequencyAtPosition(clamp01(pointerRatioY));
@@ -2596,10 +2441,7 @@ function buildFrequencyTicks(): FrequencyTickUi[] {
         maxLufs: state.spectrogramConfig.loudnessYAxisMax,
       };
     } else {
-      const loudness = ensureLoudnessCache();
-      yRange = loudness
-        ? computeLoudnessYRange(loudness)
-        : { minLufs: -60, maxLufs: 0 };
+      yRange = { minLufs: -60, maxLufs: 0 };
     }
     const lufsRange = Math.max(1, yRange.maxLufs - yRange.minLufs);
     const gridStep = getLoudnessGridStep(lufsRange);
@@ -2923,28 +2765,6 @@ function ensureAnalysisSampleCapacity(module: WaveCoreModule, floatCount: number
   return state.session.analysisSample;
 }
 
-function ensurePlannerOutputCapacity(module: WaveCoreModule, valueCount: number): Float64Array {
-  if (state.session.plannerOutputCapacity >= valueCount && state.session.plannerOutputPointer) {
-    const view = getHeapF64View(module, state.session.plannerOutputPointer, valueCount);
-    state.session.plannerOutput = view;
-    return view;
-  }
-
-  if (state.session.plannerOutputPointer) {
-    module._free(state.session.plannerOutputPointer);
-  }
-
-  const pointer = module._malloc(valueCount * Float64Array.BYTES_PER_ELEMENT);
-  if (!pointer) {
-    throw new Error('Failed to allocate waveform planner output buffer.');
-  }
-
-  state.session.plannerOutputPointer = pointer;
-  state.session.plannerOutputCapacity = valueCount;
-  state.session.plannerOutput = getHeapF64View(module, pointer, valueCount);
-  return state.session.plannerOutput;
-}
-
 function framesToSeconds(frame: number): number {
   return state.session.sampleRate > 0
     ? clamp(frame, 0, state.session.durationFrames) / state.session.sampleRate
@@ -2963,9 +2783,6 @@ function disposeWasmSession(module: WaveCoreModule): void {
   if (state.session.analysisSamplePointer) {
     module._free(state.session.analysisSamplePointer);
   }
-  if (state.session.plannerOutputPointer) {
-    module._free(state.session.plannerOutputPointer);
-  }
   if (state.session.spectrogramOutputPointer) {
     module._free(state.session.spectrogramOutputPointer);
   }
@@ -2975,9 +2792,6 @@ function disposeWasmSession(module: WaveCoreModule): void {
   state.session.analysisSamplePointer = 0;
   state.session.analysisSampleCapacity = 0;
   state.session.analysisSample = null;
-  state.session.plannerOutputPointer = 0;
-  state.session.plannerOutputCapacity = 0;
-  state.session.plannerOutput = null;
   state.session.waveformPcmPointer = 0;
   state.session.spectrogramOutputPointer = 0;
   state.session.spectrogramOutputCapacity = 0;
@@ -2985,7 +2799,6 @@ function disposeWasmSession(module: WaveCoreModule): void {
 }
 
 const getHeapF32View = heapF32View;
-const getHeapF64View = heapF64View;
 const getHeapU8View = heapU8View;
 
 function yieldToEventLoop(): Promise<void> {

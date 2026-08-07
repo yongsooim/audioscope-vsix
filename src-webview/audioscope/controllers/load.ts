@@ -3,8 +3,9 @@ import {
   createMediaMetadataState,
 } from './media';
 import {
-  createPlaybackAnalysisDataFromPlaybackSession,
   createPlaybackSessionFromPcmFallback,
+  preparePlaybackAnalysisData,
+  type DownmixPcm,
 } from './playbackData';
 
 export type AudioscopeWorkerBootstrapStateKey =
@@ -16,19 +17,20 @@ export type AudioscopeWorkerBootstrapStateKey =
 interface AudioscopeLoadControllerDeps {
   audioTransportProcessorScriptUri?: string;
   createModuleWorker: (moduleUrl: string, bootstrapStateKey: AudioscopeWorkerBootstrapStateKey) => Promise<Worker>;
-  createPlaybackAnalysisDataFromPlaybackSession: typeof createPlaybackAnalysisDataFromPlaybackSession;
   createPlaybackSessionFromPcmFallback: typeof createPlaybackSessionFromPcmFallback;
   createMediaMetadataState: typeof createMediaMetadataState;
   decodeAudioData: (arrayBuffer: ArrayBuffer) => Promise<AudioBuffer>;
   decodeBrowserModuleScriptUri?: string;
   decodeBrowserModuleWasmUri?: string;
   decodeWorkerScriptUri?: string;
+  downmixPcm: DownmixPcm;
   destroySession: () => void;
   embeddedMediaToolsGuidance: string;
   initializeDecodedPlayback: (loadToken: number, payload: any, decodedAudio: AudioBuffer) => Promise<void>;
   initializePlaybackFromPreparedData: (loadToken: number, payload: any, preparedPlaybackData: any) => Promise<void>;
   initializeWaveformSurface: (loadToken: number) => Promise<void>;
   normalizeExternalToolStatus: (status: unknown, guidance?: string) => any;
+  preparePlaybackAnalysisData: typeof preparePlaybackAnalysisData;
   resetSpectrogramCanvasElement: () => void;
   renderMediaMetadata: () => void;
   renderSpectrogramScale: () => void;
@@ -36,6 +38,7 @@ interface AudioscopeLoadControllerDeps {
   setAnalysisStatus: (message: string, persistent?: boolean) => void;
   setFatalStatus: (message: string) => void;
   setLoudnessSummaryUnavailable: (message?: string) => void;
+  setReadyLoudnessSummary: (summary: any) => void;
   setPendingLoudnessSummary: () => void;
   clearFatalStatus: () => void;
   startPlaybackLoop: () => void;
@@ -48,19 +51,20 @@ interface AudioscopeLoadControllerDeps {
 export function createAudioscopeLoadController({
   audioTransportProcessorScriptUri,
   createModuleWorker,
-  createPlaybackAnalysisDataFromPlaybackSession,
   createPlaybackSessionFromPcmFallback,
   createMediaMetadataState,
   decodeAudioData,
   decodeBrowserModuleScriptUri,
   decodeBrowserModuleWasmUri,
   decodeWorkerScriptUri,
+  downmixPcm,
   destroySession,
   embeddedMediaToolsGuidance,
   initializeDecodedPlayback,
   initializePlaybackFromPreparedData,
   initializeWaveformSurface,
   normalizeExternalToolStatus,
+  preparePlaybackAnalysisData,
   resetSpectrogramCanvasElement,
   renderMediaMetadata,
   renderSpectrogramScale,
@@ -68,6 +72,7 @@ export function createAudioscopeLoadController({
   setAnalysisStatus,
   setFatalStatus,
   setLoudnessSummaryUnavailable,
+  setReadyLoudnessSummary,
   setPendingLoudnessSummary,
   clearFatalStatus,
   startPlaybackLoop,
@@ -406,6 +411,16 @@ export function createAudioscopeLoadController({
       return;
     }
 
+    if (message?.type === 'loudnessReady') {
+      setReadyLoudnessSummary(message.body);
+      return;
+    }
+
+    if (message?.type === 'loudnessError') {
+      setLoudnessSummaryUnavailable(message.body?.message || 'Failed to measure loudness summary.');
+      return;
+    }
+
     if (message?.type === 'error') {
       handleDecodeWorkerFailure(
         loadToken,
@@ -592,7 +607,7 @@ export function createAudioscopeLoadController({
       await initializePlaybackFromPreparedData(
         loadToken,
         payload,
-        createPlaybackAnalysisDataFromPlaybackSession(playbackSession),
+        await preparePlaybackAnalysisData(playbackSession, downmixPcm),
       );
       return;
     }
@@ -747,6 +762,7 @@ export function createAudioscopeLoadController({
       setAnalysisSourceKind(sourceKind);
       renderMediaMetadata();
 
+      startDeferredLoudnessLoad(loadToken, payload);
       await initializeDecodedPlayback(loadToken, payload, decodedAudio);
       if (loadToken !== state.loadToken || controller.signal.aborted) {
         return;
@@ -834,7 +850,6 @@ export function createAudioscopeLoadController({
       prewarmDecodeWorker(loadToken);
     }
     startMediaMetadataLoad(loadToken, payload);
-    startDeferredLoudnessLoad(loadToken, payload);
     syncTransport();
     renderWaveformUi();
     renderSpectrogramScale();

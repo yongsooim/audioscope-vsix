@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
   createInitialExternalToolStatus,
-  decodeWithFfmpeg,
+  decodeWithFfmpegAndLoudness,
   exportAudioSegment,
   getExternalToolStatus,
   getLoudnessSummary,
@@ -17,7 +17,8 @@ import type {
 } from './hostWebviewProtocol';
 import { prewarmEmbeddedDirectDecodeModule } from './embeddedMediaTools';
 import {
-  getCachedDecodeFallback,
+  createResourceRevision,
+  getCachedDecodeLoudnessPipeline,
   getCachedLoudnessSummary,
   getCachedMediaMetadata,
 } from './mediaHostCache';
@@ -106,6 +107,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     _token: vscode.CancellationToken,
   ): Promise<void> {
     let externalToolStatusPromise: Promise<Awaited<ReturnType<typeof getExternalToolStatus>>> | null = null;
+    let resourceRevision: ReturnType<typeof createResourceRevision> | null = null;
     const documentRoot = document.uri.with({
       path: path.posix.dirname(document.uri.path),
       query: '',
@@ -124,6 +126,10 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
       }
 
       return externalToolStatusPromise;
+    };
+    const getOrStartResourceRevision = (): ReturnType<typeof createResourceRevision> => {
+      resourceRevision ??= createResourceRevision(document.uri);
+      return resourceRevision;
     };
     void getOrStartExternalToolStatus();
     if (shouldUseSharedHostDecodeLoudness(document.uri)) {
@@ -148,7 +154,11 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     };
 
     const postAudioPayload = async (): Promise<void> => {
-      const payload = await this.buildPayload(document, webviewPanel.webview);
+      const payload = await this.buildPayload(
+        document,
+        webviewPanel.webview,
+        getOrStartResourceRevision().getFileSize(),
+      );
       await postIfAlive({ type: 'loadAudio', body: payload });
 
       if (!payload.externalTools.resolved) {
@@ -171,9 +181,11 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
 
       switch (message.type) {
         case 'ready':
-        case 'reload':
+        case 'reload': {
+          resourceRevision = createResourceRevision(document.uri);
           await postAudioPayload();
           return;
+        }
 
         case 'persistSpectrogramDefaults': {
           const nextDefaults = normalizeSpectrogramDefaults(message.body);
@@ -241,6 +253,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
             const metadata = await getCachedMediaMetadata(
               document.uri,
               () => getMediaMetadata(document.uri),
+              getOrStartResourceRevision().getKey(),
             );
             await postIfAlive({
               type: 'mediaMetadataReady',
@@ -263,13 +276,26 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         case 'requestDecodeFallback': {
           const loadToken = Number(message.body?.loadToken) || 0;
           try {
-            const fallback = await getCachedDecodeFallback(
+            const pipeline = await getCachedDecodeLoudnessPipeline(
               document.uri,
-              () => decodeWithFfmpeg(document.uri),
+              () => decodeWithFfmpegAndLoudness(document.uri),
+              getOrStartResourceRevision().getKey(),
             );
+            void pipeline.loudnessPromise
+              .then((summary) => postIfAlive({
+                type: 'loudnessSummaryReady',
+                body: { ...summary, loadToken },
+              }))
+              .catch((error) => postIfAlive({
+                type: 'loudnessSummaryError',
+                body: {
+                  loadToken,
+                  message: error instanceof Error ? error.message : String(error),
+                },
+              }));
             await postIfAlive({
               type: 'decodeFallbackReady',
-              body: { ...cloneDecodeFallbackPayload(fallback), loadToken },
+              body: { ...cloneDecodeFallbackPayload(pipeline.decode), loadToken },
             });
           } catch (error) {
             const toolStatus = await getExternalToolStatus(document.uri);
@@ -291,6 +317,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
             const summary = await getCachedLoudnessSummary(
               document.uri,
               () => getLoudnessSummary(document.uri),
+              getOrStartResourceRevision().getKey(),
             );
             await postIfAlive({
               type: 'loudnessSummaryReady',
@@ -383,15 +410,12 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     }
   }
 
-  private async buildPayload(document: AudioscopeDocument, webview: vscode.Webview): Promise<AudioscopePayload> {
-    let fileSize: number | null = null;
-
-    try {
-      const stat = await vscode.workspace.fs.stat(document.uri);
-      fileSize = stat.size;
-    } catch {
-      fileSize = null;
-    }
+  private async buildPayload(
+    document: AudioscopeDocument,
+    webview: vscode.Webview,
+    fileSizePromise: Promise<number | null>,
+  ): Promise<AudioscopePayload> {
+    const fileSize = await fileSizePromise;
 
     const spectrogramQuality = vscode.workspace
       .getConfiguration('audioscope', document.uri)

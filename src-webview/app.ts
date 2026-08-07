@@ -17,6 +17,8 @@ import {
   createPlaybackAnalysisData,
   createPlaybackAnalysisDataFromPlaybackSession,
   createPlaybackSessionFromPcmFallback,
+  preparePlaybackAnalysisData,
+  type DownmixedPcm,
 } from './audioscope/controllers/playbackData';
 import {
   createAudioscopePlaybackRateController,
@@ -69,6 +71,7 @@ const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc || '';
 const decodeBrowserModuleScriptUri = document.body.dataset.decodeModuleSrc;
 const decodeBrowserModuleWasmUri = document.body.dataset.decodeModuleWasmSrc;
 const decodeWorkerScriptUri = document.body.dataset.decodeWorkerSrc;
+const pcmDownmixWorkerScriptUri = document.body.dataset.pcmDownmixWorkerSrc;
 const audioTransportProcessorScriptUri = document.body.dataset.audioTransportProcessorSrc;
 const stretchProcessorScriptUri = document.body.dataset.stretchProcessorSrc;
 const wasmCoreSimdScriptUri = document.body.dataset.wasmCoreSimdSrc || '';
@@ -115,6 +118,88 @@ function fetchWorkerSourceText(moduleUrl: string): Promise<string> {
     workerSourceTextCache.set(moduleUrl, cached);
   }
   return cached;
+}
+
+async function downmixPcmInWorker(
+  channelBuffers: ArrayBuffer[],
+  sampleCount: number,
+  channelCount: number,
+): Promise<DownmixedPcm> {
+  if (!pcmDownmixWorkerScriptUri) {
+    throw new Error('PCM downmix worker script is unavailable.');
+  }
+
+  const abortSignal = state.sourceFetchController?.signal ?? null;
+  const sourceText = await fetchWorkerSourceText(pcmDownmixWorkerScriptUri);
+  const bootstrapUrl = URL.createObjectURL(new Blob([sourceText], { type: 'text/javascript' }));
+  const worker = new Worker(bootstrapUrl, { type: 'module' });
+
+  return new Promise<DownmixedPcm>((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = (): void => {
+      worker.terminate();
+      URL.revokeObjectURL(bootstrapUrl);
+      abortSignal?.removeEventListener('abort', handleAbort);
+    };
+    const fail = (error: unknown): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const handleAbort = (): void => {
+      fail(new DOMException('PCM downmix was aborted.', 'AbortError'));
+    };
+
+    worker.addEventListener('message', (event: MessageEvent) => {
+      if (settled) {
+        return;
+      }
+      if (event.data?.type === 'error') {
+        fail(new Error(event.data.body?.message || 'PCM downmix failed.'));
+        return;
+      }
+      if (event.data?.type !== 'downmixReady') {
+        return;
+      }
+
+      const resultBuffers = Array.isArray(event.data.body?.channelBuffers)
+        ? event.data.body.channelBuffers.filter((buffer) => buffer instanceof ArrayBuffer)
+        : [];
+      const monoBuffer = event.data.body?.monoBuffer;
+
+      if (resultBuffers.length !== channelBuffers.length || !(monoBuffer instanceof ArrayBuffer)) {
+        fail(new Error('PCM downmix worker returned invalid buffers.'));
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      resolve({ channelBuffers: resultBuffers, monoBuffer });
+    });
+    worker.addEventListener('error', (event) => {
+      fail(new Error(event.message || 'PCM downmix worker failed.'));
+    });
+    abortSignal?.addEventListener('abort', handleAbort, { once: true });
+
+    if (abortSignal?.aborted) {
+      handleAbort();
+      return;
+    }
+
+    worker.postMessage({
+      type: 'downmixPcm',
+      body: {
+        channelBuffers,
+        channelCount,
+        maxTotalSamples: MAX_TOTAL_ANALYSIS_SAMPLES,
+        sampleCount,
+      },
+    }, channelBuffers);
+  });
 }
 
 let DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
@@ -533,9 +618,9 @@ const {
   renderLoudnessSummary,
   renderMediaMetadata,
   setLoudnessSummaryUnavailable,
+  setReadyLoudnessSummary,
   setMediaMetadataDetailOpen,
   setPendingLoudnessSummary,
-  setReadyLoudnessSummary,
   syncMediaMetadataDetailVisibility,
   updateMediaMetadataDetailPosition,
 } = createAudioscopeMediaController({
@@ -1061,11 +1146,6 @@ async function ensureEngineWorker(loadToken: number): Promise<Worker | null> {
     }
     setFatalStatus(`Audio engine worker failed: ${event.message || 'Unknown worker error.'}`);
   });
-  const wasmBytes = await fetchWasmCoreBytes();
-  if (loadToken !== state.loadToken) {
-    return null;
-  }
-  worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
   postInitSurfaces();
   return worker;
 }
@@ -4281,7 +4361,11 @@ async function startDeferredAnalysisSession(loadToken: number): Promise<void> {
 }
 
 async function initializeDecodedPlayback(loadToken: number, payload: any, decodedAudio: AudioBuffer): Promise<void> {
-  await initializePlaybackFromPreparedData(loadToken, payload, createPlaybackAnalysisData(decodedAudio));
+  await initializePlaybackFromPreparedData(
+    loadToken,
+    payload,
+    await createPlaybackAnalysisData(decodedAudio, downmixPcmInWorker),
+  );
 }
 
 async function initializePlaybackFromPreparedData(
@@ -4336,9 +4420,6 @@ async function initializePlaybackFromPreparedData(
     type: 'LoadAnalysisSession',
     body: {
       durationFrames: playbackSession.sourceLength,
-      quality: payload?.spectrogramQuality === 'balanced' || payload?.spectrogramQuality === 'max'
-        ? payload.spectrogramQuality
-        : 'high',
       sampleRate: playbackSession.sourceSampleRate,
       sessionRevision: state.engineSessionRevision,
     },
@@ -4390,19 +4471,20 @@ const {
 } = createAudioscopeLoadController({
   audioTransportProcessorScriptUri,
   createModuleWorker,
-  createPlaybackAnalysisDataFromPlaybackSession,
   createPlaybackSessionFromPcmFallback,
   createMediaMetadataState,
   decodeAudioData,
   decodeBrowserModuleScriptUri,
   decodeBrowserModuleWasmUri,
   decodeWorkerScriptUri,
+  downmixPcm: downmixPcmInWorker,
   destroySession,
   embeddedMediaToolsGuidance: EMBEDDED_MEDIA_TOOLS_GUIDANCE,
   initializeDecodedPlayback,
   initializePlaybackFromPreparedData,
   initializeWaveformSurface,
   normalizeExternalToolStatus,
+  preparePlaybackAnalysisData,
   resetSpectrogramCanvasElement,
   renderMediaMetadata,
   renderSpectrogramScale,
@@ -4410,6 +4492,7 @@ const {
   setAnalysisStatus,
   setFatalStatus,
   setLoudnessSummaryUnavailable,
+  setReadyLoudnessSummary,
   setPendingLoudnessSummary,
   clearFatalStatus,
   startPlaybackLoop,

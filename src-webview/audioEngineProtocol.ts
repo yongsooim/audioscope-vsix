@@ -185,11 +185,9 @@ export interface SampleInfoPayload {
 
 export interface InitSurfacesMessage {
   body: {
-    spectrogramOffscreenCanvas?: OffscreenCanvas;
     spectrogramPixelHeight: number;
     spectrogramPixelWidth: number;
     waveformHeightCssPx: number;
-    waveformOffscreenCanvas?: OffscreenCanvas;
     waveformRenderScale: number;
     waveformWidthCssPx: number;
   };
@@ -199,22 +197,10 @@ export interface InitSurfacesMessage {
 export interface LoadAnalysisSessionMessage {
   body: {
     durationFrames: number;
-    monoSamplesBuffer?: ArrayBuffer;
-    quality: 'balanced' | 'high' | 'max';
     sampleRate: number;
     sessionRevision: number;
   };
   type: 'LoadAnalysisSession';
-}
-
-export interface EngineBootstrapRuntimeMessage {
-  body?: {
-    wasmBytes?: {
-      fallback?: ArrayBuffer | null;
-      simd?: ArrayBuffer | null;
-    };
-  };
-  type: 'bootstrapRuntime';
 }
 
 export interface DisposeSessionMessage {
@@ -343,7 +329,6 @@ export interface RequestSampleInfoMessage {
 }
 
 export type EngineMainToWorkerMessage =
-  | EngineBootstrapRuntimeMessage
   | DisposeSessionMessage
   | InitSurfacesMessage
   | LoadAnalysisSessionMessage

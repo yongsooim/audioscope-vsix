@@ -4,7 +4,7 @@ import {
   type EmbeddedExportFormat,
   getEmbeddedExecutableStatusSync,
   runEmbeddedFfencodeExport,
-  runEmbeddedFfmpegDecodeToPcm,
+  runEmbeddedFfmpegDecodeLoudnessPipeline,
   runEmbeddedFfmpegMeasureLoudness,
   runEmbeddedFfmpegDecodeToWav,
   runEmbeddedFfprobe,
@@ -581,6 +581,11 @@ const FFMPEG_EXPORT_TIMEOUT_MS = 300_000;
 
 export type { EmbeddedExportFormat };
 
+export interface DecodeLoudnessPipelinePayload {
+  decode: DecodeFallbackPayload;
+  loudnessPromise: Promise<LoudnessSummaryPayload>;
+}
+
 export async function exportAudioSegment(
   resource: vscode.Uri,
   targetPath: string,
@@ -591,26 +596,29 @@ export async function exportAudioSegment(
   await runEmbeddedFfencodeExport(resource, targetPath, format, startSeconds, endSeconds, FFMPEG_EXPORT_TIMEOUT_MS);
 }
 
-export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFallbackPayload> {
+export async function decodeWithFfmpegAndLoudness(
+  resource: vscode.Uri,
+): Promise<DecodeLoudnessPipelinePayload> {
   await ensureToolStatusFor(resource, 'decode');
 
   try {
-    const result = await runEmbeddedFfmpegDecodeToPcm(resource);
-
+    const pipeline = await runEmbeddedFfmpegDecodeLoudnessPipeline(resource);
     return {
-      ...result,
-      kind: 'pcm',
+      decode: {
+        ...pipeline.decode,
+        kind: 'pcm',
+      },
+      loudnessPromise: pipeline.loudnessPromise.then(normalizeLoudnessSummary),
     };
-  } catch (error) {
-    const result = await runEmbeddedFfmpegDecodeToWav(
-      resource,
-      FFMPEG_DECODE_TIMEOUT_MS,
-    );
-
+  } catch {
+    const decode = await runEmbeddedFfmpegDecodeToWav(resource, FFMPEG_DECODE_TIMEOUT_MS);
     return {
-      ...result,
-      kind: 'wav',
-      source: 'ffmpeg',
+      decode: {
+        ...decode,
+        kind: 'wav',
+        source: 'ffmpeg',
+      },
+      loudnessPromise: getLoudnessSummary(resource),
     };
   }
 }
