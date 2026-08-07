@@ -1,14 +1,17 @@
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
   createInitialExternalToolStatus,
   decodeWithFfmpeg,
+  exportAudioSegment,
   getExternalToolStatus,
   getLoudnessSummary,
   getMediaMetadata,
 } from './externalAudioTools';
 import type {
   AudioscopePayload,
+  ExportAudioMessage,
   HostToWebviewMessage,
   WebviewToHostMessage,
 } from './hostWebviewProtocol';
@@ -194,6 +197,44 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           return;
         }
 
+        case 'persistViewportSplitRatio': {
+          const ratio = Number(message.body?.ratio);
+          if (!Number.isFinite(ratio)) {
+            return;
+          }
+          await vscode.workspace
+            .getConfiguration('audioscope')
+            .update('viewportSplitRatio', Math.min(1, Math.max(0, ratio)), vscode.ConfigurationTarget.Global);
+          return;
+        }
+
+        case 'persistWaveformAmplitudeMax': {
+          const amplitudeMax = Number(message.body?.amplitudeMax);
+          if (!Number.isFinite(amplitudeMax)) {
+            return;
+          }
+          await vscode.workspace
+            .getConfiguration('audioscope')
+            .update('waveformAmplitudeMax', Math.min(1, Math.max(0.01, amplitudeMax)), vscode.ConfigurationTarget.Global);
+          return;
+        }
+
+        case 'persistPlaybackVolume': {
+          const volume = Number(message.body?.volume);
+          if (!Number.isFinite(volume)) {
+            return;
+          }
+          await vscode.workspace
+            .getConfiguration('audioscope')
+            .update('playbackVolume', Math.min(1, Math.max(0, volume)), vscode.ConfigurationTarget.Global);
+          return;
+        }
+
+        case 'exportAudio': {
+          await this.exportAudio(document, message.body);
+          return;
+        }
+
         case 'requestMediaMetadata': {
           const loadToken = Number(message.body?.loadToken) || 0;
           try {
@@ -296,6 +337,52 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     });
   }
 
+  private async exportAudio(document: AudioscopeDocument, body: ExportAudioMessage['body']): Promise<void> {
+    const format = body?.format;
+    if (format !== 'wav' && format !== 'mp3' && format !== 'm4a' && format !== 'flac') {
+      return;
+    }
+
+    const startSeconds = Number(body?.startSeconds);
+    const endSeconds = Number(body?.endSeconds);
+    if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || !(endSeconds > startSeconds) || startSeconds < 0) {
+      return;
+    }
+
+    const sourceBaseName = path.posix.basename(document.uri.path).replace(/\.[^.]+$/u, '') || 'audio';
+    const defaultName = `${sourceBaseName}_${startSeconds.toFixed(2)}s-${endSeconds.toFixed(2)}s.${format}`;
+    const defaultUri = document.uri.scheme === 'file'
+      ? vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), defaultName))
+      : vscode.Uri.joinPath(vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir()), defaultName);
+
+    const targetUri = await vscode.window.showSaveDialog({
+      defaultUri,
+      filters: { [`${format.toUpperCase()} audio`]: [format] },
+    });
+    if (!targetUri) {
+      return;
+    }
+
+    try {
+      if (targetUri.scheme !== 'file') {
+        throw new Error('Export can only save to the local filesystem.');
+      }
+
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `audioscope: exporting ${path.basename(targetUri.fsPath)}…`,
+        },
+        () => exportAudioSegment(document.uri, targetUri.fsPath, format, startSeconds, endSeconds),
+      );
+      void vscode.window.showInformationMessage(`audioscope: exported ${path.basename(targetUri.fsPath)}`);
+    } catch (error) {
+      void vscode.window.showErrorMessage(
+        `audioscope export failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   private async buildPayload(document: AudioscopeDocument, webview: vscode.Webview): Promise<AudioscopePayload> {
     let fileSize: number | null = null;
 
@@ -318,6 +405,24 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     const splitChannels = vscode.workspace
       .getConfiguration('audioscope', document.uri)
       .get<boolean>('experimental.splitChannels', false);
+    const viewportSplitRatioSetting = Number(
+      vscode.workspace.getConfiguration('audioscope', document.uri).get<number>('viewportSplitRatio', 0.5),
+    );
+    const viewportSplitRatio = Number.isFinite(viewportSplitRatioSetting)
+      ? Math.min(1, Math.max(0, viewportSplitRatioSetting))
+      : 0.5;
+    const waveformAmplitudeMaxSetting = Number(
+      vscode.workspace.getConfiguration('audioscope', document.uri).get<number>('waveformAmplitudeMax', 1),
+    );
+    const waveformAmplitudeMax = Number.isFinite(waveformAmplitudeMaxSetting)
+      ? Math.min(1, Math.max(0.01, waveformAmplitudeMaxSetting))
+      : 1;
+    const playbackVolumeSetting = Number(
+      vscode.workspace.getConfiguration('audioscope', document.uri).get<number>('playbackVolume', 1),
+    );
+    const playbackVolume = Number.isFinite(playbackVolumeSetting)
+      ? Math.min(1, Math.max(0, playbackVolumeSetting))
+      : 1;
     const externalTools = createInitialExternalToolStatus(document.uri);
 
     return {
@@ -325,6 +430,9 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
       documentUri: document.uri.toString(),
       enableWebGpuRendering,
       splitChannels,
+      viewportSplitRatio,
+      waveformAmplitudeMax,
+      playbackVolume,
       externalTools,
       fileExtension: path.posix.extname(document.uri.path).replace(/^\./, '').toLowerCase(),
       fileBacked: externalTools.fileBacked,

@@ -20,6 +20,21 @@ source repository under the same paths:
 - `src-wasm/third_party/ffmpeg/COPYING.LGPLv2.1`
 - `src-wasm/third_party/ffmpeg/COPYING.LGPLv3`
 
+## LAME (libmp3lame)
+
+audioscope distributes an embedded `ffencode` WebAssembly binary that
+statically links libmp3lame from the LAME project for MP3 export. The LAME
+source tarball (`lame-3.100.tar.gz`) is downloaded and verified by checksum
+during the build; see `scripts/build-embedded-media-tools.mts` and
+`FFMPEG_SOURCE.md` for rebuild notes.
+
+Copyright (c) the LAME development team
+
+LAME is licensed under the GNU Lesser General Public License, version 2 or
+later. The license text is available at
+`https://sourceforge.net/projects/lame/` together with the corresponding
+source code for the bundled version (3.100).
+
 ## Signalsmith Stretch Web
 
 audioscope vendors `src-webview/vendor/SignalsmithStretch.mjs` from

@@ -58,6 +58,25 @@ export interface AudioTransport {
   seek(timeSeconds: number): void;
   setLoop(loopRangeOrNull: PlaybackLoopRange | null): void;
   setPlaybackRate(rate: number): void;
+  setVolume(volume: number): void;
+}
+
+function normalizeVolume(volume: number): number {
+  return Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 1;
+}
+
+// Short ramp instead of a hard jump so live volume changes stay click-free.
+function applyGainNodeVolume(gainNode: GainNode | null, context: AudioContext | null, volume: number): void {
+  if (!gainNode) {
+    return;
+  }
+
+  if (context && typeof gainNode.gain.setTargetAtTime === 'function') {
+    gainNode.gain.setTargetAtTime(volume, context.currentTime, 0.02);
+    return;
+  }
+
+  gainNode.gain.value = volume;
 }
 
 interface PlaybackSourceObject {
@@ -147,11 +166,15 @@ class AudioWorkletCopyTransport {
   private workletModuleReadyPromise: Promise<void> | null;
   private workletModuleUrl: string;
   private workletNode: AudioWorkletNode | null;
+  private gainNode: GainNode | null;
+  private volume: number;
 
   constructor(options: AudioTransportOptions = {}) {
     this.audioContext = null;
     this.playbackSession = null;
     this.workletNode = null;
+    this.gainNode = null;
+    this.volume = 1;
     this.workletModuleReadyPromise = null;
     this.workletModuleUrl = typeof options.workletModuleUrl === 'string'
       ? options.workletModuleUrl
@@ -333,6 +356,11 @@ class AudioWorkletCopyTransport {
     // The copied-buffer transport always runs at native speed.
   }
 
+  setVolume(volume: number): void {
+    this.volume = normalizeVolume(volume);
+    applyGainNodeVolume(this.gainNode, this.audioContext, this.volume);
+  }
+
   async dispose() {
     this.cancelScheduledSuspend();
     this.disposeWorkletNode();
@@ -349,6 +377,7 @@ class AudioWorkletCopyTransport {
     if (this.audioContext) {
       const audioContext = this.audioContext;
       this.audioContext = null;
+      this.gainNode = null;
       this.workletModuleReadyPromise = null;
       await audioContext.close().catch(() => {});
     }
@@ -369,6 +398,16 @@ class AudioWorkletCopyTransport {
 
     this.audioContext = new AudioContextConstructor();
     return this.audioContext;
+  }
+
+  ensureGainNode(context: AudioContext): GainNode {
+    if (!this.gainNode) {
+      this.gainNode = context.createGain();
+      this.gainNode.gain.value = this.volume;
+      this.gainNode.connect(context.destination);
+    }
+
+    return this.gainNode;
   }
 
   async ensureWorkletNode(initialTimeSeconds = this.pausedAtSeconds): Promise<AudioWorkletNode> {
@@ -429,7 +468,7 @@ class AudioWorkletCopyTransport {
     node.onprocessorerror = () => {
       this.markUnavailable(new Error('AudioWorklet processor failed.'));
     };
-    node.connect(context.destination);
+    node.connect(this.ensureGainNode(context));
 
     this.workletNode = node;
     this.snapshotState = null;
@@ -855,6 +894,11 @@ class HybridAudioTransport implements AudioTransport {
     return this.playbackRate;
   }
 
+  setVolume(volume: number): void {
+    this.copyTransport.setVolume(volume);
+    this.stretchTransport.setVolume(volume);
+  }
+
   getCurrentTime(): number {
     return this.getActiveTransport().getCurrentTime();
   }
@@ -938,10 +982,14 @@ class StretchAudioTransport implements AudioTransport {
   private stretchNode: StretchNode | null;
   private suspendTimer: ReturnType<typeof setTimeout> | null;
   private transportKind: TransportKind;
+  private gainNode: GainNode | null;
+  private volume: number;
 
   constructor(options: AudioTransportOptions = {}) {
     this.audioContext = null;
     this.ended = false;
+    this.gainNode = null;
+    this.volume = 1;
     this.inputTimeSeconds = 0;
     this.lastFallbackReason = null;
     this.loopRange = null;
@@ -1089,6 +1137,11 @@ class StretchAudioTransport implements AudioTransport {
     return this.playbackRate;
   }
 
+  setVolume(volume: number): void {
+    this.volume = normalizeVolume(volume);
+    applyGainNodeVolume(this.gainNode, this.audioContext, this.volume);
+  }
+
   getCurrentTime(): number {
     const duration = this.getDuration();
 
@@ -1156,10 +1209,21 @@ class StretchAudioTransport implements AudioTransport {
     if (this.audioContext) {
       const audioContext = this.audioContext;
       this.audioContext = null;
+      this.gainNode = null;
       await audioContext.close().catch(() => {});
     }
 
     this.notifyStateChange();
+  }
+
+  private ensureGainNode(context: AudioContext): GainNode {
+    if (!this.gainNode) {
+      this.gainNode = context.createGain();
+      this.gainNode.gain.value = this.volume;
+      this.gainNode.connect(context.destination);
+    }
+
+    return this.gainNode;
   }
 
   private async ensureAudioContext(): Promise<AudioContext> {
@@ -1217,7 +1281,7 @@ class StretchAudioTransport implements AudioTransport {
       this.handleStretchTimeUpdate(seconds);
     });
     this.outputLatencySeconds = Math.max(0, Number(await node.latency()) || 0);
-    node.connect(context.destination);
+    node.connect(this.ensureGainNode(context));
 
     this.stretchNode = node;
     this.transportKind = 'audio-worklet-stretch';

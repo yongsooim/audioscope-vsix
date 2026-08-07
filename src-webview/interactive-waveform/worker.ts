@@ -24,6 +24,7 @@ interface AudioSessionOptions {
 }
 
 interface RenderWaveformRequest {
+  amplitudeMax?: number;
   color?: string;
   generation?: number;
   height?: number;
@@ -607,6 +608,7 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     height,
     renderScale,
     {
+      amplitudeMax: Number(request?.amplitudeMax) || 1,
       sampleData,
       stableColumnSlotBlend: stableGeometryBlend,
     },

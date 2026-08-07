@@ -120,9 +120,13 @@ function fetchWorkerSourceText(moduleUrl: string): Promise<string> {
 let DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR);
 const DEFAULT_VIEWPORT_SPLIT_RATIO = 0.5;
 const VIEWPORT_SPLIT_STEP = 0.05;
-const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 12;
+// Must stay in sync with --viewport-splitter-size in audioscope.css.
+const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 8;
 const VIEWPORT_RATIO_MAX = 1;
 const VIEWPORT_RATIO_MIN = 0;
+const DEFAULT_WAVEFORM_AMPLITUDE_MAX = 1;
+// Descending 1-2-5 steps for the waveform vertical zoom (± displayed amplitude).
+const WAVEFORM_AMPLITUDE_MAX_OPTIONS = [1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 const LOOP_HANDLE_WIDTH_PX = 8;
 const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. Rebuild or reinstall audioscope to restore metadata and decoding.';
 const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
@@ -193,8 +197,10 @@ function createInitialWaveformViewportState() {
   return {
     activeRenderRange: null as TimeRange | null,
     activeRenderWidthPx: 0,
+    activeRenderHeightPx: 0,
     pendingRenderRange: null as TimeRange | null,
     pendingRenderWidthPx: 0,
+    pendingRenderHeightPx: 0,
     presentedRange: { end: 0, start: 0 },
     renderedRange: { end: 0, start: 0 },
     renderWidthPx: 0,
@@ -344,6 +350,7 @@ type WaveformWorkerToMainMessage =
   | {
       body: {
         generation?: number;
+        height?: number;
         viewEnd?: number;
         viewStart?: number;
         width?: number;
@@ -503,6 +510,11 @@ const state = {
   spectrogramSurfaceReadyPromise: null as Promise<void> | null,
   viewportResizeDrag: null as { pointerId: number } | null,
   viewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
+  viewportSplitRatioPersistTimer: null as number | null,
+  playbackVolume: 1,
+  playbackVolumePersistTimer: null as number | null,
+  waveformAmplitudeMax: DEFAULT_WAVEFORM_AMPLITUDE_MAX,
+  waveformAmplitudeMaxPersistTimer: null as number | null,
   waveformCanvas: null as HTMLCanvasElement | null,
   waveformRenderGeneration: 0,
   waveformSurfaceReadyPromise: null as Promise<void> | null,
@@ -2124,9 +2136,148 @@ function renderWaveformUi(): void {
 
   elements.waveLoopLabel.textContent = selectionLabel;
   elements.waveClearLoop.disabled = !(selection?.committed);
+  const canExport = getDurationFrames() > 0;
+  elements.waveExport.disabled = !canExport;
+  elements.waveExportFormat.disabled = !canExport;
   renderWaveformAxis();
   renderSelectionAndLoop(uiState);
   renderPlaybackIndicators(uiState);
+}
+
+function normalizeWaveformAmplitudeMax(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_WAVEFORM_AMPLITUDE_MAX;
+  }
+  return clamp(
+    numeric,
+    WAVEFORM_AMPLITUDE_MAX_OPTIONS[WAVEFORM_AMPLITUDE_MAX_OPTIONS.length - 1],
+    WAVEFORM_AMPLITUDE_MAX_OPTIONS[0],
+  );
+}
+
+function stepWaveformAmplitudeMax(direction: 'in' | 'out'): number {
+  const current = state.waveformAmplitudeMax;
+  if (direction === 'in') {
+    const next = WAVEFORM_AMPLITUDE_MAX_OPTIONS.find((option) => option < current - 1e-9);
+    return next ?? WAVEFORM_AMPLITUDE_MAX_OPTIONS[WAVEFORM_AMPLITUDE_MAX_OPTIONS.length - 1];
+  }
+  for (let index = WAVEFORM_AMPLITUDE_MAX_OPTIONS.length - 1; index >= 0; index -= 1) {
+    if (WAVEFORM_AMPLITUDE_MAX_OPTIONS[index] > current + 1e-9) {
+      return WAVEFORM_AMPLITUDE_MAX_OPTIONS[index];
+    }
+  }
+  return WAVEFORM_AMPLITUDE_MAX_OPTIONS[0];
+}
+
+function formatWaveformAmplitudeMax(value: number): string {
+  return value.toFixed(2).replace(/(\.\d)0$/, '$1');
+}
+
+function renderWaveformAmplitudeUi(): void {
+  const label = formatWaveformAmplitudeMax(state.waveformAmplitudeMax);
+  elements.waveAmpChip.textContent = `Amp ±${label}`;
+  elements.waveformLevelLabelPositive.textContent = label;
+  elements.waveformLevelLabelNegative.textContent = `-${label}`;
+  elements.waveAmpIn.disabled = state.waveformAmplitudeMax
+    <= WAVEFORM_AMPLITUDE_MAX_OPTIONS[WAVEFORM_AMPLITUDE_MAX_OPTIONS.length - 1] + 1e-9;
+  elements.waveAmpOut.disabled = state.waveformAmplitudeMax >= WAVEFORM_AMPLITUDE_MAX_OPTIONS[0] - 1e-9;
+}
+
+// Drops the request dedupe state so the next requestWaveformRender re-sends
+// even for an unchanged view range (needed when only the amplitude scale changed).
+function forceWaveformRerender(): void {
+  state.waveformViewport.activeRenderRange = null;
+  state.waveformViewport.pendingRenderRange = null;
+  requestWaveformRender();
+}
+
+function schedulePersistWaveformAmplitudeMax(): void {
+  if (state.waveformAmplitudeMaxPersistTimer) {
+    window.clearTimeout(state.waveformAmplitudeMaxPersistTimer);
+  }
+
+  state.waveformAmplitudeMaxPersistTimer = window.setTimeout(() => {
+    state.waveformAmplitudeMaxPersistTimer = null;
+    vscode.postMessage({
+      type: 'persistWaveformAmplitudeMax',
+      body: { amplitudeMax: state.waveformAmplitudeMax },
+    });
+  }, 160);
+}
+
+function applyWaveformAmplitudeMax(value: number, { persist = true } = {}): void {
+  const nextValue = normalizeWaveformAmplitudeMax(value);
+  const changed = Math.abs(nextValue - state.waveformAmplitudeMax) > 1e-9;
+  state.waveformAmplitudeMax = nextValue;
+  renderWaveformAmplitudeUi();
+
+  if (!changed) {
+    return;
+  }
+  forceWaveformRerender();
+  if (persist) {
+    schedulePersistWaveformAmplitudeMax();
+  }
+}
+
+function schedulePersistViewportSplitRatio(): void {
+  if (state.viewportSplitRatioPersistTimer) {
+    window.clearTimeout(state.viewportSplitRatioPersistTimer);
+  }
+
+  state.viewportSplitRatioPersistTimer = window.setTimeout(() => {
+    state.viewportSplitRatioPersistTimer = null;
+    vscode.postMessage({
+      type: 'persistViewportSplitRatio',
+      body: { ratio: clamp(state.viewportSplitRatio, VIEWPORT_RATIO_MIN, VIEWPORT_RATIO_MAX) },
+    });
+  }, 160);
+}
+
+function normalizePlaybackVolume(value: unknown): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? clamp(numeric, 0, 1) : 1;
+}
+
+function renderPlaybackVolumeUi(): void {
+  elements.volumeSlider.value = String(state.playbackVolume);
+  elements.volumeSlider.title = `Volume ${Math.round(state.playbackVolume * 100)}%`;
+}
+
+function schedulePersistPlaybackVolume(): void {
+  if (state.playbackVolumePersistTimer) {
+    window.clearTimeout(state.playbackVolumePersistTimer);
+  }
+
+  state.playbackVolumePersistTimer = window.setTimeout(() => {
+    state.playbackVolumePersistTimer = null;
+    vscode.postMessage({
+      type: 'persistPlaybackVolume',
+      body: { volume: state.playbackVolume },
+    });
+  }, 160);
+}
+
+// Export range: the committed loop selection when one exists, else the whole file.
+function getExportRangeSeconds(): { end: number; start: number } | null {
+  const sampleRate = getSampleRate();
+  const durationFrames = getDurationFrames();
+  if (!(sampleRate > 0) || !(durationFrames > 0)) {
+    return null;
+  }
+
+  const selection = state.engineUiState?.selection;
+  if (
+    selection?.committed
+    && selection.startFrame !== null
+    && selection.endFrame !== null
+    && selection.endFrame > selection.startFrame
+  ) {
+    return { end: selection.endFrame / sampleRate, start: selection.startFrame / sampleRate };
+  }
+
+  return { end: durationFrames / sampleRate, start: 0 };
 }
 
 function renderSpectrogramScale(): void {
@@ -2654,11 +2805,14 @@ function getPresentedRangeSeconds(): TimeRange | null {
 function areWaveformRenderRequestsEqual(
   leftRange: TimeRange | null,
   leftWidthPx: number,
+  leftHeightPx: number,
   rightRange: TimeRange | null,
   rightWidthPx: number,
+  rightHeightPx: number,
 ): boolean {
   return areTimeRangesEqual(leftRange, rightRange)
-    && Math.abs(Math.round(leftWidthPx) - Math.round(rightWidthPx)) <= 1;
+    && Math.abs(Math.round(leftWidthPx) - Math.round(rightWidthPx)) <= 1
+    && Math.abs(Math.round(leftHeightPx) - Math.round(rightHeightPx)) <= 1;
 }
 
 function resetWaveformCanvasPresentation(canvas: HTMLCanvasElement): void {
@@ -3211,7 +3365,7 @@ function positionWaveformChannelMarkers(sampleIndex: number, markerXRatio: numbe
         marker.style.display = 'none';
         continue;
       }
-      const fullRatioY = (channelIndex + getWaveformMarkerYRatio(laneHeight, value)) / laneCount;
+      const fullRatioY = (channelIndex + getWaveformMarkerYRatio(laneHeight, value, state.waveformAmplitudeMax)) / laneCount;
       marker.style.display = 'block';
       marker.style.left = `${left}px`;
       marker.style.top = `${fullRatioY * viewportHeight}px`;
@@ -3239,7 +3393,7 @@ function positionWaveformChannelMarkers(sampleIndex: number, markerXRatio: numbe
   const marker = getWaveformSampleMarker(0);
   marker.style.display = 'block';
   marker.style.left = `${left}px`;
-  marker.style.top = `${getWaveformMarkerYRatio(viewportHeight, sum / count) * viewportHeight}px`;
+  marker.style.top = `${getWaveformMarkerYRatio(viewportHeight, sum / count, state.waveformAmplitudeMax) * viewportHeight}px`;
   for (let index = 1; index < state.waveformSampleMarkers.length; index += 1) {
     state.waveformSampleMarkers[index].style.display = 'none';
   }
@@ -3902,8 +4056,10 @@ function handleWaveformWorkerMessage(loadToken: number, message: WaveformWorkerT
         1,
         Math.round(Number(message.body?.width) || state.waveformViewport.renderWidthPx || 1),
       );
+      state.waveformViewport.activeRenderHeightPx = Math.max(1, Math.round(Number(message.body?.height) || 1));
       state.waveformViewport.pendingRenderRange = null;
       state.waveformViewport.pendingRenderWidthPx = 0;
+      state.waveformViewport.pendingRenderHeightPx = 0;
       syncWaveformCanvasPresentation();
       setSurfaceLoading('waveform', false);
       handleWaveformSurfaceReady();
@@ -3959,16 +4115,23 @@ function requestWaveformRender(uiState: ViewportUiState | null = state.engineUiS
     return;
   }
 
+  const laneCount = getSpectrogramLaneCount();
+  const renderHeightPx = Math.max(1, Math.round(waveformSize.height / laneCount));
+
   if (areWaveformRenderRequestsEqual(
     state.waveformViewport.activeRenderRange,
     state.waveformViewport.activeRenderWidthPx,
+    state.waveformViewport.activeRenderHeightPx,
     renderRange,
     renderWidthPx,
+    renderHeightPx,
   ) || areWaveformRenderRequestsEqual(
     state.waveformViewport.pendingRenderRange,
     state.waveformViewport.pendingRenderWidthPx,
+    state.waveformViewport.pendingRenderHeightPx,
     renderRange,
     renderWidthPx,
+    renderHeightPx,
   )) {
     syncWaveformCanvasPresentation(uiState);
     return;
@@ -3977,12 +4140,13 @@ function requestWaveformRender(uiState: ViewportUiState | null = state.engineUiS
   state.waveformRenderGeneration += 1;
   state.waveformViewport.pendingRenderRange = renderRange;
   state.waveformViewport.pendingRenderWidthPx = renderWidthPx;
-  const laneCount = getSpectrogramLaneCount();
+  state.waveformViewport.pendingRenderHeightPx = renderHeightPx;
   const message = {
     type: 'renderWaveformView',
     body: {
+      amplitudeMax: state.waveformAmplitudeMax,
       generation: state.waveformRenderGeneration,
-      height: Math.max(1, Math.round(waveformSize.height / laneCount)),
+      height: renderHeightPx,
       renderScale: DISPLAY_PIXEL_RATIO,
       viewEnd: renderRange.end,
       viewStart: renderRange.start,
@@ -4252,6 +4416,15 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
       state.activeFile = message.body;
     }
     applyPersistedSpectrogramDefaults(message.body?.spectrogramDefaults);
+    const persistedSplitRatio = Number(message.body?.viewportSplitRatio);
+    if (Number.isFinite(persistedSplitRatio)) {
+      state.viewportSplitRatio = clamp(persistedSplitRatio, VIEWPORT_RATIO_MIN, VIEWPORT_RATIO_MAX);
+      applyViewportSplit(true);
+    }
+    applyWaveformAmplitudeMax(message.body?.waveformAmplitudeMax, { persist: false });
+    state.playbackVolume = normalizePlaybackVolume(message.body?.playbackVolume);
+    renderPlaybackVolumeUi();
+    state.audioTransport?.setVolume(state.playbackVolume);
     syncWebGpuToggleFromActiveFile();
     syncSplitChannelsToggleFromActiveFile();
     renderSpectrogramMeta();
@@ -4801,6 +4974,9 @@ function attachUiEvents(): void {
   elements.waveZoomOut.addEventListener('click', () => sendViewportIntent({ direction: 'out', kind: 'zoomStep' }));
   elements.waveZoomReset.addEventListener('click', () => sendViewportIntent({ kind: 'resetZoom' }));
   elements.waveZoomIn.addEventListener('click', () => sendViewportIntent({ direction: 'in', kind: 'zoomStep' }));
+  elements.waveAmpOut.addEventListener('click', () => applyWaveformAmplitudeMax(stepWaveformAmplitudeMax('out')));
+  elements.waveAmpReset.addEventListener('click', () => applyWaveformAmplitudeMax(DEFAULT_WAVEFORM_AMPLITUDE_MAX));
+  elements.waveAmpIn.addEventListener('click', () => applyWaveformAmplitudeMax(stepWaveformAmplitudeMax('in')));
   elements.waveFollow.addEventListener('change', () => {
     sendViewportIntent({
       enabled: elements.waveFollow.checked,
@@ -4809,6 +4985,27 @@ function attachUiEvents(): void {
   });
   elements.waveClearLoop.addEventListener('click', () => {
     sendViewportIntent({ kind: 'clearLoop' });
+  });
+  elements.waveExport.addEventListener('click', () => {
+    const range = getExportRangeSeconds();
+    const format = elements.waveExportFormat.value;
+    if (!range || (format !== 'wav' && format !== 'mp3' && format !== 'm4a' && format !== 'flac')) {
+      return;
+    }
+    vscode.postMessage({
+      type: 'exportAudio',
+      body: {
+        endSeconds: range.end,
+        format,
+        startSeconds: range.start,
+      },
+    });
+  });
+  elements.volumeSlider.addEventListener('input', () => {
+    state.playbackVolume = normalizePlaybackVolume(elements.volumeSlider.value);
+    elements.volumeSlider.title = `Volume ${Math.round(state.playbackVolume * 100)}%`;
+    state.audioTransport?.setVolume(state.playbackVolume);
+    schedulePersistPlaybackVolume();
   });
 
   // One wheel listener for the whole viewport — the waveform window, the shared time strip
@@ -4888,16 +5085,20 @@ function attachUiEvents(): void {
     }
     state.viewportResizeDrag = null;
     updateViewportSplitRatioFromClientY(event.clientY);
+    schedulePersistViewportSplitRatio();
   });
   elements.viewportSplitter.addEventListener('pointercancel', (event) => {
     if (!state.viewportResizeDrag || state.viewportResizeDrag.pointerId !== event.pointerId) {
       return;
     }
     state.viewportResizeDrag = null;
+    // The dragged ratio stays applied on cancel, so persist what the user sees.
+    schedulePersistViewportSplitRatio();
   });
   elements.viewportSplitter.addEventListener('dblclick', () => {
     state.viewportSplitRatio = DEFAULT_VIEWPORT_SPLIT_RATIO;
     applyViewportSplit(true);
+    schedulePersistViewportSplitRatio();
   });
   elements.viewportSplitter.addEventListener('keydown', (event) => {
     let nextRatio: number | null = null;
@@ -4919,6 +5120,7 @@ function attachUiEvents(): void {
     event.preventDefault();
     state.viewportSplitRatio = clamp(nextRatio, VIEWPORT_RATIO_MIN, VIEWPORT_RATIO_MAX);
     applyViewportSplit(true);
+    schedulePersistViewportSplitRatio();
   });
 }
 
@@ -4934,6 +5136,8 @@ if (
   attachResizeObservers();
   applyViewportSplit(true);
   renderWaveformUi();
+  renderWaveformAmplitudeUi();
+  renderPlaybackVolumeUi();
   renderSpectrogramMeta();
   renderSpectrogramScale();
   renderLoudnessSummary();

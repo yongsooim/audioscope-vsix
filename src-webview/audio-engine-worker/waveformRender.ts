@@ -25,9 +25,16 @@ interface SampleXTransform {
 
 interface WaveformPathPlotRenderOptions {
   alpha?: number;
+  amplitudeMax?: number;
   preserveExistingSurface?: boolean;
   sampleData?: Float32Array | null;
   stableColumnSlotBlend?: number;
+}
+
+// The displayed full-scale amplitude: samples at ±amplitudeMax land on the
+// reference guide lines (and the DOM level labels). 1 = true full scale.
+function normalizeAmplitudeMax(value: number | undefined): number {
+  return clamp(Number(value) || 1, 0.001, 1);
 }
 
 export function drawWaveformPathPlot(
@@ -50,6 +57,9 @@ export function drawWaveformPathPlot(
   const chartHeight = Math.max(1, chartBottom - chartTop);
   const midY = chartTop + chartHeight * 0.5;
   const amplitudeHeight = chartHeight * WAVEFORM_AMPLITUDE_HEIGHT_RATIO;
+  // Guides stay at ±amplitudeHeight (the displayed max); samples are scaled so
+  // a value of ±amplitudeMax lands exactly on the guides.
+  const sampleAmplitudeHeight = amplitudeHeight / normalizeAmplitudeMax(options.amplitudeMax);
   const sampleXTransform = getSampleXTransform(sampleStartFrame, visibleSampleSpan, drawColumns);
   const alpha = clamp01(options.alpha ?? 1);
   const stableColumnSlotBlend = clamp01(options.stableColumnSlotBlend ?? 0);
@@ -82,7 +92,7 @@ export function drawWaveformPathPlot(
     sampleStartFrame,
     sampleXTransform,
     midY,
-    amplitudeHeight,
+    sampleAmplitudeHeight,
     chartTop,
     chartBottom,
     stableColumnSlotBlend,
@@ -102,7 +112,7 @@ export function drawWaveformPathPlot(
       visibleSampleSpan,
       sampleXTransform,
       midY,
-      amplitudeHeight,
+      sampleAmplitudeHeight,
       chartTop,
       chartBottom,
       renderScale,
@@ -176,14 +186,14 @@ function lerp(start: number, end: number, amount: number): number {
   return start + ((end - start) * clamp01(amount));
 }
 
-export function getWaveformMarkerYRatio(heightCssPx: number, sampleValue: number): number {
+export function getWaveformMarkerYRatio(heightCssPx: number, sampleValue: number, amplitudeMax = 1): number {
   const safeHeightCssPx = Math.max(1, heightCssPx);
   const chartTopPx = WAVEFORM_TOP_PADDING_PX;
   const chartBottomPx = Math.max(chartTopPx + 1, safeHeightCssPx - WAVEFORM_BOTTOM_PADDING_PX);
   const chartHeightPx = Math.max(1, chartBottomPx - chartTopPx);
   const midYPx = chartTopPx + chartHeightPx * 0.5;
   const yPx = clamp(
-    midYPx - sampleValue * chartHeightPx * WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
+    midYPx - (sampleValue / normalizeAmplitudeMax(amplitudeMax)) * chartHeightPx * WAVEFORM_AMPLITUDE_HEIGHT_RATIO,
     chartTopPx,
     chartBottomPx,
   );

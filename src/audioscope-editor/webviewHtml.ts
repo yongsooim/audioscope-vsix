@@ -54,6 +54,12 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                 <button id="wave-zoom-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform zoom">1.0x</button>
                 <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform" title="Zoom in waveform (+)">+</button>
               </div>
+              <div class="wave-toolbar-group wave-toolbar-group-amp">
+                <div id="wave-amp-chip" class="wave-toolbar-pill wave-toolbar-pill-amp" aria-live="polite">Amp ±1.0</div>
+                <button id="wave-amp-out" class="wave-tool-button" type="button" aria-label="Show a wider waveform amplitude range" title="Show a wider amplitude range">-</button>
+                <button id="wave-amp-reset" class="wave-tool-button wave-tool-button-wide" type="button" aria-label="Reset waveform amplitude range">±1</button>
+                <button id="wave-amp-in" class="wave-tool-button" type="button" aria-label="Show a narrower waveform amplitude range" title="Show a narrower amplitude range">+</button>
+              </div>
               <div class="wave-toolbar-group wave-toolbar-group-follow">
                 <label class="wave-follow-toggle" title="Toggle follow playback (F)">
                   <input id="wave-follow" class="wave-follow-toggle-input" type="checkbox" aria-keyshortcuts="F" />
@@ -69,13 +75,28 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                 <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Drag to set loop</div>
                 <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" aria-hidden="false" disabled>Clear</button>
               </div>
+              <div class="wave-toolbar-group wave-toolbar-group-export">
+                <select id="wave-export-format" class="wave-export-format" aria-label="Export format" disabled>
+                  <option value="wav" selected>wav</option>
+                  <option value="mp3">mp3</option>
+                  <option value="m4a">m4a</option>
+                  <option value="flac">flac</option>
+                </select>
+                <button
+                  id="wave-export"
+                  class="wave-tool-button wave-tool-button-wide"
+                  type="button"
+                  title="Export the loop selection (entire file when no loop is set)"
+                  disabled
+                >Export</button>
+              </div>
             </div>
           </div>
           <div id="waveform-viewport" class="waveform-viewport" aria-label="Waveform">
             <div id="waveform-canvas-host" class="waveform-canvas-host" aria-hidden="true"></div>
             <div class="waveform-level-labels" aria-hidden="true">
-              <div class="waveform-level-label waveform-level-label-positive">1.0</div>
-              <div class="waveform-level-label waveform-level-label-negative">-1.0</div>
+              <div id="waveform-level-label-positive" class="waveform-level-label waveform-level-label-positive">1.0</div>
+              <div id="waveform-level-label-negative" class="waveform-level-label waveform-level-label-negative">-1.0</div>
             </div>
             <div id="waveform-hit-target" class="waveform-hit-target" aria-hidden="true"></div>
             <div id="waveform-hover-tooltip" class="surface-hover-tooltip" aria-hidden="true"></div>
@@ -389,6 +410,20 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               <option value="2">2x</option>
             </select>
           </div>
+        </div>
+        <div class="transport-volume" role="group" aria-label="Playback volume">
+          <span class="transport-volume-label">Vol</span>
+          <input
+            id="volume-slider"
+            class="transport-volume-slider"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value="1"
+            aria-label="Playback volume"
+            title="Volume 100%"
+          />
         </div>
         <div id="time-readout" class="time-readout">0:00.00 / --:--.--</div>
         <div id="waveform-overview" class="timeline-shell">

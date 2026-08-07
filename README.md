@@ -61,8 +61,11 @@
 - Seek backward and forward by 5 seconds
 - Playback speed control
 - Follow playback mode
+- Playback volume slider
 - Loop selection and loop handles
 - Waveform zoom controls
+- Waveform amplitude (vertical) scale controls
+- Export the loop selection (or the whole file) to `wav`, `mp3`, `m4a`, or `flac` via the embedded FFmpeg encoder
 
 ### Spectrogram and analysis
 
@@ -93,6 +96,9 @@
 
 - `audioscope.spectrogramQuality`: `balanced | high | max`
 - `audioscope.spectrogramDefaults`: persisted defaults for analysis controls, including advanced scalogram defaults when edited in settings JSON
+- `audioscope.viewportSplitRatio`: persisted waveform/spectrogram divider position, updated automatically when the divider is dragged
+- `audioscope.waveformAmplitudeMax`: persisted waveform vertical scale (± displayed amplitude), updated automatically from the waveform `Amp` toolbar control
+- `audioscope.playbackVolume`: persisted playback volume, updated automatically from the transport volume slider
 - `audioscope.openSampleOnStartupInDevelopment`: open the bundled sample on startup in development mode
 
 ## Keywords

@@ -14,6 +14,18 @@ const buildRoot = path.join(projectRoot, '.ffmpeg-build');
 const outputRoot = path.join(projectRoot, 'dist', 'embedded-tools');
 const jobCount = String(Math.max(1, Math.min(8, os.availableParallelism())));
 
+// libmp3lame (for the mp3 export encoder) is not part of the FFmpeg tree; it is
+// downloaded and cross-compiled to wasm once, then linked statically. The
+// prefix is version-suffixed so a version bump also changes the -I/-L paths in
+// the ffmpeg configureArgs, invalidating the ffmpeg build stamp with it.
+const LAME_VERSION = '3.100';
+const LAME_TARBALL_URL = `https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz`;
+const LAME_TARBALL_SHA256 = 'ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e';
+const lamePrefixDir = path.join(buildRoot, `lame-${LAME_VERSION}-prefix`);
+const lameIncludeDir = path.join(lamePrefixDir, 'include');
+const lameLibDir = path.join(lamePrefixDir, 'lib');
+const lameStampPath = path.join(lamePrefixDir, '.stamp.json');
+
 interface ToolSpec {
   auxiliaryExecutables?: Array<{
     outputName: string;
@@ -140,7 +152,17 @@ const toolSpecs: ToolSpec[] = [
       '--enable-filter=ebur128',
       '--enable-swresample',
       '--enable-muxer=wav',
+      '--enable-muxer=flac',
+      '--enable-muxer=ipod',
+      '--enable-muxer=mp3',
       '--enable-encoder=pcm_f32le',
+      '--enable-encoder=pcm_s16le',
+      '--enable-encoder=flac',
+      '--enable-encoder=aac',
+      '--enable-encoder=libmp3lame',
+      '--enable-libmp3lame',
+      `--extra-cflags=-I${lameIncludeDir}`,
+      `--extra-ldflags=-L${lameLibDir}`,
     ],
     customExecutableSource: path.join(projectRoot, 'src-wasm', 'embedded', 'ffdecode.c'),
     auxiliaryExecutables: [
@@ -148,12 +170,18 @@ const toolSpecs: ToolSpec[] = [
         outputName: 'ffloudness',
         source: path.join(projectRoot, 'src-wasm', 'embedded', 'ffloudness.c'),
       },
+      {
+        outputName: 'ffencode',
+        source: path.join(projectRoot, 'src-wasm', 'embedded', 'ffencode.c'),
+      },
     ],
     browserModuleOutputBaseName: 'ffdecode_browser_module',
     directModuleOutputBaseName: 'ffdecode_module',
     directModuleSource: path.join(projectRoot, 'src-wasm', 'embedded', 'ffdecode_module.c'),
     name: 'ffmpeg',
     outputs: [
+      'ffencode',
+      'ffencode.wasm',
       'ffloudness',
       'ffloudness.wasm',
       'ffmpeg',
@@ -175,6 +203,8 @@ async function main(): Promise<void> {
   await fsp.mkdir(buildRoot, { recursive: true });
   await fsp.mkdir(outputRoot, { recursive: true });
 
+  await ensureLameBuild(emscripten);
+
   const ffmpegRevision = (await capture('git', ['-C', ffmpegSourceDir, 'rev-parse', 'HEAD'])).trim();
 
   for (const spec of toolSpecs) {
@@ -193,6 +223,75 @@ async function main(): Promise<void> {
     ),
     'utf8',
   );
+}
+
+async function ensureLameBuild(emscripten: EmscriptenToolchain): Promise<void> {
+  const lameStaticLibPath = path.join(lameLibDir, 'libmp3lame.a');
+  const nextStamp = JSON.stringify({
+    sha256: LAME_TARBALL_SHA256,
+    speedOptimizedWasmFlags,
+    version: LAME_VERSION,
+  });
+
+  if (
+    fs.existsSync(lameStaticLibPath)
+    && fs.existsSync(path.join(lameIncludeDir, 'lame', 'lame.h'))
+    && (await readOptionalFile(lameStampPath)) === nextStamp
+  ) {
+    return;
+  }
+
+  await fsp.rm(lamePrefixDir, { force: true, recursive: true });
+
+  const tarballPath = path.join(buildRoot, `lame-${LAME_VERSION}.tar.gz`);
+  const sourceDir = path.join(buildRoot, `lame-${LAME_VERSION}`);
+
+  if (!fs.existsSync(tarballPath) || (await hashFile(tarballPath)) !== LAME_TARBALL_SHA256) {
+    console.log(`Downloading lame ${LAME_VERSION}…`);
+    const response = await fetch(LAME_TARBALL_URL, { redirect: 'follow' });
+    if (!response.ok) {
+      throw new Error(`Unable to download lame ${LAME_VERSION} (${response.status}). Download ${LAME_TARBALL_URL} to ${tarballPath} manually and retry.`);
+    }
+    await fsp.writeFile(tarballPath, Buffer.from(await response.arrayBuffer()));
+  }
+
+  const tarballHash = await hashFile(tarballPath);
+  if (tarballHash !== LAME_TARBALL_SHA256) {
+    throw new Error(`lame tarball checksum mismatch: expected ${LAME_TARBALL_SHA256}, got ${tarballHash}.`);
+  }
+
+  await fsp.rm(sourceDir, { force: true, recursive: true });
+  await run('tar', ['-xzf', tarballPath], { cwd: buildRoot });
+
+  await run(
+    emscripten.emconfigure,
+    [
+      path.join(sourceDir, 'configure'),
+      `--prefix=${lamePrefixDir}`,
+      '--host=x86_64-linux-gnu',
+      '--disable-shared',
+      '--enable-static',
+      '--disable-frontend',
+      '--disable-analyzer-hooks',
+      '--disable-gtktest',
+      '--disable-decoder',
+      `CFLAGS=${speedOptimizedWasmFlagsJoined}`,
+    ],
+    {
+      cwd: sourceDir,
+      env: emscripten.env,
+    },
+  );
+  await run(emscripten.emmake, ['make', '-j', jobCount, 'install'], {
+    cwd: sourceDir,
+    env: emscripten.env,
+  });
+
+  if (!fs.existsSync(lameStaticLibPath)) {
+    throw new Error('lame build finished but libmp3lame.a is missing.');
+  }
+
+  await fsp.writeFile(lameStampPath, nextStamp, 'utf8');
 }
 
 async function buildTool(spec: ToolSpec, ffmpegRevision: string, emscripten: EmscriptenToolchain): Promise<void> {
@@ -556,12 +655,15 @@ async function buildAuxiliaryExecutable(
       path.join(buildDir, 'libswscale'),
       '-L',
       path.join(buildDir, 'libavutil'),
+      '-L',
+      lameLibDir,
       '-lavfilter',
       '-lavformat',
       '-lavcodec',
       '-lswresample',
       '-lswscale',
       '-lavutil',
+      '-lmp3lame',
       '-lm',
       '-o',
       path.join(buildDir, outputName),
@@ -615,11 +717,14 @@ async function buildDirectModule(spec: ToolSpec, buildDir: string, emscripten: E
       path.join(buildDir, 'libswresample'),
       '-L',
       path.join(buildDir, 'libavutil'),
+      '-L',
+      lameLibDir,
       '-lavfilter',
       '-lavformat',
       '-lavcodec',
       '-lswresample',
       '-lavutil',
+      '-lmp3lame',
       '-lm',
       '-o',
       path.join(buildDir, `${spec.directModuleOutputBaseName}.js`),
@@ -675,11 +780,14 @@ async function buildBrowserDirectModule(
       path.join(buildDir, 'libswresample'),
       '-L',
       path.join(buildDir, 'libavutil'),
+      '-L',
+      lameLibDir,
       '-lavfilter',
       '-lavformat',
       '-lavcodec',
       '-lswresample',
       '-lavutil',
+      '-lmp3lame',
       '-lm',
       '-o',
       path.join(buildDir, `${spec.browserModuleOutputBaseName}.js`),

@@ -14,6 +14,7 @@ const outputHostPath = process.argv[3];
 const virtualInputPath = process.argv[4];
 const toolArgs = JSON.parse(process.argv[5]);
 const outputMode = process.argv[6] || 'none';
+const virtualOutputPath = process.argv[7] || '/output.wav';
 
 globalThis.__audioscopeModule = {
   arguments: toolArgs,
@@ -23,14 +24,14 @@ globalThis.__audioscopeModule = {
   }],
   postRun: outputMode === 'stdout-binary' ? [() => {
     try {
-      const data = globalThis.__audioscopeModule.FS_readFile('/output.wav');
+      const data = globalThis.__audioscopeModule.FS_readFile(virtualOutputPath);
       process.stdout.write(Buffer.from(data));
     } catch {
       // Preserve the tool's original stderr/exit code when output was not produced.
     }
   }] : outputHostPath ? [() => {
     try {
-      const data = globalThis.__audioscopeModule.FS_readFile('/output.wav');
+      const data = globalThis.__audioscopeModule.FS_readFile(virtualOutputPath);
       fs.writeFileSync(outputHostPath, Buffer.from(data));
     } catch {
       // Preserve the tool's original stderr/exit code when output was not produced.
@@ -480,6 +481,58 @@ export async function runEmbeddedFfmpegDecodeToWav(
     byteLength: stdout.byteLength,
     mimeType: 'audio/wav',
   };
+}
+
+const FFENCODE_EXECUTABLE_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffencode');
+const FFENCODE_EXECUTABLE_WASM_PATH = path.join(EMBEDDED_TOOL_DIRECTORY, 'ffencode.wasm');
+
+export type EmbeddedExportFormat = 'flac' | 'm4a' | 'mp3' | 'wav';
+
+export async function runEmbeddedFfencodeExport(
+  resource: vscode.Uri,
+  targetPath: string,
+  format: EmbeddedExportFormat,
+  startSeconds: number,
+  endSeconds: number,
+  timeout: number,
+): Promise<void> {
+  if (!fs.existsSync(FFENCODE_EXECUTABLE_PATH) || !fs.existsSync(FFENCODE_EXECUTABLE_WASM_PATH)) {
+    throw new Error('ffencode.wasm is unavailable. Rebuild or reinstall audioscope to restore exporting.');
+  }
+
+  const preparedInput = await prepareToolInput(resource);
+  const virtualInputPath = `/input${path.extname(preparedInput.hostPath || resource.path) || '.bin'}`;
+  const virtualOutputPath = `/output.${format}`;
+
+  await spawnProcessAsync(
+    process.execPath,
+    [
+      '-e',
+      EMBEDDED_TOOL_RUNNER_SOURCE,
+      FFENCODE_EXECUTABLE_PATH,
+      preparedInput.hostPath ?? '',
+      targetPath,
+      virtualInputPath,
+      JSON.stringify([
+        virtualInputPath,
+        virtualOutputPath,
+        format,
+        startSeconds.toFixed(6),
+        endSeconds.toFixed(6),
+      ]),
+      'none',
+      virtualOutputPath,
+    ],
+    {
+      stdinData: preparedInput.stdinData,
+      timeout,
+    },
+  );
+
+  const exported = await fsp.stat(targetPath).catch(() => null);
+  if (!exported || exported.size <= 0) {
+    throw new Error('ffencode did not produce an output file.');
+  }
 }
 
 export async function runEmbeddedFfmpegMeasureLoudness(

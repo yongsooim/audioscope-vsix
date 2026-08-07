@@ -48,6 +48,9 @@ export interface AudioscopePayload {
   documentUri: string;
   enableWebGpuRendering: boolean;
   splitChannels: boolean;
+  viewportSplitRatio: number;
+  waveformAmplitudeMax: number;
+  playbackVolume: number;
   externalTools: ExternalToolStatusPayload;
   fileBacked: boolean;
   fileExtension: string;
@@ -176,6 +179,32 @@ export interface PersistSplitChannelsMessage {
   body: { enabled: boolean };
 }
 
+export interface PersistViewportSplitRatioMessage {
+  type: 'persistViewportSplitRatio';
+  body: { ratio: number };
+}
+
+export interface PersistWaveformAmplitudeMaxMessage {
+  type: 'persistWaveformAmplitudeMax';
+  body: { amplitudeMax: number };
+}
+
+export interface PersistPlaybackVolumeMessage {
+  type: 'persistPlaybackVolume';
+  body: { volume: number };
+}
+
+export type ExportAudioFormat = 'flac' | 'm4a' | 'mp3' | 'wav';
+
+export interface ExportAudioMessage {
+  type: 'exportAudio';
+  body: {
+    endSeconds: number;
+    format: ExportAudioFormat;
+    startSeconds: number;
+  };
+}
+
 export interface RequestMediaMetadataMessage {
   type: 'requestMediaMetadata';
   body: { loadToken: number };
@@ -207,6 +236,10 @@ export type WebviewToHostMessage =
   | PersistSpectrogramDefaultsMessage
   | PersistWebGpuRenderingMessage
   | PersistSplitChannelsMessage
+  | PersistViewportSplitRatioMessage
+  | PersistWaveformAmplitudeMaxMessage
+  | PersistPlaybackVolumeMessage
+  | ExportAudioMessage
   | RequestMediaMetadataMessage
   | RequestDecodeFallbackMessage
   | RequestLoudnessSummaryMessage

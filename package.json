@@ -126,6 +126,30 @@
           ],
           "markdownDescription": "(Experimental) Visualize each audio channel as its own stacked lane in the waveform and spectrogram instead of a single mono downmix. Increases compute and memory roughly in proportion to the channel count."
         },
+        "audioscope.viewportSplitRatio": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "description": "Fraction of the audioscope viewport height given to the waveform panel (0-1). Updated automatically when the waveform/spectrogram divider is dragged."
+        },
+        "audioscope.waveformAmplitudeMax": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0.01,
+          "maximum": 1,
+          "scope": "window",
+          "description": "Waveform vertical scale: the amplitude displayed at the top/bottom guide lines (±value). 1 shows full scale; smaller values zoom into quiet audio. Updated automatically from the waveform Amp toolbar control."
+        },
+        "audioscope.playbackVolume": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "description": "Playback volume (0-1). Updated automatically from the transport volume slider."
+        },
         "audioscope.spectrogramQuality": {
           "type": "string",
           "enum": [

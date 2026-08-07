@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import {
   type EmbeddedExecutableStatus,
+  type EmbeddedExportFormat,
   getEmbeddedExecutableStatusSync,
+  runEmbeddedFfencodeExport,
   runEmbeddedFfmpegDecodeToPcm,
   runEmbeddedFfmpegMeasureLoudness,
   runEmbeddedFfmpegDecodeToWav,
@@ -573,6 +575,20 @@ export async function probeAudioOpen(resource: vscode.Uri): Promise<ProbeOpenRes
     metadata,
     toolStatus,
   };
+}
+
+const FFMPEG_EXPORT_TIMEOUT_MS = 300_000;
+
+export type { EmbeddedExportFormat };
+
+export async function exportAudioSegment(
+  resource: vscode.Uri,
+  targetPath: string,
+  format: EmbeddedExportFormat,
+  startSeconds: number,
+  endSeconds: number,
+): Promise<void> {
+  await runEmbeddedFfencodeExport(resource, targetPath, format, startSeconds, endSeconds, FFMPEG_EXPORT_TIMEOUT_MS);
 }
 
 export async function decodeWithFfmpeg(resource: vscode.Uri): Promise<DecodeFallbackPayload> {

@@ -1,6 +1,8 @@
 # FFmpeg Source Availability
 
-`audioscope` ships embedded FFmpeg WebAssembly binaries for `ffmpeg` and `ffprobe`.
+`audioscope` ships embedded FFmpeg WebAssembly binaries for `ffmpeg`, `ffprobe`,
+`ffloudness`, and `ffencode` (the export tool, which additionally links
+libmp3lame — see the LAME section below).
 
 ## Exact Upstream Revision
 
@@ -35,6 +37,16 @@ It writes the packaged artifacts and build manifest to:
 - `dist/embedded-tools/`
 
 The generated `dist/embedded-tools/manifest.json` currently records the build timestamp and bundled FFmpeg revision for the current build.
+
+## LAME (libmp3lame)
+
+The `ffencode` binary statically links libmp3lame for MP3 export.
+
+- Upstream project: `https://sourceforge.net/projects/lame/`
+- Bundled version: `3.100`
+- Source tarball: `lame-3.100.tar.gz`, downloaded during the build and verified
+  against SHA-256 `ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e`
+- LAME is licensed under the GNU Lesser General Public License, version 2 or later.
 
 ## Matching Source Checkout
 

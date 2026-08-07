@@ -568,6 +568,7 @@ export function createAudioscopeLoadController({
     state.playbackTransportKind = transport.getTransportKind?.() ?? 'unavailable';
     state.playbackTransportError = transport.getLastFallbackReason?.() ?? null;
     transport.setPlaybackRate(state.playbackRate);
+    transport.setVolume(state.playbackVolume);
     return transport;
   }
 

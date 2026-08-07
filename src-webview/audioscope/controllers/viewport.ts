@@ -88,6 +88,13 @@ export function createAudioscopeViewportController({
     return Math.max(0, elements.waveToolbar?.offsetHeight || 0) + Math.max(0, elements.waveformAxis?.offsetHeight || 0);
   }
 
+  // Keep the floating spectrogram Settings toggle reachable even when the
+  // divider is dragged all the way down (10px stage offset + toggle box + slack).
+  function getMinSpectrogramPaneHeight(availableHeight: number): number {
+    const toggleHeight = elements.spectrogramMetaToggle?.offsetHeight || 0;
+    return Math.min(availableHeight, (toggleHeight > 0 ? toggleHeight : 22) + 24);
+  }
+
   function applyViewportSplit(force = false): void {
     syncViewportSplitterAria();
 
@@ -104,7 +111,8 @@ export function createAudioscopeViewportController({
     }
 
     const desiredWaveHeight = availableHeight * normalizeViewportSplitRatio(state.viewportSplitRatio);
-    const waveHeight = Math.round(clamp(desiredWaveHeight, 0, availableHeight));
+    const maxWaveHeight = Math.max(0, availableHeight - getMinSpectrogramPaneHeight(availableHeight));
+    const waveHeight = Math.round(clamp(desiredWaveHeight, 0, maxWaveHeight));
     const spectrogramHeight = Math.max(0, availableHeight - waveHeight);
     const nextTemplate = `${wavePanelChromeHeight + waveHeight}px ${splitterSize}px ${spectrogramHeight}px`;
 
@@ -124,10 +132,11 @@ export function createAudioscopeViewportController({
       return;
     }
 
+    const maxWaveHeight = Math.max(0, availableHeight - getMinSpectrogramPaneHeight(availableHeight));
     const proposedWaveHeight = clamp(
       clientY - viewportRect.top - wavePanelChromeHeight - splitterSize / 2,
       0,
-      availableHeight,
+      maxWaveHeight,
     );
     state.viewportSplitRatio = normalizeViewportSplitRatio(proposedWaveHeight / availableHeight);
     applyViewportSplit(true);
