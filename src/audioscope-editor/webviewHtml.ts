@@ -107,7 +107,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                   aria-expanded="false"
                   title="Export selected audio — choose a format"
                   disabled
-                >⇩ Export</button>
+                >Export</button>
                 <select id="wave-export-format" class="wave-export-format" aria-label="Export format" disabled hidden tabindex="-1">
                   <option value="wav" selected>wav</option>
                   <option value="mp3">mp3</option>
@@ -124,7 +124,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                   aria-expanded="false"
                   aria-label="Show spectrogram settings"
                   title="Spectrogram settings"
-                >⚙ Settings</button>
+                >Settings</button>
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-overflow">
                 <button
@@ -425,25 +425,6 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
         <button id="seek-backward" class="transport-button" type="button" aria-label="Seek backward 5 seconds" aria-keyshortcuts="ArrowLeft" title="Seek backward 5 seconds (Left Arrow)" disabled>−5s</button>
         <button id="play-toggle" class="play-toggle" type="button" aria-label="Play" aria-keyshortcuts="Space" title="Play (Space)" disabled>▶</button>
         <button id="seek-forward" class="transport-button" type="button" aria-label="Seek forward 5 seconds" aria-keyshortcuts="ArrowRight" title="Seek forward 5 seconds (Right Arrow)" disabled>+5s</button>
-        <div class="wave-toolbar-group wave-toolbar-group-loop wave-seg" role="group" aria-label="Loop selection" data-active="false">
-          <div
-            id="wave-loop-label"
-            class="wave-toolbar-pill wave-toolbar-pill-loop"
-            role="status"
-            aria-label="Drag to set loop"
-            aria-live="polite"
-            data-active="false"
-            title="Drag to set loop"
-          >↻ Loop</div>
-          <button
-            id="wave-clear-loop"
-            class="wave-tool-button wave-tool-button-symbol wave-tool-button-quiet"
-            type="button"
-            aria-label="Clear loop selection"
-            title="Clear loop selection"
-            disabled
-          >×</button>
-        </div>
         <div class="transport-rate" role="group" aria-label="Playback speed">
           <div id="playback-rate-control" class="transport-rate-control">
             <button
@@ -454,9 +435,9 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               aria-controls="playback-rate-menu"
               aria-expanded="false"
               aria-label="Playback speed"
-              title="Choose playback speed"
+              aria-describedby="playback-rate-tooltip"
               disabled
-            >1×</button>
+            >≫ 1×</button>
             <select id="playback-rate-select" class="transport-rate-select" aria-label="Playback speed" disabled tabindex="-1">
               <option value="0.5">0.5×</option>
               <option value="0.75">0.75×</option>
@@ -465,23 +446,56 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               <option value="1.5">1.5×</option>
               <option value="2">2×</option>
             </select>
+            <div id="playback-rate-tooltip" class="transport-tooltip transport-rate-tooltip" role="tooltip">Choose playback speed</div>
           </div>
         </div>
+        <div class="transport-loop-control">
+          <div class="wave-toolbar-group wave-toolbar-group-loop wave-seg" role="group" aria-label="Loop selection" data-active="false">
+            <div
+              id="wave-loop-label"
+              class="wave-toolbar-pill wave-toolbar-pill-loop"
+              role="status"
+              aria-label="Drag to set loop"
+              aria-describedby="wave-loop-tooltip"
+              aria-live="polite"
+              data-active="false"
+            >↻ Loop</div>
+            <button
+              id="wave-clear-loop"
+              class="wave-tool-button wave-tool-button-symbol wave-tool-button-quiet"
+              type="button"
+              aria-label="Clear loop selection"
+              title="Clear loop selection"
+              disabled
+            >×</button>
+          </div>
+          <div id="wave-loop-tooltip" class="transport-tooltip wave-loop-tooltip" role="tooltip">Drag to select a loop range</div>
+        </div>
         <div class="transport-volume" role="group" aria-label="Playback volume">
-          <span id="volume-label" class="transport-volume-label" aria-hidden="true">🔊</span>
-          <input
-            id="volume-slider"
-            class="transport-volume-slider"
-            type="range"
-            min="0"
-            max="2"
-            step="0.01"
-            value="1"
-            aria-label="Playback volume; boost above 100 percent"
-            aria-valuetext="100%"
-            aria-keyshortcuts="ArrowUp ArrowDown"
-            title="Volume 100% (Up/Down Arrow; boost up to +12 dB)"
-          />
+          <button
+            id="volume-toggle"
+            class="transport-volume-toggle"
+            type="button"
+            aria-label="Playback volume 100 percent"
+            aria-controls="volume-popover"
+            title="Volume 100% — hover or focus to adjust"
+          >&#x1F508;&#xFE0E;</button>
+          <div id="volume-popover" class="transport-volume-popover" role="group" aria-label="Playback volume control">
+            <output id="volume-label" class="transport-volume-label" for="volume-slider">100%</output>
+            <input
+              id="volume-slider"
+              class="transport-volume-slider"
+              type="range"
+              min="0"
+              max="2"
+              step="0.01"
+              value="1"
+              aria-label="Playback volume; boost above 100 percent"
+              aria-valuetext="100%"
+              aria-keyshortcuts="ArrowUp ArrowDown"
+              title="Volume 100% (Up/Down Arrow; boost up to +12 dB)"
+            />
+          </div>
         </div>
         <div id="time-readout" class="time-readout">0:00.00 / --:--.--</div>
         <div id="waveform-overview" class="timeline-shell">
@@ -536,7 +550,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             aria-label="Open spectrogram settings"
             aria-controls="spectrogram-meta-controls"
             aria-expanded="false"
-          >⚙ Settings</button>
+          >Settings</button>
         </div>
       </div>
       <div id="status" class="status-overlay" role="alertdialog" aria-modal="true" aria-label="audioscope error" hidden></div>

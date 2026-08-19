@@ -298,7 +298,7 @@ body {
   flex-wrap: nowrap;
   align-items: center;
   gap: 4px 6px;
-  padding: 2px 0;
+  padding: 4px 0;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -358,10 +358,51 @@ body {
   border-color: var(--chrome-border);
   color: var(--chrome-text-dim);
   cursor: default;
-  pointer-events: none;
+  pointer-events: auto;
   -webkit-user-select: none;
   user-select: none;
   -webkit-user-drag: none;
+}
+
+.transport-loop-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.transport-tooltip {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 5px);
+  z-index: 40;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 4px 7px;
+  border: 1px solid var(--chrome-border-strong);
+  border-radius: var(--chrome-radius);
+  background: var(--chrome-surface);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.3);
+  color: var(--chrome-text-strong);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.25;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition:
+    opacity 90ms ease-out,
+    transform 90ms ease-out,
+    visibility 0s linear 90ms;
+}
+
+.transport-loop-control:has(#wave-loop-label:hover) .wave-loop-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition-delay: 0s;
 }
 
 .wave-toolbar-group-loop[data-active="true"] {
@@ -396,8 +437,11 @@ body {
 
 .wave-seg > .wave-seg-value {
   min-width: 56px;
+  overflow: hidden;
   color: var(--chrome-text-strong);
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wave-seg-label {
@@ -412,8 +456,16 @@ body {
   text-transform: uppercase;
 }
 
+.wave-toolbar-group-zoom > .wave-seg-value {
+  width: 64px;
+  min-width: 64px;
+  max-width: 64px;
+}
+
 .wave-toolbar-group-amp > .wave-seg-value {
-  min-width: 32px;
+  width: 44px;
+  min-width: 44px;
+  max-width: 44px;
 }
 
 .wave-seg-select {
@@ -1074,6 +1126,10 @@ body {
   .spectrogram-meta[data-open="true"] {
     animation: none;
   }
+
+  .transport-tooltip {
+    transition: none;
+  }
 }
 
 /* Section divider inside the settings popover. The panel holds both view settings
@@ -1705,7 +1761,7 @@ body {
   width: 100%;
   max-width: 100%;
   margin: 0 !important;
-  padding: 2px var(--surface-inline-padding) !important;
+  padding: 4px var(--surface-inline-padding) !important;
   overflow: visible;
   border-top: 1px solid var(--chrome-border);
   background: var(--bg);
@@ -1805,46 +1861,103 @@ body {
 }
 
 .transport-volume {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
   margin-left: 0;
-  padding: 0;
+  padding: 0 4px 0 0;
   -webkit-user-select: none;
   user-select: none;
   -webkit-user-drag: none;
 }
 
+.transport-volume-toggle {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  min-height: 22px;
+  padding: 2px 5px;
+  border: 1px solid var(--chrome-border);
+  border-radius: var(--chrome-radius);
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 100ms ease, background 100ms ease;
+}
+
+.transport-volume:hover .transport-volume-toggle,
+.transport-volume:focus-within .transport-volume-toggle {
+  border-color: var(--chrome-border-strong);
+  background: var(--chrome-surface-hover);
+}
+
+.transport-volume-popover {
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  z-index: 40;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  min-width: 52px;
+  padding: 7px 6px 8px;
+  border: 1px solid var(--chrome-border-strong);
+  border-radius: var(--chrome-radius);
+  background: var(--chrome-surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, 3px);
+  transition:
+    opacity 100ms ease-out,
+    transform 100ms ease-out,
+    visibility 0s linear 100ms;
+}
+
+.transport-volume:hover .transport-volume-popover,
+.transport-volume:focus-within .transport-volume-popover {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+  transition-delay: 0s;
+}
+
 .transport-volume-label {
-  min-width: 48px;
+  min-width: 44px;
   text-align: center;
   color: var(--chrome-text-dim);
   font-family: var(--mono);
   font-size: 9px;
   font-weight: 500;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
 }
 
 .transport-volume-label[data-boosted="true"] {
   color: #fb923c;
-  letter-spacing: 0;
 }
 
 .transport-volume-slider {
-  width: 76px;
-  height: 20px;
+  width: 22px;
+  height: 112px;
   margin: 0;
   appearance: none;
+  writing-mode: vertical-lr;
+  direction: rtl;
   background: transparent;
   cursor: pointer;
 }
 
 .transport-volume-slider::-webkit-slider-runnable-track {
-  height: 4px;
+  width: 4px;
+  height: 100%;
   border-radius: 2px;
   background: linear-gradient(
-    to right,
+    to top,
     rgba(125, 211, 252, 0.24) 0 49%,
     rgba(226, 232, 240, 0.72) 49% 51%,
     rgba(251, 146, 60, 0.34) 51% 100%
@@ -1855,17 +1968,18 @@ body {
   appearance: none;
   width: 12px;
   height: 12px;
-  margin-top: -4px;
+  margin-left: -4px;
   border: 1px solid rgba(20, 56, 86, 0.88);
   border-radius: 50%;
   background: rgba(166, 217, 234, 0.94);
 }
 
 .transport-volume-slider::-moz-range-track {
-  height: 4px;
+  width: 4px;
+  height: 100%;
   border-radius: 2px;
   background: linear-gradient(
-    to right,
+    to top,
     rgba(125, 211, 252, 0.24) 0 49%,
     rgba(226, 232, 240, 0.72) 49% 51%,
     rgba(251, 146, 60, 0.34) 51% 100%
@@ -1888,6 +2002,12 @@ body {
 .transport-volume-slider[data-boosted="true"]::-moz-range-thumb {
   border-color: rgba(124, 45, 18, 0.9);
   background: #fb923c;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transport-volume-popover {
+    transition: none;
+  }
 }
 
 .transport-rate-control {
@@ -1915,6 +2035,17 @@ body {
   background-size: 10px 10px;
   cursor: pointer;
   transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.transport-rate-button {
+  width: 70px;
+}
+
+.transport-rate-button:is(:hover, :focus-visible):not([data-open="true"]) ~ .transport-rate-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition-delay: 0s;
 }
 
 .transport-rate-button:hover {

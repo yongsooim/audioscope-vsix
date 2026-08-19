@@ -2365,7 +2365,6 @@ function renderWaveformUi(): void {
     : 'Drag to set loop';
 
   elements.waveLoopLabel.textContent = '↻ Loop';
-  elements.waveLoopLabel.title = selectionLabel;
   elements.waveLoopLabel.setAttribute('aria-label', selectionLabel);
   const loopActive = selection?.committed === true;
   elements.waveLoopLabel.dataset.active = loopActive ? 'true' : 'false';
@@ -2482,8 +2481,8 @@ function schedulePersistViewportSplitRatio(): void {
 function renderPlaybackVolumeUi(): void {
   const percent = `${Math.round(state.playbackVolume * 100)}%`;
   const boosted = state.playbackVolume > 1;
-  const showPercent = elements.volumeSlider.matches(':hover, :focus');
   const boostLabel = boosted ? `+${playbackVolumeToDecibels(state.playbackVolume).toFixed(1)} dB` : '';
+  const valueLabel = boosted ? boostLabel : percent;
   elements.volumeSlider.value = String(playbackVolumeToSliderValue(state.playbackVolume));
   elements.volumeSlider.dataset.boosted = boosted ? 'true' : 'false';
   elements.volumeLabel.dataset.boosted = boosted ? 'true' : 'false';
@@ -2491,7 +2490,13 @@ function renderPlaybackVolumeUi(): void {
   elements.volumeSlider.title = boosted
     ? `Volume ${boostLabel} boost (Up/Down Arrow; max +${MAX_PLAYBACK_BOOST_DB} dB)`
     : `Volume ${percent} (Up/Down Arrow; boost up to +${MAX_PLAYBACK_BOOST_DB} dB)`;
-  elements.volumeLabel.textContent = boosted ? boostLabel : showPercent ? percent : '🔊';
+  elements.volumeLabel.textContent = valueLabel;
+  elements.volumeToggle.textContent = '\u{1F508}\uFE0E';
+  elements.volumeToggle.setAttribute(
+    'aria-label',
+    boosted ? `Playback volume ${boostLabel} boost` : `Playback volume ${percent}`,
+  );
+  elements.volumeToggle.title = `Volume ${valueLabel} — hover or focus to adjust`;
 }
 
 function schedulePersistPlaybackVolume(): void {
@@ -5597,6 +5602,13 @@ function attachUiEvents(): void {
   elements.volumeSlider.addEventListener('input', () => {
     applyPlaybackVolume(playbackVolumeFromSliderValue(elements.volumeSlider.value));
   });
+  for (const control of [elements.volumeToggle, elements.volumeSlider]) {
+    control.addEventListener('pointerup', (event) => {
+      if (event.pointerType === 'mouse') {
+        control.blur();
+      }
+    });
+  }
   for (const type of ['pointerenter', 'pointerleave', 'focus', 'blur']) {
     elements.volumeSlider.addEventListener(type, renderPlaybackVolumeUi);
   }

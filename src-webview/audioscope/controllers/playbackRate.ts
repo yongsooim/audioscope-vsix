@@ -53,7 +53,7 @@ export function createAudioscopePlaybackRateController({
     lastSyncedMenuOpen = menuOpen;
     lastSyncedDisabled = disabled;
 
-    elements.playbackRateButton.textContent = getPlaybackRateLabel(normalizedValue);
+    elements.playbackRateButton.textContent = `≫ ${getPlaybackRateLabel(normalizedValue)}`;
     elements.playbackRateButton.disabled = disabled;
     elements.playbackRateButton.dataset.open = menuOpen ? 'true' : 'false';
     elements.playbackRateButton.setAttribute('aria-expanded', menuOpen ? 'true' : 'false');
