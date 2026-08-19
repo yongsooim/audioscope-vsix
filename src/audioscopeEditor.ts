@@ -27,6 +27,7 @@ import { AudioscopeDocument } from './audioscope-editor/document';
 import { evaluateAudioscopeTarget, getActiveResource } from './audioscope-editor/editorTarget';
 import { normalizeSpectrogramDefaults } from './audioscope-editor/spectrogramDefaults';
 import { getAudioscopeWebviewHtml } from './audioscope-editor/webviewHtml';
+import { normalizePlaybackVolume } from './playbackVolume';
 
 function postToWebview(webview: vscode.Webview, message: HostToWebviewMessage): Thenable<boolean> {
   return webview.postMessage(message);
@@ -237,7 +238,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           }
           await vscode.workspace
             .getConfiguration('audioscope')
-            .update('playbackVolume', Math.min(1, Math.max(0, volume)), vscode.ConfigurationTarget.Global);
+            .update('playbackVolume', normalizePlaybackVolume(volume), vscode.ConfigurationTarget.Global);
           return;
         }
 
@@ -443,9 +444,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     const playbackVolumeSetting = Number(
       vscode.workspace.getConfiguration('audioscope', document.uri).get<number>('playbackVolume', 1),
     );
-    const playbackVolume = Number.isFinite(playbackVolumeSetting)
-      ? Math.min(1, Math.max(0, playbackVolumeSetting))
-      : 1;
+    const playbackVolume = normalizePlaybackVolume(playbackVolumeSetting);
     const externalTools = createInitialExternalToolStatus(document.uri);
 
     return {

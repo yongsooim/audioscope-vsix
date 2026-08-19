@@ -3,6 +3,7 @@ import { isCurrentWorkerMessage } from './workerMessageSession';
 import type { AudioTransport, PlaybackSession } from './transport/audioTransport';
 import { createAudioscopeElements } from './audioscope/core/elements';
 import { clamp, formatAxisLabel } from './audioscope/core/format';
+import { createVisibleFrequencyAxisTicks } from './audioscope/core/frequencyAxisTicks';
 import {
   calculatePlaybackProgress,
   type PlaybackProgressSnapshot,
@@ -67,7 +68,16 @@ import {
   WAVEFORM_TOP_PADDING_PX,
 } from './interactive-waveform/geometry';
 import { normalizeSpectrogramWindowFunction } from './windowShared';
+import {
+  MAX_PLAYBACK_BOOST_DB,
+  normalizePlaybackVolume,
+  playbackVolumeFromSliderValue,
+  playbackVolumeToDecibels,
+  playbackVolumeToSliderValue,
+  snapPlaybackVolume,
+} from '../src/playbackVolume';
 import type {
+  ExportAudioFormat,
   HostToWebviewMessage,
   WebviewToHostMessage,
 } from '../src/hostWebviewProtocol';
@@ -310,7 +320,7 @@ let DISPLAY_PIXEL_RATIO = Math.max(window.devicePixelRatio || 1, DISPLAY_MIN_DPR
 const DEFAULT_VIEWPORT_SPLIT_RATIO = 0.5;
 const VIEWPORT_SPLIT_STEP = 0.05;
 // Must stay in sync with --viewport-splitter-size in audioscope.css.
-const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 24;
+const VIEWPORT_SPLITTER_FALLBACK_SIZE_PX = 20;
 const VIEWPORT_RATIO_MAX = 1;
 const VIEWPORT_RATIO_MIN = 0;
 const DEFAULT_WAVEFORM_AMPLITUDE_MAX = 1;
@@ -644,12 +654,15 @@ const state = {
     start: number;
   } | null,
   renderedFrequencyTicks: null as ViewportUiState['frequencyTicks'] | null,
+  renderedFrequencyAxisHeightPx: 0,
   renderedFrequencyLaneCount: 1,
   renderedWaveformAxisTicks: null as ViewportUiState['waveformAxisTicks'] | null,
   renderedWaveformAxisWidthPx: 0,
   playbackFrame: 0,
   playbackRate: 1,
   playbackRateMenuOpen: false,
+  waveExportMenuOpen: false,
+  waveOverflowMenuOpen: false,
   playbackSession: null as PlaybackSession | null,
   playbackSourceKind: 'native',
   playbackTransportError: null as string | null,
@@ -808,6 +821,7 @@ const {
   getSpectrogramCanvasTargetSize,
   getWaveformViewportSize,
   requestWaveformRender,
+  renderSpectrogramScale,
   scheduleSpectrogramRender,
   sendViewportIntent,
   splitterFallbackSizePx: VIEWPORT_SPLITTER_FALLBACK_SIZE_PX,
@@ -2350,10 +2364,22 @@ function renderWaveformUi(): void {
     ? `Loop ${formatAxisLabel(selection.startFrame / sampleRate)} - ${formatAxisLabel(selection.endFrame / sampleRate)}`
     : 'Drag to set loop';
 
-  elements.waveLoopLabel.textContent = selectionLabel;
+  elements.waveLoopLabel.textContent = '↻ Loop';
+  elements.waveLoopLabel.title = selectionLabel;
+  elements.waveLoopLabel.setAttribute('aria-label', selectionLabel);
+  const loopActive = selection?.committed === true;
+  elements.waveLoopLabel.dataset.active = loopActive ? 'true' : 'false';
+  elements.waveLoopLabel.parentElement?.setAttribute('data-active', loopActive ? 'true' : 'false');
   elements.waveClearLoop.disabled = !(selection?.committed);
-  elements.waveExport.disabled = getExportRangeSeconds() === null;
+  const exportDisabled = getExportRangeSeconds() === null;
+  elements.waveExport.disabled = exportDisabled;
   elements.waveExportFormat.disabled = !(getDurationFrames() > 0);
+  for (const button of elements.waveOverflowMenu.querySelectorAll<HTMLButtonElement>('[data-export-format]')) {
+    button.disabled = exportDisabled;
+  }
+  if (exportDisabled) {
+    closeWaveExportMenu();
+  }
   renderWaveformAxis();
   renderSelectionAndLoop(uiState);
   renderPlaybackIndicators(uiState);
@@ -2453,17 +2479,19 @@ function schedulePersistViewportSplitRatio(): void {
   }, 160);
 }
 
-function normalizePlaybackVolume(value: unknown): number {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? clamp(numeric, 0, 1) : 1;
-}
-
 function renderPlaybackVolumeUi(): void {
   const percent = `${Math.round(state.playbackVolume * 100)}%`;
-  elements.volumeSlider.value = String(state.playbackVolume);
-  elements.volumeSlider.title = `Volume ${percent} (Up/Down Arrow)`;
-  // ponytail: :hover/:focus double as the "show the value" flag — no extra state to sync
-  elements.volumeLabel.textContent = elements.volumeSlider.matches(':hover, :focus') ? percent : 'Vol';
+  const boosted = state.playbackVolume > 1;
+  const showPercent = elements.volumeSlider.matches(':hover, :focus');
+  const boostLabel = boosted ? `+${playbackVolumeToDecibels(state.playbackVolume).toFixed(1)} dB` : '';
+  elements.volumeSlider.value = String(playbackVolumeToSliderValue(state.playbackVolume));
+  elements.volumeSlider.dataset.boosted = boosted ? 'true' : 'false';
+  elements.volumeLabel.dataset.boosted = boosted ? 'true' : 'false';
+  elements.volumeSlider.setAttribute('aria-valuetext', boosted ? `${boostLabel} boost` : percent);
+  elements.volumeSlider.title = boosted
+    ? `Volume ${boostLabel} boost (Up/Down Arrow; max +${MAX_PLAYBACK_BOOST_DB} dB)`
+    : `Volume ${percent} (Up/Down Arrow; boost up to +${MAX_PLAYBACK_BOOST_DB} dB)`;
+  elements.volumeLabel.textContent = boosted ? boostLabel : showPercent ? percent : '🔊';
 }
 
 function schedulePersistPlaybackVolume(): void {
@@ -2481,13 +2509,19 @@ function schedulePersistPlaybackVolume(): void {
 }
 
 function applyPlaybackVolume(value: unknown): void {
-  state.playbackVolume = normalizePlaybackVolume(value);
+  state.playbackVolume = snapPlaybackVolume(value);
   renderPlaybackVolumeUi();
   state.audioTransport?.setVolume(state.playbackVolume);
   schedulePersistPlaybackVolume();
 }
 
 function stepPlaybackVolume(direction: -1 | 1): void {
+  if (state.playbackVolume > 1 || (state.playbackVolume === 1 && direction > 0)) {
+    const currentDb = state.playbackVolume > 1 ? playbackVolumeToDecibels(state.playbackVolume) : 0;
+    const nextDb = clamp(currentDb + direction, 0, MAX_PLAYBACK_BOOST_DB);
+    applyPlaybackVolume(playbackVolumeFromSliderValue(1 + (nextDb / MAX_PLAYBACK_BOOST_DB)));
+    return;
+  }
   const currentPercent = Math.round(state.playbackVolume * 100);
   applyPlaybackVolume((currentPercent + (direction * 5)) / 100);
 }
@@ -2512,8 +2546,143 @@ function getExportRangeSeconds(): { end: number; start: number } | null {
   return null;
 }
 
+function isExportAudioFormat(value: unknown): value is ExportAudioFormat {
+  return value === 'wav' || value === 'mp3' || value === 'm4a' || value === 'flac';
+}
+
+function exportSelectedAudio(format: ExportAudioFormat): void {
+  const range = getExportRangeSeconds();
+  if (!range) {
+    return;
+  }
+
+  elements.waveExportFormat.value = format;
+  vscode.postMessage({
+    type: 'exportAudio',
+    body: {
+      endSeconds: range.end,
+      format,
+      startSeconds: range.start,
+    },
+  });
+}
+
+function getWaveMenuButtons(menu: HTMLElement): HTMLButtonElement[] {
+  return Array.from(menu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+}
+
+function positionWaveMenu(menu: HTMLElement, trigger: HTMLElement): void {
+  const triggerRect = trigger.getBoundingClientRect();
+  const menuWidth = Math.max(Math.ceil(triggerRect.width), Math.ceil(menu.offsetWidth || 0));
+  const menuHeight = Math.ceil(menu.offsetHeight || 0);
+  const viewportPadding = 8;
+  const offset = 4;
+  const top = Math.min(
+    Math.max(viewportPadding, window.innerHeight - menuHeight - viewportPadding),
+    Math.round(triggerRect.bottom + offset),
+  );
+  const left = Math.min(
+    Math.max(viewportPadding, Math.round(triggerRect.right - menuWidth)),
+    Math.max(viewportPadding, window.innerWidth - menuWidth - viewportPadding),
+  );
+
+  menu.style.top = `${top}px`;
+  menu.style.left = `${left}px`;
+}
+
+function closeWaveExportMenu({ restoreFocus = false } = {}): void {
+  state.waveExportMenuOpen = false;
+  elements.waveExportLayer.hidden = true;
+  elements.waveExport.setAttribute('aria-expanded', 'false');
+  elements.waveExportMenu.style.top = '';
+  elements.waveExportMenu.style.left = '';
+  if (restoreFocus) {
+    elements.waveExport.focus();
+  }
+}
+
+function openWaveExportMenu(): void {
+  if (elements.waveExport.disabled) {
+    return;
+  }
+  closeWaveOverflowMenu();
+  closePlaybackRateMenu();
+  setSpectrogramMetaOpen(false);
+  state.waveExportMenuOpen = true;
+  elements.waveExportLayer.hidden = false;
+  elements.waveExport.setAttribute('aria-expanded', 'true');
+  positionWaveMenu(elements.waveExportMenu, elements.waveExport);
+  getWaveMenuButtons(elements.waveExportMenu)[0]?.focus();
+}
+
+function closeWaveOverflowMenu({ restoreFocus = false } = {}): void {
+  state.waveOverflowMenuOpen = false;
+  elements.waveOverflowLayer.hidden = true;
+  elements.waveOverflowToggle.setAttribute('aria-expanded', 'false');
+  elements.waveOverflowMenu.style.top = '';
+  elements.waveOverflowMenu.style.left = '';
+  if (restoreFocus) {
+    elements.waveOverflowToggle.focus();
+  }
+}
+
+function openWaveOverflowMenu(): void {
+  closeWaveExportMenu();
+  closePlaybackRateMenu();
+  setSpectrogramMetaOpen(false);
+  state.waveOverflowMenuOpen = true;
+  elements.waveOverflowLayer.hidden = false;
+  elements.waveOverflowToggle.setAttribute('aria-expanded', 'true');
+  positionWaveMenu(elements.waveOverflowMenu, elements.waveOverflowToggle);
+  getWaveMenuButtons(elements.waveOverflowMenu)[0]?.focus();
+}
+
+function closeWaveMenus(): void {
+  closeWaveExportMenu();
+  closeWaveOverflowMenu();
+}
+
+function isWaveMenuUiTarget(target: EventTarget | null): boolean {
+  return target instanceof Node && (
+    elements.waveExport.contains(target)
+    || elements.waveExportLayer.contains(target)
+    || elements.waveOverflowToggle.contains(target)
+    || elements.waveOverflowLayer.contains(target)
+  );
+}
+
+function handleWaveMenuKeydown(
+  event: KeyboardEvent,
+  menu: HTMLElement,
+  close: (options?: { restoreFocus?: boolean }) => void,
+): void {
+  if (event.code === 'Escape') {
+    event.preventDefault();
+    close({ restoreFocus: true });
+    return;
+  }
+
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.code)) {
+    return;
+  }
+
+  const buttons = getWaveMenuButtons(menu);
+  if (buttons.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  const activeIndex = buttons.findIndex((button) => button === document.activeElement);
+  const nextIndex = event.code === 'Home'
+    ? 0
+    : event.code === 'End'
+      ? buttons.length - 1
+      : (Math.max(0, activeIndex) + (event.code === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+  buttons[nextIndex]?.focus();
+}
+
 function renderSpectrogramScale(): void {
   const frequencyTicks = state.engineUiState?.frequencyTicks ?? [];
+  const axisHeightPx = elements.spectrogramStage.clientHeight;
 
   if (frequencyTicks.length === 0) {
     if (!state.renderedFrequencyTicks) {
@@ -2523,12 +2692,14 @@ function renderSpectrogramScale(): void {
     elements.spectrogramAxis.replaceChildren();
     elements.spectrogramGuides.replaceChildren();
     state.renderedFrequencyTicks = null;
+    state.renderedFrequencyAxisHeightPx = 0;
     return;
   }
 
   const laneCount = getSpectrogramLaneCount();
   if (
     laneCount === state.renderedFrequencyLaneCount
+    && axisHeightPx === state.renderedFrequencyAxisHeightPx
     && areFrequencyTicksEqual(state.renderedFrequencyTicks, frequencyTicks)
   ) {
     return;
@@ -2536,37 +2707,47 @@ function renderSpectrogramScale(): void {
 
   const axisFragment = document.createDocumentFragment();
   const guideFragment = document.createDocumentFragment();
+  const visibleTicks = createVisibleFrequencyAxisTicks({
+    axisHeightPx,
+    laneCount,
+    ticks: frequencyTicks,
+  });
+  const visibleTickByKey = new Map(
+    visibleTicks.map((tick) => [`${tick.lane}:${tick.tickIndex}`, tick]),
+  );
 
   // Each channel lane spans the full frequency range within its own vertical
   // band, so the ticks/guides repeat once per lane.
   for (let lane = 0; lane < laneCount; lane += 1) {
-    for (const tick of frequencyTicks) {
+    for (const [tickIndex, tick] of frequencyTicks.entries()) {
       // The lowest-frequency (bottom-edge) label of an interior lane sits at the
       // same y as the next lane's top label, so drop it to avoid the collision.
       if (tick.edge === 'bottom' && lane < laneCount - 1) {
         continue;
       }
       const positionRatio = (lane + tick.positionRatio) / laneCount;
+      const visibleTick = visibleTickByKey.get(`${lane}:${tickIndex}`);
 
-      const axisTick = document.createElement('div');
-      axisTick.className = 'spectrogram-tick';
-      if (tick.edge === 'top' && lane === 0) {
-        axisTick.classList.add('spectrogram-tick-edge-top');
-      } else if (tick.edge === 'bottom' && lane === laneCount - 1) {
-        axisTick.classList.add('spectrogram-tick-edge-bottom');
+      if (visibleTick) {
+        const axisTick = document.createElement('div');
+        axisTick.className = 'spectrogram-tick';
+        if (visibleTick.edge === 'top') {
+          axisTick.classList.add('spectrogram-tick-edge-top');
+        } else if (visibleTick.edge === 'bottom') {
+          axisTick.classList.add('spectrogram-tick-edge-bottom');
+        }
+        axisTick.style.top = `${positionRatio * 100}%`;
+
+        const label = document.createElement('span');
+        label.className = 'spectrogram-tick-label';
+        label.textContent = tick.label;
+        axisTick.append(label);
+        axisFragment.append(axisTick);
       }
-      axisTick.style.top = `${positionRatio * 100}%`;
-
-      const label = document.createElement('span');
-      label.className = 'spectrogram-tick-label';
-      label.textContent = tick.label;
-      axisTick.append(label);
 
       const guide = document.createElement('div');
       guide.className = 'spectrogram-guide';
       guide.style.top = `${positionRatio * 100}%`;
-
-      axisFragment.append(axisTick);
       guideFragment.append(guide);
     }
   }
@@ -2574,6 +2755,7 @@ function renderSpectrogramScale(): void {
   elements.spectrogramAxis.replaceChildren(axisFragment);
   elements.spectrogramGuides.replaceChildren(guideFragment);
   state.renderedFrequencyTicks = frequencyTicks;
+  state.renderedFrequencyAxisHeightPx = axisHeightPx;
   state.renderedFrequencyLaneCount = laneCount;
 }
 
@@ -2737,12 +2919,19 @@ function renderSpectrogramDbWindowUi(dbWindow: { maxDecibels: number; minDecibel
 }
 
 function setSpectrogramMetaOpen(open: boolean): void {
+  if (open) {
+    closeWaveMenus();
+    closePlaybackRateMenu();
+  }
   state.spectrogramMetaOpen = open;
   elements.spectrogramMeta.dataset.open = open ? 'true' : 'false';
   elements.spectrogramMetaControls.hidden = !open;
   if (open) {
     // Drop the panel right under its toolbar button and let it use the rest of the window.
-    const trigger = elements.spectrogramMetaToggle.getBoundingClientRect();
+    const anchor = elements.spectrogramMetaToggle.getClientRects().length > 0
+      ? elements.spectrogramMetaToggle
+      : elements.waveOverflowToggle;
+    const trigger = anchor.getBoundingClientRect();
     const top = Math.round(trigger.bottom + 4);
     elements.spectrogramMeta.style.top = `${top}px`;
     elements.spectrogramMeta.style.right = `${Math.round(Math.max(8, window.innerWidth - trigger.right))}px`;
@@ -2753,6 +2942,8 @@ function setSpectrogramMetaOpen(open: boolean): void {
     'aria-label',
     open ? 'Hide spectrogram settings' : 'Show spectrogram settings',
   );
+  elements.spectrogramMetaToggle.title = open ? 'Hide spectrogram settings' : 'Spectrogram settings';
+  elements.waveOverflowSettings.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
 function getEffectiveSpectrogramRenderConfig() {
@@ -4900,12 +5091,16 @@ function attachUiEvents(): void {
 
   elements.waveToolbar.addEventListener('scroll', () => {
     updateMediaMetadataDetailPosition();
+    closeWaveMenus();
   }, { passive: true });
 
   window.addEventListener('resize', () => {
     updateMediaMetadataDetailPosition();
     closePlaybackRateMenu();
-    positionPlaybackRateMenu();
+    closeWaveMenus();
+    if (state.spectrogramMetaOpen) {
+      setSpectrogramMetaOpen(true);
+    }
   });
 
   // Re-scale the canvas backing stores when the device pixel ratio changes
@@ -4957,11 +5152,17 @@ function attachUiEvents(): void {
     if (!isPlaybackRateUiTarget(event.target)) {
       closePlaybackRateMenu();
     }
+    if (!isWaveMenuUiTarget(event.target)) {
+      closeWaveMenus();
+    }
   }, true);
 
   document.addEventListener('focusin', (event) => {
     if (!isPlaybackRateUiTarget(event.target)) {
       closePlaybackRateMenu();
+    }
+    if (!isWaveMenuUiTarget(event.target)) {
+      closeWaveMenus();
     }
   });
 
@@ -4976,12 +5177,24 @@ function attachUiEvents(): void {
       return;
     }
 
+    if (event.code === 'Escape' && (state.waveExportMenuOpen || state.waveOverflowMenuOpen)) {
+      handleGlobalShortcut(event, () => {
+        if (state.waveExportMenuOpen) {
+          closeWaveExportMenu({ restoreFocus: true });
+        } else {
+          closeWaveOverflowMenu({ restoreFocus: true });
+        }
+      });
+      return;
+    }
+
     if (
       event.ctrlKey
       || event.metaKey
       || event.altKey
       || isTextEditableTarget(event.target)
       || isPlaybackRateUiTarget(event.target)
+      || isWaveMenuUiTarget(event.target)
     ) {
       return;
     }
@@ -5330,25 +5543,59 @@ function attachUiEvents(): void {
     });
   });
   elements.waveClearLoop.addEventListener('click', () => {
+    closeWaveExportMenu();
     sendViewportIntent({ kind: 'clearLoop' });
   });
   elements.waveExport.addEventListener('click', () => {
-    const range = getExportRangeSeconds();
-    const format = elements.waveExportFormat.value;
-    if (!range || (format !== 'wav' && format !== 'mp3' && format !== 'm4a' && format !== 'flac')) {
+    if (state.waveExportMenuOpen) {
+      closeWaveExportMenu({ restoreFocus: true });
+    } else {
+      openWaveExportMenu();
+    }
+  });
+  elements.waveExportMenu.addEventListener('click', (event) => {
+    const button = event.target instanceof Element
+      ? event.target.closest<HTMLButtonElement>('[data-export-format]')
+      : null;
+    const format = button?.dataset.exportFormat;
+    if (!isExportAudioFormat(format)) {
       return;
     }
-    vscode.postMessage({
-      type: 'exportAudio',
-      body: {
-        endSeconds: range.end,
-        format,
-        startSeconds: range.start,
-      },
-    });
+    closeWaveExportMenu();
+    exportSelectedAudio(format);
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.waveExportMenu.addEventListener('keydown', (event) => {
+    handleWaveMenuKeydown(event, elements.waveExportMenu, closeWaveExportMenu);
+  });
+  elements.waveOverflowToggle.addEventListener('click', () => {
+    if (state.waveOverflowMenuOpen) {
+      closeWaveOverflowMenu({ restoreFocus: true });
+    } else {
+      openWaveOverflowMenu();
+    }
+  });
+  elements.waveOverflowMenu.addEventListener('click', (event) => {
+    const button = event.target instanceof Element
+      ? event.target.closest<HTMLButtonElement>('[data-export-format]')
+      : null;
+    const format = button?.dataset.exportFormat;
+    if (!isExportAudioFormat(format)) {
+      return;
+    }
+    closeWaveOverflowMenu();
+    exportSelectedAudio(format);
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.waveOverflowMenu.addEventListener('keydown', (event) => {
+    handleWaveMenuKeydown(event, elements.waveOverflowMenu, closeWaveOverflowMenu);
+  });
+  elements.waveOverflowSettings.addEventListener('click', () => {
+    closeWaveOverflowMenu();
+    setSpectrogramMetaOpen(true);
   });
   elements.volumeSlider.addEventListener('input', () => {
-    applyPlaybackVolume(elements.volumeSlider.value);
+    applyPlaybackVolume(playbackVolumeFromSliderValue(elements.volumeSlider.value));
   });
   for (const type of ['pointerenter', 'pointerleave', 'focus', 'blur']) {
     elements.volumeSlider.addEventListener(type, renderPlaybackVolumeUi);

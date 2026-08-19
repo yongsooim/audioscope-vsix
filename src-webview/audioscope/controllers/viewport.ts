@@ -25,6 +25,7 @@ interface AudioscopeViewportControllerDeps {
   getSpectrogramCanvasTargetSize: () => { pixelHeight: number; pixelWidth: number };
   getWaveformViewportSize: () => { height: number; width: number };
   requestWaveformRender: () => void;
+  renderSpectrogramScale: () => void;
   scheduleSpectrogramRender: (options?: { force?: boolean }) => void;
   sendViewportIntent: (body: SetViewportIntentMessage['body']) => void;
   splitterFallbackSizePx: number;
@@ -42,6 +43,7 @@ export function createAudioscopeViewportController({
   getSpectrogramCanvasTargetSize,
   getWaveformViewportSize,
   requestWaveformRender,
+  renderSpectrogramScale,
   scheduleSpectrogramRender,
   sendViewportIntent,
   splitterFallbackSizePx,
@@ -181,6 +183,7 @@ export function createAudioscopeViewportController({
     state.observedSpectrogramPixelWidth = spectrogramSize.pixelWidth;
     state.observedSpectrogramPixelHeight = spectrogramSize.pixelHeight;
     state.observedOverviewWidth = overviewWidth;
+    renderSpectrogramScale();
 
     sendViewportIntent({
       kind: 'resize',

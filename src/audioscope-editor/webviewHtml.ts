@@ -75,12 +75,19 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                   id="wave-amp-fit"
                   class="wave-tool-button"
                   type="button"
+                  aria-label="Fit the Y axis to the loudest visible sample"
                   title="Fit the Y axis to the loudest visible sample"
                 >Fit</button>
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-follow">
                 <label class="wave-follow-toggle" title="Toggle follow playback (F)">
-                  <input id="wave-follow" class="wave-follow-toggle-input" type="checkbox" aria-keyshortcuts="F" />
+                  <input
+                    id="wave-follow"
+                    class="wave-follow-toggle-input"
+                    type="checkbox"
+                    aria-label="Toggle follow playback"
+                    aria-keyshortcuts="F"
+                  />
                   <span class="wave-follow-toggle-button">
                     <span class="wave-follow-toggle-text">Follow</span>
                     <span class="wave-follow-toggle-track" aria-hidden="true">
@@ -89,19 +96,19 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                   </span>
                 </label>
               </div>
-              <div class="wave-toolbar-group wave-toolbar-group-loop wave-seg">
-                <div id="wave-loop-label" class="wave-toolbar-pill wave-toolbar-pill-loop">Drag to set loop</div>
-                <button id="wave-clear-loop" class="wave-tool-button wave-tool-button-quiet" type="button" aria-hidden="false" disabled>Clear</button>
-              </div>
-              <div class="wave-toolbar-group wave-toolbar-group-export wave-seg">
+              <div class="wave-toolbar-group wave-toolbar-group-export">
                 <button
                   id="wave-export"
-                  class="wave-tool-button wave-tool-button-wide"
+                  class="wave-tool-button"
                   type="button"
-                  title="Export the loop selection (drag on the waveform to set one)"
+                  aria-label="Export selected audio"
+                  aria-haspopup="menu"
+                  aria-controls="wave-export-menu"
+                  aria-expanded="false"
+                  title="Export selected audio — choose a format"
                   disabled
-                >Export selected</button>
-                <select id="wave-export-format" class="wave-export-format" aria-label="Export format" disabled>
+                >⇩ Export</button>
+                <select id="wave-export-format" class="wave-export-format" aria-label="Export format" disabled hidden tabindex="-1">
                   <option value="wav" selected>wav</option>
                   <option value="mp3">mp3</option>
                   <option value="m4a">m4a</option>
@@ -111,12 +118,25 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               <div class="wave-toolbar-group wave-toolbar-group-settings">
                 <button
                   id="spectrogram-meta-toggle"
-                  class="wave-tool-button wave-tool-button-wide"
+                  class="wave-tool-button"
                   type="button"
                   aria-controls="spectrogram-meta-controls"
                   aria-expanded="false"
-                  aria-label="Toggle spectrogram settings"
-                >Settings</button>
+                  aria-label="Show spectrogram settings"
+                  title="Spectrogram settings"
+                >⚙ Settings</button>
+              </div>
+              <div class="wave-toolbar-group wave-toolbar-group-overflow">
+                <button
+                  id="wave-overflow-toggle"
+                  class="wave-tool-button wave-tool-button-symbol"
+                  type="button"
+                  aria-label="More toolbar actions"
+                  aria-haspopup="menu"
+                  aria-controls="wave-overflow-menu"
+                  aria-expanded="false"
+                  title="More toolbar actions"
+                >…</button>
               </div>
             </div>
           </div>
@@ -402,11 +422,29 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
         </div>
       </section>
       <footer class="transport" aria-label="Playback controls">
-        <button id="seek-backward" class="transport-button" type="button" aria-keyshortcuts="ArrowLeft" title="Seek backward 5 seconds (Left Arrow)" disabled>-5s</button>
-        <button id="play-toggle" class="play-toggle" type="button" aria-keyshortcuts="Space" title="Toggle playback (Space)" disabled>Play</button>
-        <button id="seek-forward" class="transport-button" type="button" aria-keyshortcuts="ArrowRight" title="Seek forward 5 seconds (Right Arrow)" disabled>+5s</button>
+        <button id="seek-backward" class="transport-button" type="button" aria-label="Seek backward 5 seconds" aria-keyshortcuts="ArrowLeft" title="Seek backward 5 seconds (Left Arrow)" disabled>−5s</button>
+        <button id="play-toggle" class="play-toggle" type="button" aria-label="Play" aria-keyshortcuts="Space" title="Play (Space)" disabled>▶</button>
+        <button id="seek-forward" class="transport-button" type="button" aria-label="Seek forward 5 seconds" aria-keyshortcuts="ArrowRight" title="Seek forward 5 seconds (Right Arrow)" disabled>+5s</button>
+        <div class="wave-toolbar-group wave-toolbar-group-loop wave-seg" role="group" aria-label="Loop selection" data-active="false">
+          <div
+            id="wave-loop-label"
+            class="wave-toolbar-pill wave-toolbar-pill-loop"
+            role="status"
+            aria-label="Drag to set loop"
+            aria-live="polite"
+            data-active="false"
+            title="Drag to set loop"
+          >↻ Loop</div>
+          <button
+            id="wave-clear-loop"
+            class="wave-tool-button wave-tool-button-symbol wave-tool-button-quiet"
+            type="button"
+            aria-label="Clear loop selection"
+            title="Clear loop selection"
+            disabled
+          >×</button>
+        </div>
         <div class="transport-rate" role="group" aria-label="Playback speed">
-          <span class="transport-rate-label">Speed</span>
           <div id="playback-rate-control" class="transport-rate-control">
             <button
               id="playback-rate-button"
@@ -418,30 +456,31 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               aria-label="Playback speed"
               title="Choose playback speed"
               disabled
-            >1x</button>
+            >1×</button>
             <select id="playback-rate-select" class="transport-rate-select" aria-label="Playback speed" disabled tabindex="-1">
-              <option value="0.5">0.5x</option>
-              <option value="0.75">0.75x</option>
-              <option value="1" selected>1x</option>
-              <option value="1.25">1.25x</option>
-              <option value="1.5">1.5x</option>
-              <option value="2">2x</option>
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
             </select>
           </div>
         </div>
         <div class="transport-volume" role="group" aria-label="Playback volume">
-          <span id="volume-label" class="transport-volume-label">Vol</span>
+          <span id="volume-label" class="transport-volume-label" aria-hidden="true">🔊</span>
           <input
             id="volume-slider"
             class="transport-volume-slider"
             type="range"
             min="0"
-            max="1"
+            max="2"
             step="0.01"
             value="1"
-            aria-label="Playback volume"
+            aria-label="Playback volume; boost above 100 percent"
+            aria-valuetext="100%"
             aria-keyshortcuts="ArrowUp ArrowDown"
-            title="Volume 100% (Up/Down Arrow)"
+            title="Volume 100% (Up/Down Arrow; boost up to +12 dB)"
           />
         </div>
         <div id="time-readout" class="time-readout">0:00.00 / --:--.--</div>
@@ -474,6 +513,31 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
       </footer>
       <div id="playback-rate-layer" class="transport-rate-layer" hidden>
         <div id="playback-rate-menu" class="transport-rate-menu" role="listbox" aria-label="Playback speed"></div>
+      </div>
+      <div id="wave-export-layer" class="wave-menu-layer" hidden>
+        <div id="wave-export-menu" class="wave-menu" role="menu" aria-label="Export format">
+          <button class="wave-menu-option" type="button" role="menuitem" data-export-format="wav">WAV</button>
+          <button class="wave-menu-option" type="button" role="menuitem" data-export-format="mp3">MP3</button>
+          <button class="wave-menu-option" type="button" role="menuitem" data-export-format="m4a">M4A</button>
+          <button class="wave-menu-option" type="button" role="menuitem" data-export-format="flac">FLAC</button>
+        </div>
+      </div>
+      <div id="wave-overflow-layer" class="wave-menu-layer" hidden>
+        <div id="wave-overflow-menu" class="wave-menu wave-overflow-menu" role="menu" aria-label="More toolbar actions">
+          <button class="wave-menu-option" type="button" role="menuitem" data-export-format="wav">Export WAV</button>
+          <button class="wave-menu-option" type="button" role="menuitem" data-export-format="mp3">Export MP3</button>
+          <button class="wave-menu-option" type="button" role="menuitem" data-export-format="m4a">Export M4A</button>
+          <button class="wave-menu-option" type="button" role="menuitem" data-export-format="flac">Export FLAC</button>
+          <button
+            id="wave-overflow-settings"
+            class="wave-menu-option"
+            type="button"
+            role="menuitem"
+            aria-label="Open spectrogram settings"
+            aria-controls="spectrogram-meta-controls"
+            aria-expanded="false"
+          >⚙ Settings</button>
+        </div>
       </div>
       <div id="status" class="status-overlay" role="alertdialog" aria-modal="true" aria-label="audioscope error" hidden></div>
     </main>

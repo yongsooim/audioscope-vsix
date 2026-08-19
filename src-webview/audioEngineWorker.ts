@@ -13,11 +13,12 @@ import {
 } from './audioscope/math/spectrogramMath';
 import { computeLoudnessData, type LoudnessData } from './audio-engine-worker/loudnessAnalysis';
 import { planWaveformFollowRender } from './audio-engine-worker/followPlanner';
-import { formatAxisLabel, getNiceTimeStep } from './audioscope/core/format';
+import { formatAxisLabel } from './audioscope/core/format';
 import {
   calculatePlaybackProgress,
   PLAYBACK_FOLLOW_RATIO,
 } from './audioscope/core/playbackProgress';
+import { createWaveformAxisTicks } from './audioscope/core/waveformAxisTicks';
 import {
   alignSampleToColumnGrid,
   createWaveformColumnGrid,
@@ -1165,8 +1166,7 @@ function applyFollowSolver(): boolean {
   const spanFrames = Math.max(1, currentVisibleRange.endFrame - currentVisibleRange.startFrame);
   const anchorFrame = getClampedPlaybackFrame();
   // Land the follow origin on the shared column grid so the waveform slides one
-  // whole column at a time. The sub-column remainder goes to the playhead, not to
-  // the image (see calculatePlaybackProgress).
+  // whole column at a time while the follow playhead stays fixed at its anchor.
   const desiredVisibleStartFrame = clamp(
     alignViewportStartFrame(anchorFrame - spanFrames * PLAYBACK_FOLLOW_RATIO, spanFrames),
     0,
@@ -2525,61 +2525,19 @@ function buildFrequencyTicks(): FrequencyTickUi[] {
 function buildWaveformAxisTicks(range: RangeFrames): ViewportUiState['waveformAxisTicks'] {
   const sampleRate = state.session.sampleRate;
   const renderWidthPx = Math.max(1, state.waveformSurface.widthCssPx);
-  const spanFrames = Math.max(0, range.endFrame - range.startFrame);
   const cacheKey = [range.startFrame, range.endFrame, renderWidthPx, sampleRate].join(':');
   if (cachedWaveformAxisTickKey === cacheKey) {
     return cachedWaveformAxisTicks;
   }
-  if (!(sampleRate > 0) || !(spanFrames > 0)) {
-    cachedWaveformAxisTickKey = cacheKey;
-    cachedWaveformAxisTicks = [];
-    return cachedWaveformAxisTicks;
-  }
-
-  const startSeconds = range.startFrame / sampleRate;
-  const endSeconds = range.endFrame / sampleRate;
-  const spanSeconds = endSeconds - startSeconds;
-  const tickCount = Math.max(12, Math.min(28, Math.floor(renderWidthPx / 48)));
-  const step = getNiceTimeStep(spanSeconds / tickCount);
-  const ticks: ViewportUiState['waveformAxisTicks'] = [];
-  const firstTick = Math.ceil(startSeconds / step) * step;
-
-  for (let tick = firstTick; tick <= endSeconds + step * 0.25; tick += step) {
-    ticks.push({
-      align: 'center',
-      frame: clamp(Math.round(tick * sampleRate), 0, state.session.durationFrames),
-      label: formatAxisLabel(tick),
-      positionRatio: (tick - startSeconds) / spanSeconds,
-    });
-  }
-
-  if (ticks.length === 0 || Math.abs(ticks[0].frame - range.startFrame) > Math.max(1, step * sampleRate * 0.35)) {
-    ticks.unshift({
-      align: 'start',
-      frame: range.startFrame,
-      label: formatAxisLabel(startSeconds),
-      positionRatio: 0,
-    });
-  }
-
-  const lastTick = ticks[ticks.length - 1];
-  if (!lastTick || Math.abs(lastTick.frame - range.endFrame) > Math.max(1, step * sampleRate * 0.35)) {
-    ticks.push({
-      align: 'end',
-      frame: range.endFrame,
-      label: formatAxisLabel(endSeconds),
-      positionRatio: 1,
-    });
-  }
-
-  if (ticks.length > 0) {
-    ticks[0].align = 'start';
-    ticks[ticks.length - 1].align = 'end';
-  }
-
   cachedWaveformAxisTickKey = cacheKey;
-  cachedWaveformAxisTicks = ticks;
-  return ticks;
+  cachedWaveformAxisTicks = createWaveformAxisTicks({
+    durationFrames: state.session.durationFrames,
+    endFrame: range.endFrame,
+    renderWidthPx,
+    sampleRate,
+    startFrame: range.startFrame,
+  });
+  return cachedWaveformAxisTicks;
 }
 
 function emitUiState(): void {

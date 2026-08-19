@@ -1,4 +1,5 @@
 import { AUDIO_TRANSPORT_PROCESSOR_NAME } from './audioTransportShared';
+import { normalizePlaybackVolume } from '../../src/playbackVolume';
 
 const DEFAULT_SAMPLE_RATE = 48000;
 const DEFAULT_PLAYBACK_RATE = 1;
@@ -59,10 +60,6 @@ export interface AudioTransport {
   setLoop(loopRangeOrNull: PlaybackLoopRange | null): void;
   setPlaybackRate(rate: number): void;
   setVolume(volume: number): void;
-}
-
-function normalizeVolume(volume: number): number {
-  return Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 1;
 }
 
 // Short ramp instead of a hard jump so live volume changes stay click-free.
@@ -371,7 +368,7 @@ class AudioWorkletCopyTransport {
   }
 
   setVolume(volume: number): void {
-    this.volume = normalizeVolume(volume);
+    this.volume = normalizePlaybackVolume(volume);
     applyGainNodeVolume(this.gainNode, this.audioContext, this.volume);
   }
 
@@ -1152,7 +1149,7 @@ class StretchAudioTransport implements AudioTransport {
   }
 
   setVolume(volume: number): void {
-    this.volume = normalizeVolume(volume);
+    this.volume = normalizePlaybackVolume(volume);
     applyGainNodeVolume(this.gainNode, this.audioContext, this.volume);
   }
 

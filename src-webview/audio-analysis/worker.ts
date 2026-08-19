@@ -30,6 +30,7 @@ import {
   type RenderRequestPlan,
   type SpectrogramRequest,
 } from './requestPlan';
+import { getTilePresentationGeometry } from './presentationGeometry';
 import {
   ANALYSIS_TYPE_CODES,
   COLORMAP_DISTRIBUTION_GAMMAS,
@@ -6176,74 +6177,6 @@ function ensurePresentInstanceBuffer(webGpu: WebGpuCompositorState, requiredInst
     usage: globals.bufferUsage.COPY_DST | globals.bufferUsage.VERTEX,
   });
   webGpu.presentInstanceData = new Float32Array(instanceCount * 4);
-}
-
-function getTilePresentationGeometry(
-  tile: TileRecord,
-  displayRange: AnalysisWorkerState['currentDisplayRange'],
-  destinationWidth: number,
-): {
-  destinationWidthPx: number;
-  destinationX: number;
-  sourceWidth: number;
-  sourceX: number;
-} | null {
-  // Position using the fractional view edges so the composite tracks sub-sample
-  // pans smoothly. A single linear sample->pixel map is shared by every tile, so
-  // neighbouring tiles still abut exactly (no seams, no jitter).
-  const displayStartSample = displayRange.startSampleExact;
-  const displaySampleSpan = Math.max(1, displayRange.endSampleExact - displayStartSample);
-  const tileSampleSpan = Math.max(1, tile.tileEndSample - tile.tileStartSample);
-  const availableColumns = tile.complete ? tile.columnCount : Math.max(0, tile.renderedColumns ?? 0);
-
-  if (availableColumns <= 0) {
-    return null;
-  }
-
-  const availableTileEndSample = Math.min(
-    tile.tileEndSample,
-    tile.tileStartSample + Math.ceil((availableColumns * tileSampleSpan) / tile.columnCount),
-  );
-  const overlapStartSample = Math.max(displayStartSample, tile.tileStartSample);
-  const overlapEndSample = Math.min(displayRange.endSampleExact, availableTileEndSample);
-
-  if (overlapEndSample <= overlapStartSample) {
-    return null;
-  }
-
-  const sourceX = clamp(
-    Math.floor(((overlapStartSample - tile.tileStartSample) * tile.columnCount) / tileSampleSpan),
-    0,
-    Math.max(0, tile.columnCount - 1),
-  );
-  if (sourceX >= availableColumns) {
-    return null;
-  }
-
-  const sourceWidth = Math.max(
-    1,
-    Math.min(
-      availableColumns - sourceX,
-      Math.ceil(((overlapEndSample - overlapStartSample) * tile.columnCount) / tileSampleSpan),
-    ),
-  );
-  // Snap both edges to whole device pixels through one shared linear map. This makes
-  // the tile composite scroll in integer-pixel steps so a sub-sample time-shift no
-  // longer lands the upscaled tiles at fractional offsets (which bilinear-resamples
-  // every frame and reads as a left/right shimmer at high zoom). Because both edges
-  // round through the same map, adjacent tiles still share an exact pixel boundary —
-  // no seam, no overlap needed.
-  const sampleToPixel = destinationWidth / displaySampleSpan;
-  const destinationX = Math.round((overlapStartSample - displayStartSample) * sampleToPixel);
-  const destinationEndX = Math.round((overlapEndSample - displayStartSample) * sampleToPixel);
-  const destinationWidthPx = Math.max(1, destinationEndX - destinationX);
-
-  return {
-    destinationWidthPx,
-    destinationX,
-    sourceWidth,
-    sourceX,
-  };
 }
 
 function collectLayerWebGpuInstances(

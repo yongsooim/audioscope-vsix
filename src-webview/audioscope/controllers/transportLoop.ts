@@ -111,7 +111,9 @@ export function createAudioscopeTransportLoopController({
     const playLabel = state.audioTransport?.isPlaying() ? 'Pause' : 'Play';
     if (playLabel !== lastPlayLabel) {
       lastPlayLabel = playLabel;
-      elements.playToggle.textContent = playLabel;
+      elements.playToggle.textContent = playLabel === 'Pause' ? '❚❚' : '▶';
+      elements.playToggle.ariaLabel = playLabel;
+      elements.playToggle.title = `${playLabel} (Space)`;
       onPlayingChange?.(playLabel === 'Pause');
     }
 

@@ -32,7 +32,7 @@ export function createAudioscopePlaybackRateController({
   function getPlaybackRateLabel(value) {
     const normalizedValue = String(normalizePlaybackRateSelection(value));
     const selectedOption = Array.from(elements.playbackRateSelect.options).find((option) => option.value === normalizedValue);
-    return selectedOption?.textContent?.trim() || `${normalizedValue}x`;
+    return selectedOption?.textContent?.trim() || `${normalizedValue}×`;
   }
 
   function syncPlaybackRateControl() {
@@ -76,7 +76,7 @@ export function createAudioscopePlaybackRateController({
       button.setAttribute('role', 'option');
       button.setAttribute('aria-selected', option.selected ? 'true' : 'false');
       button.tabIndex = option.selected ? 0 : -1;
-      button.textContent = option.textContent?.trim() || `${option.value}x`;
+      button.textContent = option.textContent?.trim() || `${option.value}×`;
       button.addEventListener('pointerdown', (event) => {
         if (event.pointerType === 'mouse' && event.button !== 0) {
           return;

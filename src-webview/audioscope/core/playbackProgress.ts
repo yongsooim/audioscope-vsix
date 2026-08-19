@@ -31,14 +31,13 @@ export function calculatePlaybackProgress({
     safeDurationFrames,
   );
   const spanFrames = Math.max(0, presentedEndFrame - presentedStartFrame);
-  // Always the true position, even while following. The view origin is quantized to
-  // whole device columns (waveformColumnGrid), so pinning the playhead to exactly
-  // PLAYBACK_FOLLOW_RATIO would push that sub-column remainder onto the image and
-  // make it slide unevenly. The playhead absorbs it instead: it sits within half a
-  // device pixel of the follow ratio, which no one can see, and the waveform under
-  // it translates rigidly.
   const cursorPercent = spanFrames > 0
-    ? clamp(((playbackFrame - presentedStartFrame) / spanFrames) * 100, 0, 100)
+    ? followCursorLocked
+      // The worker's grid-snapped range and the main-thread playback clock can be a
+      // fraction of a frame apart. Keep that remainder out of the centered playhead
+      // so zoomed follow playback cannot wobble around the follow anchor.
+      ? PLAYBACK_FOLLOW_RATIO * 100
+      : clamp(((playbackFrame - presentedStartFrame) / spanFrames) * 100, 0, 100)
     : 0;
 
   return {

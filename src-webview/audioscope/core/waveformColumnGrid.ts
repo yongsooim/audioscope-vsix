@@ -73,9 +73,8 @@ export function sampleToColumnIndex(sampleFrame: number, grid: WaveformColumnGri
 }
 
 // Snaps a view origin onto the grid. The dropped remainder is under one device
-// column; the playhead absorbs it (see calculatePlaybackProgress) rather than the
-// image, because a sub-pixel playhead offset is invisible while a re-bucketed
-// waveform is not.
+// column, keeping the waveform buckets stable while the follow playhead remains
+// fixed at its center anchor.
 //
 // Once a column holds only a couple of samples the renderer plots raw samples and
 // there is nothing to re-bucket, while the column grid becomes coarser than the

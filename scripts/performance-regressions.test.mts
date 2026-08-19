@@ -131,11 +131,8 @@ test('playback progress calculation covers scrolling and fixed playheads', () =>
     overviewCurrentPercent: 25,
     overviewCurrentVisible: true,
   });
-  // While following, the view origin is quantized to whole device columns and the
-  // playhead carries the sub-column remainder instead of being pinned to the follow
-  // ratio — pinning it would push that remainder onto the image and make the
-  // waveform slide unevenly. Here the origin sits 2 frames early, so the playhead
-  // reads 50.5% rather than a hard 50%.
+  // A grid-snapped origin can land on either side of the exact playback-centered
+  // range. Neither quantization remainder may move the follow playhead off center.
   assert.deepEqual(calculatePlaybackProgress({
     currentFrameFloat: 750,
     durationFrames: 1_000,
@@ -143,7 +140,19 @@ test('playback progress calculation covers scrolling and fixed playheads', () =>
     presentedEndFrame: 948,
     presentedStartFrame: 548,
   }), {
-    cursorPercent: 50.5,
+    cursorPercent: 50,
+    cursorVisible: true,
+    overviewCurrentPercent: 75,
+    overviewCurrentVisible: true,
+  });
+  assert.deepEqual(calculatePlaybackProgress({
+    currentFrameFloat: 750,
+    durationFrames: 1_000,
+    followCursorLocked: true,
+    presentedEndFrame: 952,
+    presentedStartFrame: 552,
+  }), {
+    cursorPercent: 50,
     cursorVisible: true,
     overviewCurrentPercent: 75,
     overviewCurrentVisible: true,

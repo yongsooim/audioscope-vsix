@@ -146,9 +146,9 @@
           "type": "number",
           "default": 1,
           "minimum": 0,
-          "maximum": 1,
+          "maximum": 3.9810717055349722,
           "scope": "window",
-          "description": "Playback volume (0-1). Updated automatically from the transport volume slider."
+          "description": "Playback gain. Values above 1 boost the signal up to +12 dB (approximately 3.981x) and may clip. Updated automatically from the transport volume slider."
         },
         "audioscope.spectrogramQuality": {
           "type": "string",
