@@ -3,6 +3,7 @@ import {
   WAVEFORM_BOTTOM_PADDING_PX,
   WAVEFORM_TOP_PADDING_PX,
 } from '../interactive-waveform/geometry';
+export { RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL } from '../audioscope/core/waveformColumnGrid';
 
 const CENTER_LINE_ALPHA = 0.14;
 const CLIPPING_GUIDE_ALPHA = 0.08;
@@ -15,8 +16,6 @@ const RAW_SAMPLE_MARKER_RADIUS_CSS_PX = 2.15;
 const STABLE_WAVEFORM_PATH_MIN_LINE_WIDTH_SCALE = 0.82;
 const SAMPLE_PLOT_LINE_WIDTH_SCALE = 0.75;
 
-export const RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL = 4;
-
 interface SampleXTransform {
   maxX: number;
   xOffset: number;
@@ -28,7 +27,10 @@ interface WaveformPathPlotRenderOptions {
   amplitudeMax?: number;
   preserveExistingSurface?: boolean;
   sampleData?: Float32Array | null;
-  stableColumnSlotBlend?: number;
+  // Envelope mode: put each extracted point in its own column slot instead of at its
+  // exact sample x. The slot is a function of the absolute column index, so a view
+  // that scrolls by whole columns redraws the same geometry one column over.
+  stableColumnSlots?: boolean;
 }
 
 // The displayed full-scale amplitude: samples at ±amplitudeMax land on the
@@ -62,7 +64,7 @@ export function drawWaveformPathPlot(
   const sampleAmplitudeHeight = amplitudeHeight / normalizeAmplitudeMax(options.amplitudeMax);
   const sampleXTransform = getSampleXTransform(sampleStartFrame, visibleSampleSpan, drawColumns);
   const alpha = clamp01(options.alpha ?? 1);
-  const stableColumnSlotBlend = clamp01(options.stableColumnSlotBlend ?? 0);
+  const stableColumnSlots = options.stableColumnSlots === true;
 
   context.imageSmoothingEnabled = true;
   context.setTransform(1, 0, 0, 1, 0, 0);
@@ -81,7 +83,7 @@ export function drawWaveformPathPlot(
     1,
     renderScale
       * SAMPLE_PLOT_LINE_WIDTH_SCALE
-      * lerp(1, STABLE_WAVEFORM_PATH_MIN_LINE_WIDTH_SCALE, stableColumnSlotBlend),
+      * (stableColumnSlots ? STABLE_WAVEFORM_PATH_MIN_LINE_WIDTH_SCALE : 1),
   );
   context.lineJoin = 'round';
   context.lineCap = 'round';
@@ -95,7 +97,7 @@ export function drawWaveformPathPlot(
     sampleAmplitudeHeight,
     chartTop,
     chartBottom,
-    stableColumnSlotBlend,
+    stableColumnSlots,
   )) {
     context.restore();
     return;
@@ -132,7 +134,7 @@ function traceWaveformPath(
   amplitudeHeight: number,
   chartTop: number,
   chartBottom: number,
-  stableColumnSlotBlend = 0,
+  stableColumnSlots = false,
 ): boolean {
   let previousOffset = Number.NEGATIVE_INFINITY;
   let started = false;
@@ -147,9 +149,9 @@ function traceWaveformPath(
 
     const samplePosition = sampleStartFrame + sampleOffset;
     const sampleValue = clamp(pathPoints[pointIndex + 1] ?? 0, -1, 1);
-    const sampleX = getSampleX(samplePosition, sampleXTransform);
-    const stableX = getStableWaveformPathX(pointOrdinal, sampleXTransform.maxX);
-    const x = lerp(sampleX, stableX, stableColumnSlotBlend);
+    const x = stableColumnSlots
+      ? getStableWaveformPathX(pointOrdinal, sampleXTransform.maxX)
+      : getSampleX(samplePosition, sampleXTransform);
     const y = clamp(midY - sampleValue * amplitudeHeight, chartTop, chartBottom);
 
     if (!started) {
@@ -180,10 +182,6 @@ function getStableWaveformPathX(pointOrdinal: number, maxX: number): number {
         ? 2 / 3
         : 1;
   return clamp(columnIndex + slotOffset, 0, maxX);
-}
-
-function lerp(start: number, end: number, amount: number): number {
-  return start + ((end - start) * clamp01(amount));
 }
 
 export function getWaveformMarkerYRatio(heightCssPx: number, sampleValue: number, amplitudeMax = 1): number {

@@ -49,26 +49,25 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             </div>
             <div class="wave-toolbar-actions">
               <div class="wave-toolbar-group wave-toolbar-group-zoom wave-seg">
-                <span class="wave-seg-label">Window</span>
+                <span class="wave-seg-label" title="X axis — length of the visible time window">X</span>
                 <button
                   id="wave-zoom-reset"
                   class="wave-tool-button wave-seg-value"
                   type="button"
                   aria-label="Reset waveform zoom"
                   aria-live="polite"
-                  title="Length of the visible time window — click to fit the whole file"
                 >1.0x</button>
                 <button id="wave-zoom-out" class="wave-tool-button" type="button" aria-label="Zoom out waveform" title="Zoom out waveform (-)">-</button>
                 <button id="wave-zoom-in" class="wave-tool-button" type="button" aria-label="Zoom in waveform" title="Zoom in waveform (+)">+</button>
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-amp wave-seg">
-                <span class="wave-seg-label">Amp ±</span>
+                <span class="wave-seg-label" title="Y axis — full-scale amplitude of the waveform">Y</span>
                 <button
                   id="wave-amp-reset"
                   class="wave-tool-button wave-seg-value"
                   type="button"
                   aria-label="Reset waveform amplitude range"
-                  title="Full-scale amplitude of the Y axis — click to reset to ±1.0"
+                  title="Full-scale amplitude — click to reset to ±1.0"
                 >1</button>
                 <button id="wave-amp-out" class="wave-tool-button" type="button" aria-label="Widen the waveform amplitude range" title="Widen the amplitude range">-</button>
                 <button id="wave-amp-in" class="wave-tool-button" type="button" aria-label="Narrow the waveform amplitude range" title="Narrow the amplitude range">+</button>
@@ -158,6 +157,17 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
             <canvas id="spectrogram" class="spectrogram-canvas" aria-label="Spectrogram"></canvas>
             <div id="spectrogram-meta" class="spectrogram-meta" data-open="false">
               <div id="spectrogram-meta-controls" class="spectrogram-meta-controls" hidden>
+                <h2 class="spectrogram-control-heading">Waveform</h2>
+                <label id="spectrogram-split-channels-control" class="spectrogram-control" title="Show each audio channel as its own stacked lane instead of a mono downmix. Applies to the waveform and the analysis view. Increases compute and memory with channel count.">
+                  <span class="spectrogram-control-label">Channels</span>
+                  <span class="spectrogram-control-inline spectrogram-control-toggle-inline">
+                    <input id="spectrogram-split-channels-toggle" class="spectrogram-control-toggle-input" type="checkbox" aria-label="Split audio channels into separate lanes" />
+                    <span class="spectrogram-control-toggle-track" aria-hidden="true">
+                      <span class="spectrogram-control-toggle-thumb"></span>
+                    </span>
+                  </span>
+                </label>
+                <h2 class="spectrogram-control-heading">Analysis</h2>
                 <label id="spectrogram-type-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Type</span>
                   <span class="spectrogram-control-inline">
@@ -369,15 +379,6 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                   <span class="spectrogram-control-label">WebGPU</span>
                   <span class="spectrogram-control-inline spectrogram-control-toggle-inline">
                     <input id="spectrogram-webgpu-toggle" class="spectrogram-control-toggle-input" type="checkbox" aria-label="Enable experimental WebGPU spectrogram rendering" />
-                    <span class="spectrogram-control-toggle-track" aria-hidden="true">
-                      <span class="spectrogram-control-toggle-thumb"></span>
-                    </span>
-                  </span>
-                </label>
-                <label id="spectrogram-split-channels-control" class="spectrogram-control" title="Show each audio channel as its own stacked lane instead of a mono downmix. Increases compute and memory with channel count.">
-                  <span class="spectrogram-control-label">Channels</span>
-                  <span class="spectrogram-control-inline spectrogram-control-toggle-inline">
-                    <input id="spectrogram-split-channels-toggle" class="spectrogram-control-toggle-input" type="checkbox" aria-label="Split audio channels into separate lanes" />
                     <span class="spectrogram-control-toggle-track" aria-hidden="true">
                       <span class="spectrogram-control-toggle-thumb"></span>
                     </span>

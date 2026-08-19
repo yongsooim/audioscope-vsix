@@ -3,7 +3,19 @@ import { isCurrentWorkerMessage } from './workerMessageSession';
 import type { AudioTransport, PlaybackSession } from './transport/audioTransport';
 import { createAudioscopeElements } from './audioscope/core/elements';
 import { clamp, formatAxisLabel } from './audioscope/core/format';
+import {
+  calculatePlaybackProgress,
+  type PlaybackProgressSnapshot,
+} from './audioscope/core/playbackProgress';
 import { getWaveformMarkerYRatio } from './audio-engine-worker/waveformRender';
+import {
+  createWaveformColumnGrid,
+  getWaveformColumnCount,
+  getWaveformRenderWidthCssPx,
+  sampleToColumnIndex,
+  WAVEFORM_GRID_SLACK_COLUMNS,
+  type WaveformColumnGrid,
+} from './audioscope/core/waveformColumnGrid';
 import { createAudioscopeFocusController } from './audioscope/controllers/focus';
 import { createAudioscopeLifecycleController } from './audioscope/controllers/lifecycle';
 import {
@@ -38,6 +50,7 @@ import {
   type AnalysisRenderBackend,
   type AnalysisSurfaceResetReason,
   type EngineWorkerToMainMessage,
+  type PlaybackClockState,
   type SampleInfoPayload,
   type SetViewportIntentMessage,
   type SpectrogramAnalysisType,
@@ -610,6 +623,7 @@ const state = {
   } | null,
   waveformSampleMarkers: [] as HTMLElement[],
   lastAppliedTransportCommandSerial: 0,
+  latestPlaybackClock: null as PlaybackClockState | null,
   loadToken: 0,
   loudness: createLoudnessSummaryState('idle'),
   loudnessChannelSessionRevision: 0,
@@ -772,6 +786,7 @@ const {
   getDurationFrames,
   getEffectiveDurationSeconds,
   getSampleRate,
+  onPlaybackClock: applyPlaybackClock,
   onPlayingChange: (playing) => { vscode.postMessage({ type: 'playbackState', body: { playing } }); },
   renderMediaMetadata,
   state,
@@ -1661,7 +1676,7 @@ async function createWaveformSatellite(
       height: Math.max(1, Math.round(size.height / laneCount)),
       offscreenCanvas,
       renderScale: DISPLAY_PIXEL_RATIO,
-      width: size.width,
+      width: getWaveformRenderWidthCssPx(size.width, DISPLAY_PIXEL_RATIO),
     },
   }, [offscreenCanvas]);
   worker.postMessage({
@@ -1712,7 +1727,7 @@ async function setupWaveformChannels(
       body: {
         height: Math.max(1, Math.round(getWaveformViewportSize().height / laneCount)),
         renderScale: DISPLAY_PIXEL_RATIO,
-        width: getWaveformViewportSize().width,
+        width: getWaveformRenderWidthCssPx(getWaveformViewportSize().width, DISPLAY_PIXEL_RATIO),
       },
     });
   }
@@ -1793,7 +1808,7 @@ async function initializeWaveformSurface(loadToken: number): Promise<void> {
       height: waveformSize.height,
       offscreenCanvas,
       renderScale: DISPLAY_PIXEL_RATIO,
-      width: waveformSize.width,
+      width: getWaveformRenderWidthCssPx(waveformSize.width, DISPLAY_PIXEL_RATIO),
     },
   }, [offscreenCanvas]);
 
@@ -1963,6 +1978,7 @@ function applyTransportCommand(command: TransportCommand | null): void {
 }
 
 function applyViewportUiState(uiState: ViewportUiState): void {
+  applyLatestPlaybackClock(uiState);
   const previousUiState = state.engineUiState;
   const previousPresentedRange = state.waveformViewport.presentedRange;
   state.engineUiState = uiState;
@@ -2196,21 +2212,16 @@ function positionLoopHandle(element: HTMLElement, widthPx: number, percent: numb
 
 function renderTransportOverview(uiState: ViewportUiState | null): void {
   if (!uiState) {
-    elements.timeline.value = '0';
     elements.waveformOverviewThumb.hidden = true;
     elements.waveformOverviewThumb.style.left = '0%';
     elements.waveformOverviewThumb.style.width = '0%';
     elements.timelineLoopRange.hidden = true;
     elements.timelineLoopRange.style.left = '0%';
     elements.timelineLoopRange.style.width = '0%';
-    elements.timelineCurrentMarker.hidden = true;
-    elements.timelineCurrentMarker.style.left = '0%';
     return;
   }
 
-  const currentPercent = uiState.overview.currentPercent;
   elements.timeline.disabled = !hasPlaybackTransport();
-  elements.timeline.value = String(currentPercent / 100);
   elements.waveformOverviewThumb.hidden = uiState.overview.viewportWidthPercent <= 0;
   elements.waveformOverviewThumb.style.left = `${uiState.overview.viewportLeftPercent.toFixed(6)}%`;
   elements.waveformOverviewThumb.style.width = `${uiState.overview.viewportWidthPercent.toFixed(6)}%`;
@@ -2235,27 +2246,55 @@ function renderTransportOverview(uiState: ViewportUiState | null): void {
     elements.timelineLoopRange.style.left = `${leftPercent.toFixed(6)}%`;
     elements.timelineLoopRange.style.width = `${widthPercent.toFixed(6)}%`;
   }
+}
 
-  if (!uiState.overview.currentVisible) {
+function getPlaybackPositionPx(percent: number, knownWidth: number, element: HTMLElement): number {
+  const width = knownWidth > 0 ? knownWidth : element.clientWidth;
+  return (clamp(percent, 0, 100) / 100) * Math.max(0, width);
+}
+
+function renderPlaybackPosition(uiState: ViewportUiState | null): void {
+  const cursorVisible = uiState?.cursorVisible === true;
+  const cursorPercent = uiState?.cursorPercent ?? 0;
+  const progressScale = clamp(cursorPercent / 100, 0, 1);
+  const waveformCursorX = getPlaybackPositionPx(
+    cursorPercent,
+    state.observedWaveformViewportWidth,
+    elements.waveformViewport,
+  );
+  const spectrogramCursorX = getPlaybackPositionPx(
+    cursorPercent,
+    state.observedSpectrogramPixelWidth / DISPLAY_PIXEL_RATIO,
+    elements.spectrogram,
+  );
+
+  elements.waveformProgress.style.transform = `scaleX(${progressScale})`;
+  elements.waveformCursor.style.transform = `translate3d(${waveformCursorX.toFixed(3)}px, 0, 0)`;
+  elements.waveformCursor.style.display = cursorVisible ? 'block' : 'none';
+  elements.spectrogramProgress.style.transform = `scaleX(${progressScale})`;
+  elements.spectrogramCursor.style.transform = `translate3d(${spectrogramCursorX.toFixed(3)}px, 0, 0)`;
+  elements.spectrogramCursor.style.display = cursorVisible ? 'block' : 'none';
+
+  const currentPercent = uiState?.overview.currentPercent ?? 0;
+  elements.timeline.value = String(currentPercent / 100);
+  if (!uiState?.overview.currentVisible) {
     elements.timelineCurrentMarker.hidden = true;
-    elements.timelineCurrentMarker.style.left = '0%';
+    elements.timelineCurrentMarker.style.transform = 'translate3d(0, -50%, 0) translateX(-50%)';
     return;
   }
 
+  const timelineMarkerX = getPlaybackPositionPx(
+    currentPercent,
+    state.observedOverviewWidth,
+    elements.waveformOverview,
+  );
   elements.timelineCurrentMarker.hidden = false;
-  elements.timelineCurrentMarker.style.left = `${currentPercent.toFixed(6)}%`;
+  elements.timelineCurrentMarker.style.transform = `translate3d(${timelineMarkerX.toFixed(3)}px, -50%, 0) translateX(-50%)`;
 }
 
 function renderPlaybackIndicators(uiState: ViewportUiState | null): void {
-  const cursorVisible = uiState?.cursorVisible === true;
-  const cursorPercent = uiState?.cursorPercent ?? 0;
-  elements.waveformProgress.style.width = `${cursorPercent}%`;
-  elements.waveformCursor.style.left = `${cursorPercent}%`;
-  elements.waveformCursor.style.display = cursorVisible ? 'block' : 'none';
-  elements.spectrogramProgress.style.width = `${cursorPercent}%`;
-  elements.spectrogramCursor.style.left = `${cursorPercent}%`;
-  elements.spectrogramCursor.style.display = cursorVisible ? 'block' : 'none';
   renderTransportOverview(uiState);
+  renderPlaybackPosition(uiState);
 }
 
 function formatVisibleDuration(seconds: number): string {
@@ -2274,27 +2313,35 @@ function formatVisibleDuration(seconds: number): string {
   return ms >= 10 ? `${ms.toFixed(1)} ms` : `${ms.toFixed(2)} ms`;
 }
 
-// Shows the visible window length, plus pixels-per-sample once individual
-// samples become resolvable — more meaningful than a file-relative multiplier.
+// The visible window length — more meaningful than a file-relative multiplier.
 function formatWaveformZoomLabel(uiState: ViewportUiState): string {
   const sampleRate = uiState.playback.sampleRate || getSampleRate();
   const spanFrames = uiState.presentedEndFrame - uiState.presentedStartFrame;
   if (!(sampleRate > 0) || !(spanFrames > 0)) {
     return formatVisibleDuration(0);
   }
-  const durationLabel = formatVisibleDuration(spanFrames / sampleRate);
-  const pxPerSample = getWaveformViewportSize().width / spanFrames;
-  if (pxPerSample >= 1) {
-    const pxLabel = pxPerSample >= 10 ? `${Math.round(pxPerSample)}` : pxPerSample.toFixed(1);
-    return `${durationLabel} · ${pxLabel} px/smp`;
-  }
-  return durationLabel;
+  return formatVisibleDuration(spanFrames / sampleRate);
+}
+
+// Pixels-per-sample only says anything once individual samples are resolvable, and
+// appending it to the readout was the widest thing that ever landed in the toolbar.
+// It lives in the tooltip instead, where a variable width costs nothing.
+function formatWaveformZoomTitle(uiState: ViewportUiState | null): string {
+  const spanFrames = uiState ? uiState.presentedEndFrame - uiState.presentedStartFrame : 0;
+  // The observed width, not a fresh clientWidth read: this runs on every follow frame.
+  const viewportWidth = state.observedWaveformViewportWidth || getWaveformViewportSize().width;
+  const pxPerSample = spanFrames > 0 ? viewportWidth / spanFrames : 0;
+  const detail = pxPerSample >= 1
+    ? ` · ${pxPerSample >= 10 ? Math.round(pxPerSample) : pxPerSample.toFixed(1)} px/sample`
+    : '';
+  return `X axis — length of the visible time window${detail}. Click to fit the whole file.`;
 }
 
 function renderWaveformUi(): void {
   const uiState = state.engineUiState;
   // The zoom readout is the reset button — clicking the value fits the whole file.
   elements.waveZoomReset.textContent = uiState ? formatWaveformZoomLabel(uiState) : formatVisibleDuration(0);
+  elements.waveZoomReset.title = formatWaveformZoomTitle(uiState);
   elements.waveFollow.checked = state.followPlayback;
 
   const selection = uiState?.selection;
@@ -3008,27 +3055,75 @@ function areWaveformRenderRequestsEqual(
     && Math.abs(Math.round(leftHeightPx) - Math.round(rightHeightPx)) <= 1;
 }
 
-function resetWaveformCanvasPresentation(canvas: HTMLCanvasElement): void {
-  canvas.style.width = '100%';
-  if (getSpectrogramLaneCount() <= 1) {
-    canvas.style.height = '100%';
+// The column grid this viewport + zoom renders on. Same inputs and same formula as
+// the engine worker's copy, so both agree on where a column starts.
+function getWaveformColumnGrid(uiState: ViewportUiState | null): WaveformColumnGrid | null {
+  const spanFrames = uiState ? uiState.presentedEndFrame - uiState.presentedStartFrame : 0;
+  if (!(spanFrames > 0)) {
+    return null;
   }
-  canvas.style.transformOrigin = '0 0';
-  canvas.style.transform = 'translate3d(0, 0, 0)';
-  mirrorWaveformLaneStyles();
+  // The observed width, not a fresh clientWidth read: this runs next to style writes
+  // on every follow frame (layout thrash), and it has to be the exact width the
+  // engine worker was told about or the two grids would drift apart.
+  return createWaveformColumnGrid(
+    getWaveformColumnCount(
+      state.observedWaveformViewportWidth || getWaveformViewportSize().width,
+      DISPLAY_PIXEL_RATIO,
+    ),
+    spanFrames,
+  );
 }
 
-// Unified pipeline: the engine worker owns the geometry (presentedRange) and the
-// waveform workers render that EXACT range every frame, so the canvas is always a
-// 1:1 image of the viewport. No CSS scale/translate bridge — which previously
-// stretched a stale envelope on zoom (an envelope can't be linearly scaled) and
-// flashed the wrong region. We only ensure the canvas sits at identity.
-function syncWaveformCanvasPresentation(_uiState: ViewportUiState | null = state.engineUiState): void {
+// How many device columns the image on screen sits behind the presented origin.
+// The canvas carries slack columns past the right edge, so sliding it left by that
+// many device pixels puts the right samples under the playhead even while the
+// replacement render is still in flight — the follow scroll then runs at display
+// rate instead of stepping whenever the worker happens to finish.
+function getWaveformCatchUpColumns(
+  uiState: ViewportUiState | null,
+  grid: WaveformColumnGrid | null,
+): number {
+  const drawnRange = state.waveformViewport.activeRenderRange;
+  const sampleRate = uiState?.playback.sampleRate || getSampleRate();
+  if (!uiState || !grid || !drawnRange || !(sampleRate > 0)) {
+    return 0;
+  }
+
+  // A stale image from another zoom level is never translated (and never scaled) —
+  // it stays put until its replacement lands. That rule is what keeps the old zoom
+  // flash gone: no transform ever bridges two different geometries.
+  if (Math.round((drawnRange.end - drawnRange.start) * sampleRate) !== grid.spanSamples) {
+    return 0;
+  }
+
+  return clamp(
+    sampleToColumnIndex(uiState.presentedStartFrame - drawnRange.start * sampleRate, grid),
+    0,
+    WAVEFORM_GRID_SLACK_COLUMNS,
+  );
+}
+
+// The engine worker owns the geometry (presentedRange) and the waveform workers
+// render it at exactly one device pixel per grid column, so the visible part of the
+// canvas is always a 1:1 image of the viewport — no CSS scale bridge, which is what
+// used to stretch a stale envelope on zoom and flash the wrong region. The only
+// transform is an integer-device-pixel translate into the off-screen slack columns,
+// and it is pixel-exact because both origins sit on the same absolute column grid.
+function syncWaveformCanvasPresentation(uiState: ViewportUiState | null = state.engineUiState): void {
   const canvas = state.waveformCanvas;
   if (!canvas) {
     return;
   }
-  resetWaveformCanvasPresentation(canvas);
+
+  const grid = getWaveformColumnGrid(uiState);
+  const offsetCssPx = getWaveformCatchUpColumns(uiState, grid) / DISPLAY_PIXEL_RATIO;
+  canvas.style.width = grid ? `${grid.columnCount / DISPLAY_PIXEL_RATIO}px` : '100%';
+  if (getSpectrogramLaneCount() <= 1) {
+    canvas.style.height = '100%';
+  }
+  canvas.style.transformOrigin = '0 0';
+  canvas.style.transform = `translate3d(${(-offsetCssPx).toFixed(3)}px, 0, 0)`;
+  mirrorWaveformLaneStyles();
 }
 
 function expandRange(range: TimeRange, duration: number, factor: number): TimeRange {
@@ -4278,9 +4373,6 @@ function handleWaveformWorkerMessage(loadToken: number, message: WaveformWorkerT
 
 function handleEngineWorkerMessage(message: EngineWorkerToMainMessage): void {
   switch (message.type) {
-    case 'PlaybackProgress':
-      applyPlaybackProgress(message.body);
-      return;
     case 'ViewportUiState':
       applyViewportUiState(message.body);
       return;
@@ -4305,22 +4397,30 @@ function requestWaveformRender(uiState: ViewportUiState | null = state.engineUiS
     return;
   }
 
-  const waveformSize = getWaveformViewportSize();
-  // Render the EXACT presented (visible) range at viewport resolution every frame.
-  // Previously this used the engine's buffered renderedRange and the main thread
-  // scrolled/scaled the buffer via CSS transform — the source of the zoom flash.
-  // Now there is no transform, so the rendered range must equal the visible range.
-  const renderWidthPx = Math.max(1, waveformSize.width);
+  const grid = getWaveformColumnGrid(uiState);
+  if (!grid) {
+    return;
+  }
+
+  // Render the presented range plus a fixed strip of slack columns that hang off the
+  // right edge, at exactly one device pixel per grid column. The visible part is 1:1
+  // with the viewport, so there is never a CSS scale bridge (the old zoom-flash);
+  // the slack only ever moves under an integer-pixel translate, which is pixel-exact
+  // because every column sits on the shared absolute grid.
+  const renderWidthPx = grid.columnCount / DISPLAY_PIXEL_RATIO;
   const renderRange: TimeRange = {
     start: uiState.presentedStartFrame / sampleRate,
-    end: uiState.presentedEndFrame / sampleRate,
+    end: (uiState.presentedStartFrame + grid.spanSamples) / sampleRate,
   };
   if (!(renderRange.end > renderRange.start)) {
     return;
   }
 
   const laneCount = getSpectrogramLaneCount();
-  const renderHeightPx = Math.max(1, Math.round(waveformSize.height / laneCount));
+  const renderHeightPx = Math.max(
+    1,
+    Math.round((state.observedWaveformViewportHeight || getWaveformViewportSize().height) / laneCount),
+  );
 
   if (areWaveformRenderRequestsEqual(
     state.waveformViewport.activeRenderRange,
@@ -4354,7 +4454,9 @@ function requestWaveformRender(uiState: ViewportUiState | null = state.engineUiS
       renderScale: DISPLAY_PIXEL_RATIO,
       viewEnd: renderRange.end,
       viewStart: renderRange.start,
-      visibleSpan: Math.max(0, renderRange.end - renderRange.start),
+      // The on-screen part of the rendered window. The worker scopes the reported
+      // peak to it so amplitude Fit ignores the off-screen slack columns.
+      visibleSpan: Math.max(0, (uiState.presentedEndFrame - uiState.presentedStartFrame) / sampleRate),
       width: renderWidthPx,
     },
   };
@@ -4363,24 +4465,44 @@ function requestWaveformRender(uiState: ViewportUiState | null = state.engineUiS
   broadcastWaveformLaneMessage(message);
 }
 
-function applyPlaybackProgress(body: {
-  cursorPercent: number;
-  cursorVisible: boolean;
-  overviewCurrentPercent: number;
-  overviewCurrentVisible: boolean;
-  playback: ViewportUiState['playback'];
-}): void {
-  const uiState = state.engineUiState;
-  if (!uiState) {
+function getPlaybackProgress(
+  uiState: ViewportUiState,
+  playback: PlaybackClockState,
+): PlaybackProgressSnapshot {
+  return calculatePlaybackProgress({
+    currentFrameFloat: playback.currentFrameFloat,
+    durationFrames: playback.durationFrames,
+    // From the engine, not re-derived here: it is the side that tracks the drag
+    // state the rule keys off, and two copies of the rule would drift.
+    followCursorLocked: uiState.followCursorLocked,
+    presentedEndFrame: uiState.presentedEndFrame,
+    presentedStartFrame: uiState.presentedStartFrame,
+  });
+}
+
+function applyPlaybackToUiState(uiState: ViewportUiState, playback: PlaybackClockState): void {
+  const progress = getPlaybackProgress(uiState, playback);
+  uiState.cursorPercent = progress.cursorPercent;
+  uiState.cursorVisible = progress.cursorVisible;
+  uiState.overview.currentPercent = progress.overviewCurrentPercent;
+  uiState.overview.currentVisible = progress.overviewCurrentVisible;
+  uiState.playback = playback;
+}
+
+function applyLatestPlaybackClock(uiState: ViewportUiState): void {
+  if (state.latestPlaybackClock) {
+    applyPlaybackToUiState(uiState, state.latestPlaybackClock);
+  }
+}
+
+function applyPlaybackClock(playback: PlaybackClockState): void {
+  state.latestPlaybackClock = playback;
+  if (!state.engineUiState) {
     return;
   }
 
-  uiState.cursorPercent = body.cursorPercent;
-  uiState.cursorVisible = body.cursorVisible;
-  uiState.overview.currentPercent = body.overviewCurrentPercent;
-  uiState.overview.currentVisible = body.overviewCurrentVisible;
-  uiState.playback = body.playback;
-  renderPlaybackIndicators(uiState);
+  applyPlaybackToUiState(state.engineUiState, playback);
+  renderPlaybackPosition(state.engineUiState);
 }
 
 function getHoverTarget(surface: SurfaceKind): HTMLElement {

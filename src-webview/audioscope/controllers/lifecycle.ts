@@ -1,5 +1,5 @@
 import type { PlaybackSession, AudioTransport } from '../../transport/audioTransport';
-import type { ViewportUiState } from '../../audioEngineProtocol';
+import type { PlaybackClockState, ViewportUiState } from '../../audioEngineProtocol';
 import type { AudioscopeElements } from '../core/elements';
 
 interface LifecycleState {
@@ -24,6 +24,7 @@ interface LifecycleState {
   initialWaveformReadyLoadToken: number;
   lastAppliedTransportCommandSerial: number;
   lastSyncedSpectrogramDisplay: unknown | null;
+  latestPlaybackClock: PlaybackClockState | null;
   loopHandleDrag: unknown | null;
   loudnessChannelSessionRevision: number;
   playbackFrame: number;
@@ -164,6 +165,7 @@ export function createAudioscopeLifecycleController({
     state.selectionDrag = null;
     state.loopHandleDrag = null;
     state.engineUiState = null;
+    state.latestPlaybackClock = null;
     state.lastSyncedSpectrogramDisplay = null;
     state.hoverState.waveform = null;
     state.hoverState.spectrogram = null;

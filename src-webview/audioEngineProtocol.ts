@@ -154,6 +154,10 @@ export type TransportCommand =
 export interface ViewportUiState {
   cursorPercent: number;
   cursorVisible: boolean;
+  // The engine owns this: it is the only side that knows whether a drag is in
+  // progress. The main thread re-runs calculatePlaybackProgress on every clock tick
+  // and reads this back rather than re-deriving the rule from its own drag state.
+  followCursorLocked: boolean;
   frequencyTicks: FrequencyTickUi[];
   overview: OverviewUiState;
   playback: PlaybackClockState;
@@ -342,17 +346,6 @@ export interface ViewportUiStateMessage {
   type: 'ViewportUiState';
 }
 
-export interface PlaybackProgressMessage {
-  body: {
-    cursorPercent: number;
-    cursorVisible: boolean;
-    overviewCurrentPercent: number;
-    overviewCurrentVisible: boolean;
-    playback: PlaybackClockState;
-  };
-  type: 'PlaybackProgress';
-}
-
 export interface WaveformSurfaceReadyMessage {
   body: {
     presentedEndFrame: number;
@@ -385,7 +378,6 @@ export interface EngineErrorMessage {
 
 export type EngineWorkerToMainMessage =
   | EngineErrorMessage
-  | PlaybackProgressMessage
   | SampleInfoMessage
   | SpectrogramSurfaceReadyMessage
   | ViewportUiStateMessage

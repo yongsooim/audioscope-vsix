@@ -757,10 +757,13 @@ body {
 .waveform-progress {
   position: absolute;
   inset: 0 auto 0 0;
-  width: 0%;
+  width: 100%;
   z-index: 2;
   background: rgba(249, 115, 22, 0.12);
   pointer-events: none;
+  transform: scaleX(0);
+  transform-origin: left center;
+  will-change: transform;
 }
 
 .waveform-cursor {
@@ -770,6 +773,7 @@ body {
   width: 0;
   z-index: 3;
   pointer-events: none;
+  will-change: transform;
 }
 
 .waveform-cursor::before {
@@ -976,6 +980,24 @@ body {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* Section divider inside the settings popover. The panel holds both view settings
+   (which lane layout the waveform and the analysis share) and analysis parameters,
+   and unlabelled they read as one undifferentiated list. Headings, not tabs: there
+   is no state to remember and nothing worth hiding behind a click. */
+.spectrogram-control-heading {
+  margin: 3px 0 0;
+  color: var(--chrome-text-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.spectrogram-control-heading:first-child {
+  margin-top: 0;
 }
 
 .spectrogram-control {
@@ -1417,10 +1439,13 @@ body {
 .spectrogram-progress {
   position: absolute;
   inset: 0 auto 0 0;
-  width: 0%;
+  width: 100%;
   z-index: 1;
   background: transparent;
   pointer-events: none;
+  transform: scaleX(0);
+  transform-origin: left center;
+  will-change: transform;
 }
 
 .spectrogram-cursor {
@@ -1430,6 +1455,7 @@ body {
   width: 0;
   z-index: 3;
   pointer-events: none;
+  will-change: transform;
 }
 
 .spectrogram-cursor::before {
@@ -1915,6 +1941,7 @@ body {
   background: var(--chrome-text-strong);
   pointer-events: none;
   transform: translate3d(-50%, -50%, 0);
+  will-change: transform;
 }
 
 .timeline-hover-tooltip {

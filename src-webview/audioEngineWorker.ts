@@ -14,6 +14,15 @@ import {
 import { computeLoudnessData, type LoudnessData } from './audio-engine-worker/loudnessAnalysis';
 import { planWaveformFollowRender } from './audio-engine-worker/followPlanner';
 import { formatAxisLabel, getNiceTimeStep } from './audioscope/core/format';
+import {
+  calculatePlaybackProgress,
+  PLAYBACK_FOLLOW_RATIO,
+} from './audioscope/core/playbackProgress';
+import {
+  alignSampleToColumnGrid,
+  createWaveformColumnGrid,
+  getWaveformColumnCount,
+} from './audioscope/core/waveformColumnGrid';
 import type {
   EngineMainToWorkerMessage,
   EngineWorkerToMainMessage,
@@ -95,7 +104,6 @@ const SPECTROGRAM_LINEAR_TICK_COUNT = 6;
 const VISIBLE_ROW_OVERSAMPLE = 1.35;
 const WAVEFORM_FOLLOW_PREFETCH_MARGIN_RATIO = 0.2;
 const WAVEFORM_FOLLOW_RENDER_BUFFER_FACTOR = 2.5;
-const WAVEFORM_FOLLOW_RATIO = 0.5;
 const WAVEFORM_MAX_ZOOM_PIXELS_PER_SAMPLE = 8;
 const WAVEFORM_ZOOM_STEP_FACTOR = 1.75;
 // Discrete zoom: snap the view span to a fixed geometric grid. Between grid levels the
@@ -122,6 +130,10 @@ interface WaveformSurfaceState {
   color: string;
   context: OffscreenCanvasRenderingContext2D | null;
   heightCssPx: number;
+  // False until the main thread reports real surface metrics. Until then the
+  // placeholder size below describes no actual surface, so there are no device
+  // columns to align the viewport to.
+  metricsKnown: boolean;
   renderScale: number;
   widthCssPx: number;
 }
@@ -288,6 +300,7 @@ const waveformSurface: WaveformSurfaceState = {
   color: '#8ccadd',
   context: null,
   heightCssPx: 1,
+  metricsKnown: false,
   renderScale: 2,
   widthCssPx: 1,
 };
@@ -472,6 +485,7 @@ function handleInitSurfaces(message: EngineMainToWorkerMessage & { type: 'InitSu
   state.waveformSurface.widthCssPx = Math.max(1, Math.round(Number(body.waveformWidthCssPx) || state.waveformSurface.widthCssPx || 1));
   state.waveformSurface.heightCssPx = Math.max(1, Math.round(Number(body.waveformHeightCssPx) || state.waveformSurface.heightCssPx || 1));
   state.waveformSurface.renderScale = Math.max(1, Number(body.waveformRenderScale) || state.waveformSurface.renderScale || 1);
+  state.waveformSurface.metricsKnown = true;
   state.spectrogramSurface.pixelWidth = Math.max(1, Math.round(Number(body.spectrogramPixelWidth) || state.spectrogramSurface.pixelWidth || 1));
   state.spectrogramSurface.pixelHeight = Math.max(1, Math.round(Number(body.spectrogramPixelHeight) || state.spectrogramSurface.pixelHeight || 1));
 
@@ -480,8 +494,7 @@ function handleInitSurfaces(message: EngineMainToWorkerMessage & { type: 'InitSu
   } else {
     syncRenderedRangeToTarget();
   }
-  emitUiState();
-  scheduleRender();
+  emitPresentedUiState();
 }
 
 function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { type: 'LoadAnalysisSession' }): void {
@@ -520,8 +533,7 @@ function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { type: 
   state.viewport.presentedStartFrame = 0;
   state.viewport.presentedEndFrame = 0;
   syncRenderedRangeToTarget();
-  emitUiState();
-  scheduleRender();
+  emitPresentedUiState();
 }
 
 function handlePlaybackClockTick(clock: PlaybackClockState): void {
@@ -542,11 +554,8 @@ function handlePlaybackClockTick(clock: PlaybackClockState): void {
   );
   const followRangeChanged = applyFollowSolver();
   if (followRangeChanged || !areRangeFramesEqual(previousLoopRangeFrames, state.loopRangeFrames)) {
-    emitUiState();
-    return;
+    emitPresentedUiState();
   }
-
-  emitPlaybackProgress();
 }
 
 function handleViewportIntent(message: SetViewportIntentMessage): void {
@@ -674,8 +683,7 @@ function handleSpectrogramConfig(config: {
     minDecibels: nextDbWindow.minDecibels,
     overlapRatio: nextOverlapRatio,
   };
-  emitUiState();
-  scheduleRender();
+  emitPresentedUiState();
 }
 
 function handleSampleInfoRequest(body: {
@@ -721,6 +729,7 @@ function applyViewportIntent(intent: ViewportIntent): void {
       state.waveformSurface.widthCssPx = waveformWidthCssPx;
       state.waveformSurface.heightCssPx = waveformHeightCssPx;
       state.waveformSurface.renderScale = waveformRenderScale;
+      state.waveformSurface.metricsKnown = true;
       state.spectrogramSurface.pixelWidth = spectrogramPixelWidth;
       state.spectrogramSurface.pixelHeight = spectrogramPixelHeight;
       clampViewportToDuration();
@@ -730,8 +739,7 @@ function applyViewportIntent(intent: ViewportIntent): void {
         syncRenderedRangeToTarget();
       }
       if (changed) {
-        emitUiState();
-        scheduleRender();
+        emitPresentedUiState();
       } else {
         emitUiState();
       }
@@ -740,7 +748,7 @@ function applyViewportIntent(intent: ViewportIntent): void {
     case 'setFollow':
       state.viewport.followEnabled = intent.enabled === true;
       applyFollowSolver();
-      emitUiState();
+      emitPresentedUiState();
       return;
     case 'wheel':
       handleWheelIntent(intent);
@@ -752,8 +760,7 @@ function applyViewportIntent(intent: ViewportIntent): void {
       const fullRange = createFullRange();
       setTargetRange(fullRange.startFrame, fullRange.endFrame);
       syncRenderedRangeToTarget();
-      emitUiState();
-      scheduleRender();
+      emitPresentedUiState();
       return;
     }
     case 'selectionStart':
@@ -809,8 +816,7 @@ function applyViewportIntent(intent: ViewportIntent): void {
       state.viewport.followEnabled = false;
       setTargetRange(intent.startFrame, intent.endFrame);
       syncRenderedRangeToTarget();
-      emitUiState();
-      scheduleRender();
+      emitPresentedUiState();
       return;
     case 'setLoop':
       queueTransportCommand({
@@ -891,7 +897,7 @@ function handleWheelIntent(intent: Extract<ViewportIntent, { kind: 'wheel' }>): 
     const nextSpanFrames = currentSpanFrames * Math.pow(WAVEFORM_ZOOM_STEP_FACTOR, deltaY / 180);
 
     const anchorRatio = state.viewport.followEnabled
-      ? WAVEFORM_FOLLOW_RATIO
+      ? PLAYBACK_FOLLOW_RATIO
       : clamp01(intent.pointerRatioX);
     const anchorFrame = state.viewport.followEnabled
       ? getClampedPlaybackFrame()
@@ -903,8 +909,7 @@ function handleWheelIntent(intent: Extract<ViewportIntent, { kind: 'wheel' }>): 
     } else {
       syncRenderedRangeToTarget();
     }
-    emitInteractionUiState();
-    scheduleRender();
+    emitPresentedUiState();
     return;
   }
 
@@ -918,17 +923,7 @@ function handleWheelIntent(intent: Extract<ViewportIntent, { kind: 'wheel' }>): 
     currentRange.endFrame + deltaFrames,
   );
   syncRenderedRangeToTarget();
-  emitInteractionUiState();
-  scheduleRender();
-}
-
-// During a continuous wheel gesture the immediate UI-state emit is only needed when the
-// render loop is idle. If a render is already in flight it will emit the latest state the
-// moment it finishes (and scheduleRender keeps the view dirty), so skipping the emit here
-// drops one redundant ViewportUiState post per burst frame without losing any update or
-// hurting first-event responsiveness.
-function emitInteractionUiState(): void {
-  emitUiState();
+  emitPresentedUiState();
 }
 
 function quantizeViewSpanFrames(spanFrames: number): number {
@@ -954,7 +949,7 @@ function handleZoomStepIntent(direction: 'in' | 'out'): void {
     ? quantizeViewSpanFrames(currentSpanFrames / WAVEFORM_ZOOM_STEP_FACTOR)
     : quantizeViewSpanFrames(currentSpanFrames * WAVEFORM_ZOOM_STEP_FACTOR);
   const anchorRatio = state.viewport.followEnabled
-    ? WAVEFORM_FOLLOW_RATIO
+    ? PLAYBACK_FOLLOW_RATIO
     : (state.hoverWaveformRatioX ?? 0.5);
   const anchorFrame = state.viewport.followEnabled
     ? getClampedPlaybackFrame()
@@ -966,8 +961,7 @@ function handleZoomStepIntent(direction: 'in' | 'out'): void {
   } else {
     syncRenderedRangeToTarget();
   }
-  emitUiState();
-  scheduleRender();
+  emitPresentedUiState();
 }
 
 function updateSelectionDrag(pointerRatioX: number): void {
@@ -1170,8 +1164,11 @@ function applyFollowSolver(): boolean {
   const currentVisibleRange = getTargetRange();
   const spanFrames = Math.max(1, currentVisibleRange.endFrame - currentVisibleRange.startFrame);
   const anchorFrame = getClampedPlaybackFrame();
+  // Land the follow origin on the shared column grid so the waveform slides one
+  // whole column at a time. The sub-column remainder goes to the playhead, not to
+  // the image (see calculatePlaybackProgress).
   const desiredVisibleStartFrame = clamp(
-    Math.round(anchorFrame - spanFrames * WAVEFORM_FOLLOW_RATIO),
+    alignViewportStartFrame(anchorFrame - spanFrames * PLAYBACK_FOLLOW_RATIO, spanFrames),
     0,
     Math.max(0, state.session.durationFrames - spanFrames),
   );
@@ -1193,7 +1190,7 @@ function applyFollowSolver(): boolean {
 
   const plannedRenderStartFrame = plan
     ? clampFrame(plan.startSeconds * sampleRate)
-    : quantizeFollowStartFrame(desiredVisibleStartFrame, spanFrames);
+    : desiredVisibleStartFrame;
   const plannedRenderEndFrame = plan
     ? clampFrame(plan.endSeconds * sampleRate)
     : plannedRenderStartFrame + spanFrames;
@@ -1205,26 +1202,25 @@ function applyFollowSolver(): boolean {
       ? Math.max(1, Math.round(Number(plan.renderWidth) || state.waveformSurface.widthCssPx || 1))
       : state.waveformSurface.widthCssPx,
   );
-  const changed = visibleChanged || renderedChanged;
-  if (changed) {
-    scheduleRender();
-  }
-  return changed;
+  return visibleChanged || renderedChanged;
 }
 
-function quantizeFollowStartFrame(startFrame: number, spanFrames: number): number {
-  const deviceColumnCount = Math.max(
-    1,
-    Math.round(state.waveformSurface.widthCssPx * state.waveformSurface.renderScale),
-  );
-  const framesPerColumn = Math.max(1, Math.round(spanFrames / deviceColumnCount));
-  const quantizationStep = framesPerColumn;
-  const quantizedStart = Math.round(startFrame / quantizationStep) * quantizationStep;
+// Snap a view origin to the column grid every layer shares for this zoom. The grid
+// comes from the waveform surface metrics the main thread mirrors into this worker,
+// so the engine, the canvas and the path extractor all agree on where a column
+// starts. Before those metrics arrive there is no surface to have columns, so the
+// origin snaps to whole samples instead.
+function alignViewportStartFrame(startFrame: number, spanFrames: number): number {
+  if (!state.waveformSurface.metricsKnown) {
+    return Math.round(startFrame);
+  }
 
-  return clamp(
-    quantizedStart,
-    0,
-    Math.max(0, state.session.durationFrames - spanFrames),
+  return alignSampleToColumnGrid(
+    startFrame,
+    createWaveformColumnGrid(
+      getWaveformColumnCount(state.waveformSurface.widthCssPx, state.waveformSurface.renderScale),
+      spanFrames,
+    ),
   );
 }
 
@@ -1361,24 +1357,23 @@ function getSurfaceWidthPx(surface: SurfaceKind): number {
     : Math.max(1, state.spectrogramSurface.pixelWidth);
 }
 
-function scheduleRender(): void {
-  if (!state.session.initialized) {
-    return;
+function emitPresentedUiState(): void {
+  if (state.session.initialized) {
+    const presentedRange = snapPresentedRangeToFrames(getTargetRange());
+    state.viewport.presentedStartFrame = presentedRange.startFrame;
+    state.viewport.presentedEndFrame = presentedRange.endFrame;
   }
-
-  const presentedRange = snapPresentedRangeToFrames(getTargetRange());
-  state.viewport.presentedStartFrame = presentedRange.startFrame;
-  state.viewport.presentedEndFrame = presentedRange.endFrame;
   emitUiState();
 }
 
-// Snap the presented (displayed) view origin to a whole sample so the spectrogram,
-// waveform, ruler and playhead share one integer-frame grid. At high zoom this
+// Snap the presented (displayed) view origin onto the shared column grid so the
+// spectrogram, waveform, ruler and playhead share one origin. At high zoom this
 // frame-locks the view: while time-shifting the image holds steady between whole-sample
 // steps instead of bilinear-resampling at sub-pixel offsets (the left/right shimmer).
-// At low zoom the <0.5-sample shift is sub-pixel and invisible. The span is preserved
-// exactly so zooming stays smooth, and snapping at this single source keeps every layer
-// aligned (no cross-layer jitter).
+// At lower zoom it also column-locks the view, so a scrolling waveform re-uses its
+// neighbour's sample buckets instead of re-partitioning them every frame. The shift is
+// always under one device column, the span is preserved exactly so zooming stays
+// smooth, and snapping at this single source keeps every layer aligned.
 function snapPresentedRangeToFrames(range: RangeFrames): RangeFrames {
   const durationFrames = Math.max(0, state.session.durationFrames);
   if (durationFrames <= 0 || !(range.endFrame > range.startFrame)) {
@@ -1386,7 +1381,11 @@ function snapPresentedRangeToFrames(range: RangeFrames): RangeFrames {
   }
   const span = range.endFrame - range.startFrame;
   const maxStartFrame = Math.max(0, durationFrames - span);
-  const snappedStartFrame = clamp(Math.round(range.startFrame), 0, maxStartFrame);
+  const snappedStartFrame = clamp(
+    alignViewportStartFrame(range.startFrame, span),
+    0,
+    maxStartFrame,
+  );
   return { startFrame: snappedStartFrame, endFrame: snappedStartFrame + span };
 }
 
@@ -2593,29 +2592,25 @@ function emitUiState(): void {
     && !isInteractionActive()
     && range.startFrame > 0
     && range.endFrame < state.session.durationFrames;
-  const cursorPercent = spanFrames > 0
-    ? followCursorLocked
-      ? WAVEFORM_FOLLOW_RATIO * 100
-      : clamp(((playbackFrame - range.startFrame) / spanFrames) * 100, 0, 100)
-    : 0;
-  const cursorVisible = spanFrames > 0
-    && (
-      followCursorLocked
-      || (playbackFrame >= range.startFrame && playbackFrame <= range.endFrame)
-    );
+  const playbackProgress = calculatePlaybackProgress({
+    currentFrameFloat: playbackFrame,
+    durationFrames: state.session.durationFrames,
+    followCursorLocked,
+    presentedEndFrame: range.endFrame,
+    presentedStartFrame: range.startFrame,
+  });
   const selectionRange = state.selectionDraftRangeFrames ?? state.loopRangeFrames;
   const selectionUi = buildSelectionUi(selectionRange, spanFrames, range);
 
   state.uiRevision += 1;
   const uiState: ViewportUiState = {
-    cursorPercent,
-    cursorVisible,
+    cursorPercent: playbackProgress.cursorPercent,
+    cursorVisible: playbackProgress.cursorVisible,
+    followCursorLocked,
     frequencyTicks: buildFrequencyTicks(),
     overview: {
-      currentPercent: state.session.durationFrames > 0
-        ? clamp((playbackFrame / state.session.durationFrames) * 100, 0, 100)
-        : 0,
-      currentVisible: state.session.durationFrames > 0,
+      currentPercent: playbackProgress.overviewCurrentPercent,
+      currentVisible: playbackProgress.overviewCurrentVisible,
       viewportLeftPercent: state.session.durationFrames > 0
         ? clamp((range.startFrame / state.session.durationFrames) * 100, 0, 100)
         : 0,
@@ -2659,39 +2654,6 @@ function resolveViewportWaveformPlotMode(spanFrames: number): WaveformPlotMode {
   const renderColumns = Math.max(1, state.waveformSurface.widthCssPx * state.waveformSurface.renderScale);
   const samplesPerPixel = spanFrames / renderColumns;
   return samplesPerPixel < RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL ? 'raw' : 'envelope';
-}
-
-function emitPlaybackProgress(): void {
-  const range = getPresentedRangeForInteraction();
-  const playbackFrame = getClampedPlaybackFrame();
-  const spanFrames = Math.max(0, range.endFrame - range.startFrame);
-  const followCursorLocked = state.viewport.followEnabled
-    && !isInteractionActive()
-    && range.startFrame > 0
-    && range.endFrame < state.session.durationFrames;
-  const cursorPercent = spanFrames > 0
-    ? followCursorLocked
-      ? WAVEFORM_FOLLOW_RATIO * 100
-      : clamp(((playbackFrame - range.startFrame) / spanFrames) * 100, 0, 100)
-    : 0;
-  const cursorVisible = spanFrames > 0
-    && (
-      followCursorLocked
-      || (playbackFrame >= range.startFrame && playbackFrame <= range.endFrame)
-    );
-
-  postMessage({
-    type: 'PlaybackProgress',
-    body: {
-      cursorPercent,
-      cursorVisible,
-      overviewCurrentPercent: state.session.durationFrames > 0
-        ? clamp((playbackFrame / state.session.durationFrames) * 100, 0, 100)
-        : 0,
-      overviewCurrentVisible: state.session.durationFrames > 0,
-      playback: state.playbackClock,
-    },
-  });
 }
 
 function buildSelectionUi(

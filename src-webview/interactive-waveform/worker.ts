@@ -3,6 +3,7 @@ import {
   RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL,
   drawWaveformPathPlot,
 } from '../audio-engine-worker/waveformRender';
+import { alignSampleToColumnGrid } from '../audioscope/core/waveformColumnGrid';
 import { resizeInteractiveWaveformSurface } from './renderer';
 
 type WaveformPlotMode = 'envelope' | 'raw';
@@ -90,7 +91,6 @@ type WorkerMessage =
 
 const WAVEFORM_PATH_VALUES_PER_COLUMN = 8;
 const WAVEFORM_RUNTIME_VARIANT = 'waveform-worker-pending';
-const WAVEFORM_STABLE_GEOMETRY_BLEND_END_SAMPLES_PER_PIXEL = 8;
 let requestQueue: Promise<void> = Promise.resolve();
 let renderLoopActive = false;
 let pendingRenderRequest: RenderWaveformRequest | null = null;
@@ -202,33 +202,27 @@ function createEmptyAnalysisState(): AnalysisState {
   };
 }
 
+// Re-snap the render origin onto the column grid the engine already aligned the
+// presented range to. Idempotent on the normal path (same formula, same inputs);
+// it only bites for callers that render a range of their own choosing.
+//
+// Only a left clamp. The span passed here includes the off-screen slack, so a right
+// clamp against `sampleCount - span` sits a slack-width short of the real limit and
+// would drag the origin backwards for every view near the end of the file. The engine
+// owns range clamping; this owns grid alignment.
 function quantizeWaveformPathStartFrame(
   sampleStartFrame: number,
-  samplesPerPixel: number,
-  sampleCount: number,
-  visibleSampleCount: number,
+  columnCount: number,
+  spanSamples: number,
 ): number {
-  if (!(samplesPerPixel > 0) || !(sampleCount > 0)) {
+  if (!(columnCount > 0) || !(spanSamples > 0)) {
     return Math.max(0, sampleStartFrame);
   }
 
-  const quantizationStep = Math.max(1, samplesPerPixel);
-  const maxStartFrame = Math.max(0, sampleCount - visibleSampleCount);
-  const quantizedStartFrame = Math.round(sampleStartFrame / quantizationStep) * quantizationStep;
-  return clamp(quantizedStartFrame, 0, maxStartFrame);
-}
-
-function getStableWaveformGeometryBlend(samplesPerPixel: number): number {
-  const fadeRange = WAVEFORM_STABLE_GEOMETRY_BLEND_END_SAMPLES_PER_PIXEL - RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL;
-  if (!(fadeRange > 0)) {
-    return samplesPerPixel >= WAVEFORM_STABLE_GEOMETRY_BLEND_END_SAMPLES_PER_PIXEL ? 1 : 0;
-  }
-
-  return clamp(
-    (samplesPerPixel - RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL) / fadeRange,
-    0,
-    1,
-  );
+  return Math.max(0, alignSampleToColumnGrid(sampleStartFrame, {
+    columnCount,
+    spanSamples: Math.max(1, Math.round(spanSamples)),
+  }));
 }
 
 function enqueueRequest(task: () => void | Promise<void>): void {
@@ -530,10 +524,16 @@ async function pumpRenderLoop() {
 
 async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
   const viewStart = clamp(Number(request?.viewStart) || 0, 0, analysisState.duration);
-  const viewEnd = clamp(
-    Number(request?.viewEnd) || analysisState.duration,
+  // No duration ceiling. The request is the viewport plus a fixed strip of off-screen
+  // slack columns, so near the end of the file the window legitimately runs past the
+  // last sample. Clipping it here would shrink samples-per-column against a column
+  // count that does not shrink with it, and the visible half of the canvas would stop
+  // being 1:1 with the viewport (at full zoom-out that reads as the whole waveform
+  // stretched ~8% and its tail pushed off screen). The extractor clamps its per-column
+  // sample lookups instead, so columns past the last sample just go flat.
+  const viewEnd = Math.max(
     viewStart + (1 / analysisState.sampleRate),
-    analysisState.duration,
+    Number(request?.viewEnd) || analysisState.duration,
   );
   const width = Math.max(1, Math.round(Number(request?.width) || surfaceState.width || 1));
   const height = Math.max(1, Math.round(Number(request?.height) || surfaceState.height || 1));
@@ -545,43 +545,36 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
   const generation = Number.isFinite(request?.generation) ? Number(request.generation) : 0;
   const columnCount = Math.max(1, Math.round(width * renderScale));
   const renderSpan = Math.max(1 / analysisState.sampleRate, viewEnd - viewStart);
-  const visibleSampleCount = Math.max(1, renderSpan * analysisState.sampleRate);
-  const samplesPerPixel = visibleSampleCount / columnCount;
-  const pixelsPerSample = columnCount / visibleSampleCount;
+  // Columns that land inside the viewport; the rest is the off-screen slack strip
+  // the compositor slides in while a re-render is still in flight.
+  const visibleColumnCount = visibleSpan > 0
+    ? clamp(Math.round((columnCount * visibleSpan) / renderSpan), 1, columnCount)
+    : columnCount;
+  // Samples under the FULL render window (viewport + slack), not just the on-screen
+  // part — every column ratio below is taken against this span. Naming it "visible"
+  // is what once made a right-edge clamp look correct here.
+  const renderSampleCount = Math.max(1, renderSpan * analysisState.sampleRate);
+  const samplesPerPixel = renderSampleCount / columnCount;
+  const pixelsPerSample = columnCount / renderSampleCount;
   const runtime = await getRuntime();
   const module = runtime.module;
   const sampleData = getWaveformSampleData(module);
   const rawSamplePlotMode = samplesPerPixel < RAW_SAMPLE_SIMPLIFY_MIN_SAMPLES_PER_PIXEL;
   const sampleStartPosition = viewStart * analysisState.sampleRate;
-  const stableGeometryBlend = rawSamplePlotMode ? 0 : getStableWaveformGeometryBlend(samplesPerPixel);
-  const quantizedRenderSampleStartPosition = quantizeWaveformPathStartFrame(
-    sampleStartPosition,
-    samplesPerPixel,
-    analysisState.sampleCount,
-    visibleSampleCount,
-  );
-  const renderSampleStartPosition = rawSamplePlotMode
-    ? sampleStartPosition
-    : sampleStartPosition + ((quantizedRenderSampleStartPosition - sampleStartPosition) * stableGeometryBlend);
+  // Envelope mode is column-locked, with no fade between the two geometries: a
+  // partial blend leaves the origin on neither the sample grid nor the column grid,
+  // so the buckets re-partition on every frame — the worst case, right in the middle
+  // of the zoom range where one column covers about one pyramid block.
+  const stableColumnSlots = !rawSamplePlotMode;
+  const renderSampleStartPosition = stableColumnSlots
+    ? quantizeWaveformPathStartFrame(sampleStartPosition, columnCount, renderSampleCount)
+    : sampleStartPosition;
   const renderViewStart = renderSampleStartPosition / analysisState.sampleRate;
-  const renderViewEnd = Math.min(
-    analysisState.duration,
-    renderViewStart + renderSpan,
-  );
-  const renderVisibleSampleCount = Math.max(1, (renderViewEnd - renderViewStart) * analysisState.sampleRate);
-  // Span convention (matches ruler / playhead / spectrogram): sample p maps to
-  // x = p / span * width, so the window's right edge is the sample-span boundary.
-  // Previously this used span-1, which pinned the last sample to the right edge
-  // and drifted up to ~1 sample from the ruler at per-sample zoom.
-  const visibleSampleSpan = renderVisibleSampleCount;
+  // Same span as requested, never clipped at EOF — see viewEnd above. Holding the span
+  // fixed is what keeps samples-per-column constant while the view scrolls.
+  const renderViewEnd = renderViewStart + renderSpan;
 
   analysisState.plotMode = rawSamplePlotMode ? 'raw' : 'envelope';
-
-  surfaceState.width = width;
-  surfaceState.height = height;
-  surfaceState.renderScale = renderScale;
-  surfaceState.color = color;
-  resizeDisplaySurface();
 
   if (generation !== latestRequestedGeneration) {
     return;
@@ -616,6 +609,15 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     return;
   }
 
+  // Resize last: writing canvas.width wipes the surface, so doing it up front means
+  // any bail between there and the draw leaves a blank canvas on screen for a frame.
+  // Nothing above this point reads the surface size.
+  surfaceState.width = width;
+  surfaceState.height = height;
+  surfaceState.renderScale = renderScale;
+  surfaceState.color = color;
+  resizeDisplaySurface();
+
   drawWaveformPathPlot(
     renderSurface.context,
     renderSurface.canvas,
@@ -623,13 +625,17 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     color,
     pixelsPerSample,
     renderSampleStartPosition,
-    visibleSampleSpan,
+    // Span convention (matches ruler / playhead / spectrogram): sample p maps to
+    // x = p / span * width, so the window's right edge is the sample-span boundary.
+    // Previously this used span-1, which pinned the last sample to the right edge
+    // and drifted up to ~1 sample from the ruler at per-sample zoom.
+    renderSampleCount,
     height,
     renderScale,
     {
       amplitudeMax: Number(request?.amplitudeMax) || 1,
       sampleData,
-      stableColumnSlotBlend: stableGeometryBlend,
+      stableColumnSlots,
     },
   );
 
@@ -641,7 +647,7 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
     columnCount,
     generation,
     height,
-    peak: getPathPointsPeak(pathPoints),
+    peak: getPathPointsPeak(pathPoints, visibleColumnCount),
     viewEnd,
     viewStart,
     visibleSpan,
@@ -651,9 +657,15 @@ async function renderWaveform(request: RenderWaveformRequest): Promise<void> {
 
 // Loudest |sample| in the points just drawn — feeds the toolbar's amplitude Fit.
 // Points are (sampleOffset, value) pairs; a negative offset means "unused slot".
-function getPathPointsPeak(pathPoints: Float32Array): number {
+// Scoped to the on-screen columns: the render window also carries off-screen slack,
+// and Fit should scale to what the user can actually see.
+function getPathPointsPeak(pathPoints: Float32Array, visibleColumnCount: number): number {
+  const visibleValueCount = Math.min(
+    pathPoints.length,
+    Math.max(1, visibleColumnCount) * WAVEFORM_PATH_VALUES_PER_COLUMN,
+  );
   let peak = 0;
-  for (let index = 0; index + 1 < pathPoints.length; index += 2) {
+  for (let index = 0; index + 1 < visibleValueCount; index += 2) {
     if (!(pathPoints[index] >= 0)) {
       continue;
     }

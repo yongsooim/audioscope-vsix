@@ -389,22 +389,37 @@ fn fillWaveformPathColumnsFromLevel(
     requested_end_sample: f64,
     level: *const core.WaveLevel,
 ) void {
-    const requested_sample_span = maxF64(1.0, requested_end_sample - requested_start_sample);
-    const sample_step = requested_sample_span / @as(f64, @floatFromInt(column_count));
+    const columns_f64 = @as(f64, @floatFromInt(column_count));
+    const span_samples = @round(maxF64(1.0, requested_end_sample - requested_start_sample));
+    // Absolute column grid: column j covers [floor(j*span/N), floor((j+1)*span/N)).
+    // Deriving each boundary from the column's ABSOLUTE index — instead of walking an
+    // accumulator out of the view start — makes a column's sample window depend only
+    // on where it sits in the file. A view that scrolls by one column then re-uses its
+    // neighbour's window verbatim, so getLevelExtrema keeps aggregating the identical
+    // pyramid blocks and the envelope translates rigidly. Walking an accumulator gave
+    // every column a slightly different window on every frame, and one block more or
+    // less swings the drawn peak: the boil that shows up at moderate zoom, where a
+    // column covers roughly one block.
+    const column_origin = @round(@round(requested_start_sample) * columns_f64 / span_samples);
+    const grid_start_sample = columnGridBoundary(column_origin, span_samples, columns_f64);
     const max_start_sample = core.maxI32(0, core.g_session.sample_count - 1);
-    var column_start_position = requested_start_sample;
-    var next_boundary = requested_start_sample + sample_step;
+    var column_start_position = grid_start_sample;
     var column_index: i32 = 0;
 
     clearWaveformPathOutput(output, column_count);
 
     while (column_index < column_count) : (column_index += 1) {
-        const column_end_position = if (column_index + 1 >= column_count)
-            requested_end_sample
-        else
-            next_boundary;
-        const raw_start_sample = @as(i32, @intFromFloat(@floor(column_start_position)));
-        const raw_end_sample = @as(i32, @intFromFloat(@ceil(column_end_position)));
+        const column_end_position = columnGridBoundary(
+            column_origin + @as(f64, @floatFromInt(column_index + 1)),
+            span_samples,
+            columns_f64,
+        );
+        // Clamp in f64 before converting. This grid legitimately runs past the last
+        // sample (the caller's off-screen slack columns), and @intFromFloat on an
+        // out-of-range float is illegal behaviour, not a wrap — clampi32 below can
+        // only clean up a value that survived the conversion.
+        const raw_start_sample = @as(i32, @intFromFloat(@floor(clampSamplePosition(column_start_position))));
+        const raw_end_sample = @as(i32, @intFromFloat(@ceil(clampSamplePosition(column_end_position))));
         const start_sample = core.clampi32(raw_start_sample, 0, max_start_sample);
         const end_sample = core.clampi32(
             core.maxI32(start_sample + 1, raw_end_sample),
@@ -416,10 +431,12 @@ fn fillWaveformPathColumnsFromLevel(
         const extrema = getLevelExtrema(level, start_sample, end_sample);
         const base_index = @as(usize, @intCast(column_index * waveform_path_values_per_column));
 
+        // Offsets are relative to the grid origin, not the requested one: the grid can
+        // start up to one column earlier, and the renderer drops negative offsets.
         writeOrderedWaveformPathPoints(
             output,
             base_index,
-            requested_start_sample,
+            grid_start_sample,
             first_point,
             extrema.min,
             extrema.max,
@@ -427,8 +444,11 @@ fn fillWaveformPathColumnsFromLevel(
         );
 
         column_start_position = column_end_position;
-        next_boundary += sample_step;
     }
+}
+
+fn columnGridBoundary(column_index: f64, span_samples: f64, column_count: f64) f64 {
+    return @floor(column_index * span_samples / column_count);
 }
 
 fn fillWaveformPathColumnsFromSamples(
@@ -734,12 +754,17 @@ pub export fn wave_extract_waveform_path_points(view_start: f64, view_end: f64, 
     const sample_rate_f64 = @as(f64, core.g_session.sample_rate);
     const max_start = maxF64(0.0, duration_f64 - (1.0 / sample_rate_f64));
     const clamped_start = core.clampf64(view_start, 0.0, max_start);
-    const clamped_end = core.clampf64(view_end, clamped_start + (1.0 / sample_rate_f64), duration_f64);
+    // The window may run past the end of the file. The caller renders the viewport
+    // plus a fixed strip of off-screen slack columns, and clipping the window here
+    // would rescale that strip's samples-per-column — which changes the column grid
+    // and brings the shimmer back. Columns past the last sample clamp to it (a flat
+    // tail) and are never on screen. Column sample lookups clamp per column below.
+    const clamped_end = maxF64(view_end, clamped_start + (1.0 / sample_rate_f64));
     const requested_start_sample = clampSamplePosition(clamped_start * sample_rate_f64);
-    const requested_end_sample = clampSamplePosition(clamped_end * sample_rate_f64);
+    const requested_end_sample = maxF64(requested_start_sample + 1.0, clamped_end * sample_rate_f64);
     const requested_sample_span = maxF64(1.0, requested_end_sample - requested_start_sample);
     const samples_per_pixel = requested_sample_span / @as(f64, @floatFromInt(column_count));
-    const selected_level = pickWaveformPathLevel(samples_per_pixel, requested_end_sample);
+    const selected_level = pickWaveformPathLevel(samples_per_pixel, clampSamplePosition(requested_end_sample));
 
     writeWaveformSliceMeta(
         meta_output_ptr,

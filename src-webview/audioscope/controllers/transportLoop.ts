@@ -19,6 +19,7 @@ interface AudioscopeTransportLoopDeps {
   getDurationFrames: () => number;
   getEffectiveDurationSeconds: () => number;
   getSampleRate: () => number;
+  onPlaybackClock?: (clock: PlaybackClockState) => void;
   onPlayingChange?: (playing: boolean) => void;
   renderMediaMetadata: () => void;
   state: TransportLoopState;
@@ -31,18 +32,19 @@ export function createAudioscopeTransportLoopController({
   getDurationFrames,
   getEffectiveDurationSeconds,
   getSampleRate,
+  onPlaybackClock,
   onPlayingChange,
   renderMediaMetadata,
   state,
   syncPlaybackRateControl,
 }: AudioscopeTransportLoopDeps) {
-  // Cap the per-frame PlaybackClockTick worker round-trip. The threshold sits
-  // just under a 60 Hz frame interval (16.67 ms) so a true 60 Hz frame always
-  // posts, while 120/144 Hz displays are capped to ~60 Hz and no longer flood the
-  // engine worker (each tick is a postMessage + WASM follow-solver round-trip).
-  // Non-playing states bypass the gate so pause/seek/stop always reach the worker.
-  const CLOCK_TICK_MIN_INTERVAL_MS = 1000 / 65;
-  let lastClockTickTime = -Infinity;
+  // Both the playhead callback and the engine tick run at native rAF cadence: the
+  // follow viewport has to advance once per presented frame or the image steps on
+  // some frames and not others, which reads as judder next to a playhead that moves
+  // every frame. A fixed 60 Hz cap here used to guarantee that mismatch on 90/120/144
+  // Hz displays. Render cost is bounded where it belongs instead — the waveform worker
+  // is single-flight and drops superseded generations, and the off-screen slack
+  // columns let the compositor cover any frame it misses.
 
   // Cache the last-written transport UI values so the per-frame syncTransport
   // only touches the DOM for things that actually changed (most don't).
@@ -92,6 +94,7 @@ export function createAudioscopeTransportLoopController({
 
   function syncTransport(): void {
     const clock = getPlaybackClockState();
+    const playbackClock = toWorkerClockState(clock);
     const durationSeconds = getEffectiveDurationSeconds();
     const currentTime = clock && clock.sampleRate > 0
       ? frameToSeconds(Math.round(clock.currentFrameFloat))
@@ -130,16 +133,13 @@ export function createAudioscopeTransportLoopController({
       elements.timeReadout.textContent = timeReadout;
     }
     syncPlaybackRateControl();
+    onPlaybackClock?.(playbackClock);
 
     if (state.engineWorker) {
-      const now = performance.now();
-      if (!clock?.playing || now - lastClockTickTime >= CLOCK_TICK_MIN_INTERVAL_MS) {
-        lastClockTickTime = now;
-        state.engineWorker.postMessage({
-          type: 'PlaybackClockTick',
-          body: toWorkerClockState(clock),
-        });
-      }
+      state.engineWorker.postMessage({
+        type: 'PlaybackClockTick',
+        body: playbackClock,
+      });
     }
 
     if (state.audioTransport?.isPlaying()) {

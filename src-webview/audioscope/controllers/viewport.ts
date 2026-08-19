@@ -1,6 +1,7 @@
 import type { SetViewportIntentMessage, SurfaceKind } from '../../audioEngineProtocol';
 import type { AudioscopeElements } from '../core/elements';
 import { clamp } from '../core/format';
+import { getWaveformRenderWidthCssPx } from '../core/waveformColumnGrid';
 
 interface ViewportControllerState {
   analysisWorker: Worker | null;
@@ -207,7 +208,8 @@ export function createAudioscopeViewportController({
         body: {
           height: waveformSize.height,
           renderScale,
-          width: waveformSize.width,
+          // The canvas is the viewport plus its slack columns; see waveformColumnGrid.
+          width: getWaveformRenderWidthCssPx(waveformSize.width, renderScale),
         },
       });
       requestWaveformRender();
