@@ -118,13 +118,13 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               <div class="wave-toolbar-group wave-toolbar-group-settings">
                 <button
                   id="spectrogram-meta-toggle"
-                  class="wave-tool-button"
+                  class="wave-tool-button wave-tool-button-symbol"
                   type="button"
                   aria-controls="spectrogram-meta-controls"
                   aria-expanded="false"
                   aria-label="Show spectrogram settings"
                   title="Spectrogram settings"
-                >Settings</button>
+                >&#x2699;&#xFE0E;</button>
               </div>
               <div class="wave-toolbar-group wave-toolbar-group-overflow">
                 <button
@@ -542,15 +542,6 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           <button class="wave-menu-option" type="button" role="menuitem" data-export-format="mp3">Export MP3</button>
           <button class="wave-menu-option" type="button" role="menuitem" data-export-format="m4a">Export M4A</button>
           <button class="wave-menu-option" type="button" role="menuitem" data-export-format="flac">Export FLAC</button>
-          <button
-            id="wave-overflow-settings"
-            class="wave-menu-option"
-            type="button"
-            role="menuitem"
-            aria-label="Open spectrogram settings"
-            aria-controls="spectrogram-meta-controls"
-            aria-expanded="false"
-          >Settings</button>
         </div>
       </div>
       <div id="status" class="status-overlay" role="alertdialog" aria-modal="true" aria-label="audioscope error" hidden></div>

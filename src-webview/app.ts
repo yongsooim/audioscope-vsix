@@ -2948,7 +2948,6 @@ function setSpectrogramMetaOpen(open: boolean): void {
     open ? 'Hide spectrogram settings' : 'Show spectrogram settings',
   );
   elements.spectrogramMetaToggle.title = open ? 'Hide spectrogram settings' : 'Spectrogram settings';
-  elements.waveOverflowSettings.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
 function getEffectiveSpectrogramRenderConfig() {
@@ -5594,10 +5593,6 @@ function attachUiEvents(): void {
   });
   elements.waveOverflowMenu.addEventListener('keydown', (event) => {
     handleWaveMenuKeydown(event, elements.waveOverflowMenu, closeWaveOverflowMenu);
-  });
-  elements.waveOverflowSettings.addEventListener('click', () => {
-    closeWaveOverflowMenu();
-    setSpectrogramMetaOpen(true);
   });
   elements.volumeSlider.addEventListener('input', () => {
     applyPlaybackVolume(playbackVolumeFromSliderValue(elements.volumeSlider.value));

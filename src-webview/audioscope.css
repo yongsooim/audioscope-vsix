@@ -621,6 +621,14 @@ body {
   background: var(--chrome-surface-active);
 }
 
+/* Icon-only buttons lose the label that used to say what state they are in, so
+   the open popover has to show on the button itself. */
+.wave-tool-button[aria-expanded="true"] {
+  border-color: var(--chrome-border-accent);
+  background: var(--chrome-surface-active);
+  color: var(--chrome-text-strong);
+}
+
 .wave-tool-button:disabled,
 .wave-tool-button:disabled:hover {
   border-color: var(--chrome-border);
@@ -1118,9 +1126,10 @@ body {
   }
 }
 
+/* Only Export collapses here. The settings toggle is a 22px gear, so it costs
+   about as much room as the overflow button that would stand in for it. */
 @media (max-width: 720px) {
-  .wave-toolbar-group-export,
-  .wave-toolbar-group-settings {
+  .wave-toolbar-group-export {
     display: none;
   }
 

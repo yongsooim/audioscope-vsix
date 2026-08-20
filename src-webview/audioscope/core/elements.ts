@@ -40,7 +40,6 @@ export function createAudioscopeElements() {
     waveOverflowToggle: requireElement<HTMLButtonElement>('wave-overflow-toggle'),
     waveOverflowLayer: requireElement<HTMLElement>('wave-overflow-layer'),
     waveOverflowMenu: requireElement<HTMLElement>('wave-overflow-menu'),
-    waveOverflowSettings: requireElement<HTMLButtonElement>('wave-overflow-settings'),
     volumeLabel: requireElement<HTMLOutputElement>('volume-label'),
     volumeSlider: requireElement<HTMLInputElement>('volume-slider'),
     volumeToggle: requireElement<HTMLButtonElement>('volume-toggle'),
