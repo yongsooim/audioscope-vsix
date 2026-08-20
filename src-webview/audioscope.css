@@ -121,8 +121,12 @@ body {
   font-size: 10px;
   font-weight: 500;
   letter-spacing: 0.01em;
-  line-height: 1.2;
   font-variant-numeric: tabular-nums;
+  /* Fills the 22px min-height exactly (22 - 2 border - 4 padding), so the single
+     line centers itself. A block box can't align-items, and a unitless
+     line-height left 4px of slack at the bottom. Flex would center it but kills
+     text-overflow on the anonymous text run. */
+  line-height: 16px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -444,10 +448,14 @@ body {
   white-space: nowrap;
 }
 
+/* Square cell: 22px is the control height every segment stretches to, so a 22px
+   width makes the X/Y axis marker a 1:1 box instead of a narrow strip. */
 .wave-seg-label {
   display: inline-flex;
   align-items: center;
-  padding: 2px 5px;
+  justify-content: center;
+  width: 22px;
+  padding: 0;
   color: var(--chrome-text-dim);
   font-family: var(--mono);
   font-size: 9px;
