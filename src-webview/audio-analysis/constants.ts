@@ -49,7 +49,7 @@ export const QUALITY_PRESETS: Record<AnalysisQualityPreset, AnalysisQualityPrese
   },
 };
 
-export const FFT_SIZE_OPTIONS = [1024, 2048, 4096, 8192, 16384];
+export const FFT_SIZE_OPTIONS = [256, 512, 1024, 2048, 4096, 8192, 16384];
 export const OVERLAP_RATIO_OPTIONS = [0.5, 0.75, 0.875, 0.9375];
 export const SPECTROGRAM_COLUMN_CHUNK_SIZE = 32;
 export const SCALOGRAM_COLUMN_CHUNK_SIZE = 32;

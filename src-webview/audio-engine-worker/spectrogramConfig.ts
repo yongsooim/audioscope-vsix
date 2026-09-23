@@ -37,6 +37,43 @@ export {
 
 const HARD_MAX_FREQUENCY = 20_000;
 
+export type SpeechSpectrogramPreset = 'formants' | 'harmonics';
+
+/** Pick the available FFT closest to a 5 ms formant or 30 ms harmonic window. */
+export function getSpeechSpectrogramPreset(
+  preset: SpeechSpectrogramPreset,
+  sampleRate: number,
+): {
+  analysisType: 'spectrogram';
+  fftSize: number;
+  frequencyScale: 'linear';
+  overlapRatio: number;
+  spectrogramMinFrequency: number;
+  spectrogramMaxFrequency: number;
+  windowFunction: 'hann';
+  windowMilliseconds: number;
+} {
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
+    throw new RangeError('sampleRate must be positive');
+  }
+  const targetMilliseconds = preset === 'formants' ? 5 : 30;
+  const fftSize = FFT_SIZE_OPTIONS.reduce((closest, candidate) =>
+    Math.abs((candidate * 1000) / sampleRate - targetMilliseconds)
+      < Math.abs((closest * 1000) / sampleRate - targetMilliseconds)
+      ? candidate : closest);
+
+  return {
+    analysisType: 'spectrogram',
+    fftSize,
+    frequencyScale: 'linear',
+    overlapRatio: 0.75,
+    spectrogramMinFrequency: 20,
+    spectrogramMaxFrequency: Math.min(5000, sampleRate / 2),
+    windowFunction: 'hann',
+    windowMilliseconds: (fftSize * 1000) / sampleRate,
+  };
+}
+
 export function getDefaultSpectrogramDbWindow(analysisType: SpectrogramAnalysisType): {
   maxDecibels: number;
   minDecibels: number;

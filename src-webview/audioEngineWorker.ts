@@ -245,6 +245,7 @@ interface EngineState {
   dragState: DragState;
   hoverWaveformRatioX: number | null;
   lastSpectrogramPlan: SpectrogramPlan | null;
+  loopEnabled: boolean;
   loopRangeFrames: RangeFrames | null;
   pendingTransportCommand: TransportCommand | null;
   playbackClock: PlaybackClockState;
@@ -255,6 +256,7 @@ interface EngineState {
   renderSurfacesRevision: number;
   renderToken: number;
   selectionDraftRangeFrames: RangeFrames | null;
+  selectionRangeFrames: RangeFrames | null;
   session: EngineSessionState;
   spectrogramConfig: {
     analysisType: SpectrogramAnalysisType;
@@ -323,6 +325,7 @@ const state: EngineState = {
   dragState: null,
   hoverWaveformRatioX: null,
   lastSpectrogramPlan: null,
+  loopEnabled: true,
   loopRangeFrames: null,
   pendingTransportCommand: null,
   playbackClock: createEmptyPlaybackClock(),
@@ -333,6 +336,7 @@ const state: EngineState = {
   renderSurfacesRevision: 0,
   renderToken: 0,
   selectionDraftRangeFrames: null,
+  selectionRangeFrames: null,
   session: createEmptySessionState(),
   spectrogramConfig: {
     analysisType: 'spectrogram',
@@ -446,6 +450,8 @@ function handleDisposeSession(): void {
   state.session = createEmptySessionState();
   state.playbackClock = createEmptyPlaybackClock();
   state.loopRangeFrames = null;
+  state.selectionRangeFrames = null;
+  state.loopEnabled = true;
   state.selectionDraftRangeFrames = null;
   state.dragState = null;
   state.hoverWaveformRatioX = null;
@@ -525,6 +531,8 @@ function handleLoadAnalysisSession(message: EngineMainToWorkerMessage & { type: 
     sampleRate,
   };
   state.loopRangeFrames = null;
+  state.selectionRangeFrames = null;
+  state.loopEnabled = true;
   state.selectionDraftRangeFrames = null;
   state.dragState = null;
   state.hoverWaveformRatioX = null;
@@ -553,6 +561,8 @@ function handlePlaybackClockTick(clock: PlaybackClockState): void {
     state.playbackClock.loopEndFrame,
     state.playbackClock.durationFrames,
   );
+  // The transport reports only the active playback loop. Preserve the analysis
+  // selection when looping is turned off.
   const followRangeChanged = applyFollowSolver();
   if (followRangeChanged || !areRangeFramesEqual(previousLoopRangeFrames, state.loopRangeFrames)) {
     emitPresentedUiState();
@@ -785,15 +795,15 @@ function applyViewportIntent(intent: ViewportIntent): void {
       emitUiState();
       return;
     case 'loopHandleStart':
-      if (state.loopRangeFrames) {
+      if (state.selectionRangeFrames) {
         state.viewport.followEnabled = false;
         state.dragState = {
-          baseRange: state.loopRangeFrames,
+          baseRange: state.selectionRangeFrames,
           edge: intent.edge,
           surface: intent.surface,
           type: 'loop',
         };
-        state.selectionDraftRangeFrames = { ...state.loopRangeFrames };
+        state.selectionDraftRangeFrames = { ...state.selectionRangeFrames };
       }
       emitUiState();
       return;
@@ -806,12 +816,39 @@ function applyViewportIntent(intent: ViewportIntent): void {
       emitUiState();
       return;
     case 'clearLoop':
+      state.selectionRangeFrames = null;
       state.loopRangeFrames = null;
       queueTransportCommand({
         serial: nextTransportCommandSerial(),
         type: 'clearLoop',
       });
       emitUiState();
+      return;
+    case 'setLoopEnabled':
+      state.loopEnabled = intent.enabled === true;
+      syncSelectionLoop();
+      emitUiState();
+      return;
+    case 'setSelectionFrameRange': {
+      const selection = normalizeOptionalRange(
+        intent.startFrame,
+        intent.endFrame,
+        state.session.durationFrames,
+      );
+      if (selection) {
+        state.selectionRangeFrames = selection;
+        syncSelectionLoop();
+      }
+      emitUiState();
+      return;
+    }
+    case 'zoomToSelection':
+      if (state.selectionRangeFrames) {
+        state.viewport.followEnabled = false;
+        setTargetRange(state.selectionRangeFrames.startFrame, state.selectionRangeFrames.endFrame);
+        syncRenderedRangeToTarget();
+        emitPresentedUiState();
+      }
       return;
     case 'setViewFrameRange':
       state.viewport.followEnabled = false;
@@ -985,6 +1022,27 @@ function updateSelectionDrag(pointerRatioX: number): void {
   state.selectionDraftRangeFrames = normalizeDraftRange(dragState.anchorFrame, endFrame);
 }
 
+function syncSelectionLoop(): void {
+  const range = state.loopEnabled && state.selectionRangeFrames
+    && state.selectionRangeFrames.endFrame - state.selectionRangeFrames.startFrame >= getMinimumLoopFrames()
+    ? state.selectionRangeFrames
+    : null;
+  state.loopRangeFrames = range ? { ...range } : null;
+  if (range) {
+    queueTransportCommand({
+      endFrame: range.endFrame,
+      serial: nextTransportCommandSerial(),
+      startFrame: range.startFrame,
+      type: 'setLoop',
+    });
+  } else {
+    queueTransportCommand({
+      serial: nextTransportCommandSerial(),
+      type: 'clearLoop',
+    });
+  }
+}
+
 function finishSelectionDrag(pointerRatioX: number, cancelled: boolean): void {
   const dragState = state.dragState;
   if (!dragState || dragState.type !== 'selection') {
@@ -993,7 +1051,7 @@ function finishSelectionDrag(pointerRatioX: number, cancelled: boolean): void {
 
   const anchorFrame = dragState.anchorFrame;
   const endFrame = getFrameAtPresentedRatio(pointerRatioX);
-  const committedRange = normalizeCommittedLoopRange(anchorFrame, endFrame);
+  const committedRange = normalizeDraftRange(anchorFrame, endFrame);
 
   state.dragState = null;
 
@@ -1002,21 +1060,17 @@ function finishSelectionDrag(pointerRatioX: number, cancelled: boolean): void {
     return;
   }
 
-  if (dragState.moved && committedRange) {
-    state.loopRangeFrames = committedRange;
+  if (dragState.moved && committedRange.endFrame > committedRange.startFrame) {
+    state.selectionRangeFrames = committedRange;
     state.selectionDraftRangeFrames = null;
-    queueTransportCommand({
-      endFrame: committedRange.endFrame,
-      serial: nextTransportCommandSerial(),
-      startFrame: committedRange.startFrame,
-      type: 'setLoop',
-    });
+    syncSelectionLoop();
     return;
   }
 
   state.selectionDraftRangeFrames = null;
 
-  if (state.loopRangeFrames && !isFrameWithinRange(anchorFrame, state.loopRangeFrames)) {
+  if (state.selectionRangeFrames && !isFrameWithinRange(anchorFrame, state.selectionRangeFrames)) {
+    state.selectionRangeFrames = null;
     state.loopRangeFrames = null;
     queueTransportCommand({
       frame: anchorFrame,
@@ -1056,13 +1110,8 @@ function finishLoopHandleDrag(edge: 'end' | 'start', pointerRatioX: number, canc
     return;
   }
 
-  state.loopRangeFrames = nextRange;
-  queueTransportCommand({
-    endFrame: nextRange.endFrame,
-    serial: nextTransportCommandSerial(),
-    startFrame: nextRange.startFrame,
-    type: 'setLoop',
-  });
+  state.selectionRangeFrames = nextRange;
+  syncSelectionLoop();
 }
 
 function applyZoomAroundFrame(anchorFrame: number, requestedSpanFrames: number, anchorRatio: number): void {
@@ -1089,18 +1138,17 @@ function getClampedPlaybackFrame(): number {
 
 function getAdjustedLoopRange(baseRange: RangeFrames, edge: 'end' | 'start', pointerRatioX: number): RangeFrames {
   const nextFrame = getFrameAtPresentedRatio(pointerRatioX);
-  const minLoopFrames = getMinimumLoopFrames();
 
   if (edge === 'start') {
     return {
-      startFrame: clamp(nextFrame, 0, Math.max(0, baseRange.endFrame - minLoopFrames)),
+      startFrame: clamp(nextFrame, 0, Math.max(0, baseRange.endFrame - 1)),
       endFrame: baseRange.endFrame,
     };
   }
 
   return {
     startFrame: baseRange.startFrame,
-    endFrame: clamp(nextFrame, baseRange.startFrame + minLoopFrames, state.session.durationFrames),
+    endFrame: clamp(nextFrame, baseRange.startFrame + 1, state.session.durationFrames),
   };
 }
 
@@ -1109,13 +1157,6 @@ function normalizeDraftRange(startFrame: number, endFrame: number): RangeFrames 
     startFrame: clamp(Math.min(startFrame, endFrame), 0, state.session.durationFrames),
     endFrame: clamp(Math.max(startFrame, endFrame), 0, state.session.durationFrames),
   };
-}
-
-function normalizeCommittedLoopRange(startFrame: number, endFrame: number): RangeFrames | null {
-  const nextRange = normalizeDraftRange(startFrame, endFrame);
-  return nextRange.endFrame - nextRange.startFrame >= getMinimumLoopFrames()
-    ? nextRange
-    : null;
 }
 
 function isFrameWithinRange(frame: number, range: RangeFrames): boolean {
@@ -1147,7 +1188,10 @@ function normalizeOptionalRange(
   }
 
   const safeStart = clamp(Math.round(Number(startFrame)), 0, Math.max(0, durationFrames));
-  const safeEnd = clamp(Math.round(Number(endFrame)), safeStart + 1, Math.max(safeStart + 1, durationFrames));
+  if (safeStart >= durationFrames) {
+    return null;
+  }
+  const safeEnd = clamp(Math.round(Number(endFrame)), safeStart + 1, durationFrames);
   return safeEnd > safeStart ? { startFrame: safeStart, endFrame: safeEnd } : null;
 }
 
@@ -2557,7 +2601,7 @@ function emitUiState(): void {
     presentedEndFrame: range.endFrame,
     presentedStartFrame: range.startFrame,
   });
-  const selectionRange = state.selectionDraftRangeFrames ?? state.loopRangeFrames;
+  const selectionRange = state.selectionDraftRangeFrames ?? state.selectionRangeFrames;
   const selectionUi = buildSelectionUi(selectionRange, spanFrames, range);
 
   state.uiRevision += 1;
@@ -2619,7 +2663,9 @@ function buildSelectionUi(
   spanFrames: number,
   presentedRange: RangeFrames,
 ): ViewportUiState['selection'] {
-  const committed = state.selectionDraftRangeFrames === null && state.loopRangeFrames !== null;
+  const committed = state.selectionDraftRangeFrames === null && state.selectionRangeFrames !== null;
+  const loopEnabled = state.loopEnabled && state.selectionRangeFrames !== null
+    && state.selectionRangeFrames.endFrame - state.selectionRangeFrames.startFrame >= getMinimumLoopFrames();
 
   if (!selectionRange || spanFrames <= 0) {
     return {
@@ -2627,6 +2673,7 @@ function buildSelectionUi(
       committed,
       endFrame: null,
       leftPercent: 0,
+      loopEnabled,
       startFrame: null,
       widthPercent: 0,
     };
@@ -2640,6 +2687,7 @@ function buildSelectionUi(
       committed,
       endFrame: selectionRange.endFrame,
       leftPercent: 0,
+      loopEnabled,
       startFrame: selectionRange.startFrame,
       widthPercent: 0,
     };
@@ -2650,6 +2698,7 @@ function buildSelectionUi(
     committed,
     endFrame: selectionRange.endFrame,
     leftPercent: ((visibleStart - presentedRange.startFrame) / spanFrames) * 100,
+    loopEnabled,
     startFrame: selectionRange.startFrame,
     widthPercent: ((visibleEnd - visibleStart) / spanFrames) * 100,
   };

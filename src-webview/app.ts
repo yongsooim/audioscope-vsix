@@ -4,11 +4,18 @@ import type { AudioTransport, PlaybackSession } from './transport/audioTransport
 import { createAudioscopeElements } from './audioscope/core/elements';
 import { clamp, formatAxisLabel } from './audioscope/core/format';
 import { createVisibleFrequencyAxisTicks } from './audioscope/core/frequencyAxisTicks';
+import type { SelectionAnalysisResult } from './audioscope/core/selectionAnalysis';
 import {
   calculatePlaybackProgress,
   type PlaybackProgressSnapshot,
 } from './audioscope/core/playbackProgress';
 import { getWaveformMarkerYRatio } from './audio-engine-worker/waveformRender';
+import { getSpeechSpectrogramPreset } from './audio-engine-worker/spectrogramConfig';
+import {
+  getFrequencyAtLinearPosition,
+  getFrequencyAtLogPosition,
+  getFrequencyAtMixedPosition,
+} from './audioscope/math/spectrogramMath';
 import {
   createWaveformColumnGrid,
   getWaveformColumnCount,
@@ -79,6 +86,7 @@ import {
 import type {
   ExportAudioFormat,
   HostToWebviewMessage,
+  MediaMetadataChapterPayload,
   WebviewToHostMessage,
 } from '../src/hostWebviewProtocol';
 
@@ -327,7 +335,7 @@ const DEFAULT_WAVEFORM_AMPLITUDE_MAX = 1;
 const WAVEFORM_AMPLITUDE_MAX_MIN = 0.001;
 const LOOP_HANDLE_WIDTH_PX = 8;
 const EMBEDDED_MEDIA_TOOLS_GUIDANCE = 'audioscope media tools are unavailable. Rebuild or reinstall audioscope to restore metadata and decoding.';
-const SPECTROGRAM_FFT_OPTIONS = [1024, 2048, 4096, 8192, 16384];
+const SPECTROGRAM_FFT_OPTIONS = [256, 512, 1024, 2048, 4096, 8192, 16384];
 const SPECTROGRAM_MEL_BAND_OPTIONS = [128, 256, 512];
 const SPECTROGRAM_MFCC_COEFFICIENT_OPTIONS = [13, 20, 32, 40];
 const SPECTROGRAM_SCALOGRAM_HOP_OPTIONS = [0, 256, 512, 1024, 2048, 4096];
@@ -485,6 +493,14 @@ type SpectrogramAnalysisState = {
 
 type AnalysisWorkerToMainMessage =
   | {
+      body: { requestId: number; result: SelectionAnalysisResult; sessionVersion: number };
+      type: 'selectionAnalysisResult';
+    }
+  | {
+      body: { message: string; requestId: number; sessionVersion: number };
+      type: 'selectionAnalysisError';
+    }
+  | {
       body: {
         fallbackReason?: string | null;
         maxFrequency?: number;
@@ -640,6 +656,15 @@ const state = {
   mediaMetadataLoadToken: 0,
   mediaMetadata: createMediaMetadataState('idle'),
   mediaMetadataDetailOpen: false,
+  currentChapterIndex: -2,
+  selectionToolsOpen: false,
+  selectionInputsDirty: false,
+  viewInputsDirty: false,
+  selectionAnalysisOpen: false,
+  selectionAnalysisRequestId: 0,
+  selectionAnalysisResult: null as SelectionAnalysisResult | null,
+  selectionAnalysisError: null as string | null,
+  snapZeroEnabled: false,
   observedOverviewWidth: 0,
   observedSpectrogramPixelHeight: 0,
   observedSpectrogramPixelWidth: 0,
@@ -1196,6 +1221,12 @@ function getSampleRate(): number {
 function frameToSeconds(frame: number): number {
   const sampleRate = getSampleRate();
   return sampleRate > 0 ? clamp(frame, 0, getDurationFrames()) / sampleRate : 0;
+}
+
+function getCurrentAudioFrame(): number {
+  return Math.round(state.latestPlaybackClock?.currentFrameFloat
+    ?? state.audioTransport?.getPlaybackClockState()?.currentFrameFloat
+    ?? 0);
 }
 
 async function createModuleWorker(
@@ -1994,8 +2025,19 @@ function applyTransportCommand(command: TransportCommand | null): void {
 function applyViewportUiState(uiState: ViewportUiState): void {
   applyLatestPlaybackClock(uiState);
   const previousUiState = state.engineUiState;
+  const selectionRangeChanged = previousUiState?.selection.startFrame !== uiState.selection.startFrame
+    || previousUiState?.selection.endFrame !== uiState.selection.endFrame;
   const previousPresentedRange = state.waveformViewport.presentedRange;
   state.engineUiState = uiState;
+  if (selectionRangeChanged) {
+    state.selectionAnalysisRequestId += 1;
+    state.selectionAnalysisResult = null;
+    state.selectionAnalysisError = null;
+    renderSelectionAnalysis();
+    if (uiState.selection.committed) {
+      snapCurrentSelectionToZero();
+    }
+  }
   state.followPlayback = uiState.viewport.followEnabled;
   elements.waveFollow.checked = uiState.viewport.followEnabled;
   const sampleRate = uiState.playback.sampleRate || getSampleRate();
@@ -2064,7 +2106,8 @@ function areSelectionAnchorsEqual(
 ): boolean {
   return previousSelection.committed === nextSelection.committed
     && previousSelection.startFrame === nextSelection.startFrame
-    && previousSelection.endFrame === nextSelection.endFrame;
+    && previousSelection.endFrame === nextSelection.endFrame
+    && previousSelection.loopEnabled === nextSelection.loopEnabled;
 }
 
 function renderFollowPlaybackUi(
@@ -2309,6 +2352,87 @@ function renderPlaybackPosition(uiState: ViewportUiState | null): void {
 function renderPlaybackIndicators(uiState: ViewportUiState | null): void {
   renderTransportOverview(uiState);
   renderPlaybackPosition(uiState);
+  renderCurrentChapter();
+}
+
+function navigableChapters(): MediaMetadataChapterPayload[] {
+  const chapters = state.mediaMetadata.detail?.chapters;
+  return Array.isArray(chapters)
+    ? chapters.filter((chapter): chapter is MediaMetadataChapterPayload =>
+      typeof chapter?.startSeconds === 'number' && Number.isFinite(chapter.startSeconds))
+      .sort((left, right) => (left.startSeconds ?? 0) - (right.startSeconds ?? 0))
+    : [];
+}
+
+function renderChapterNavigation(): void {
+  const chapters = navigableChapters();
+  const duration = getEffectiveDurationSeconds();
+  const visible = chapters.length > 0 && duration > 0;
+  elements.chapterNavigation.hidden = !visible;
+  const fragment = document.createDocumentFragment();
+  if (visible) {
+    chapters.forEach((chapter, index) => {
+      const start = chapter.startSeconds ?? 0;
+      if (start > duration) {
+        return;
+      }
+      const marker = document.createElement('button');
+      marker.type = 'button';
+      marker.className = 'timeline-chapter-marker';
+      marker.style.left = `${clamp((start / duration) * 100, 0, 100)}%`;
+      marker.title = `${chapter.title || `Chapter ${index + 1}`} · ${formatAxisLabel(start)}`;
+      marker.setAttribute('aria-label', `Seek to ${marker.title}`);
+      marker.dataset.chapterIndex = String(index);
+      fragment.append(marker);
+    });
+  }
+  elements.timelineChapterMarkers.replaceChildren(fragment);
+  state.currentChapterIndex = -2;
+  renderCurrentChapter();
+}
+
+function renderCurrentChapter(): void {
+  const chapters = navigableChapters();
+  const position = frameToSeconds(getCurrentAudioFrame());
+  let currentIndex = -1;
+  for (let index = 0; index < chapters.length; index += 1) {
+    if ((chapters[index].startSeconds ?? Infinity) <= position + 0.001) {
+      currentIndex = index;
+    } else {
+      break;
+    }
+  }
+  if (currentIndex !== state.currentChapterIndex) {
+    state.currentChapterIndex = currentIndex;
+    const title = currentIndex >= 0
+      ? (chapters[currentIndex].title || `Chapter ${currentIndex + 1}`)
+      : 'Chapters';
+    elements.chapterCurrentLabel.textContent = title;
+    elements.chapterCurrentLabel.title = title;
+    for (const marker of elements.timelineChapterMarkers.querySelectorAll<HTMLButtonElement>('[data-chapter-index]')) {
+      if (Number(marker.dataset.chapterIndex) === currentIndex) {
+        marker.setAttribute('aria-current', 'true');
+      } else {
+        marker.removeAttribute('aria-current');
+      }
+    }
+  }
+  elements.chapterPrev.disabled = chapters.every((chapter) => (chapter.startSeconds ?? Infinity) >= position - 0.5);
+  elements.chapterNext.disabled = chapters.findIndex((chapter) => (chapter.startSeconds ?? -1) > position + 0.01) < 0;
+}
+
+function seekChapter(direction: 'next' | 'previous'): void {
+  const chapters = navigableChapters();
+  if (chapters.length === 0) {
+    return;
+  }
+  const position = frameToSeconds(getCurrentAudioFrame());
+  const target = direction === 'next'
+    ? chapters.find((chapter) => (chapter.startSeconds ?? -1) > position + 0.01)
+    : [...chapters].reverse().find((chapter) => (chapter.startSeconds ?? Infinity) < position - 0.5);
+  if (target?.startSeconds !== null && target?.startSeconds !== undefined) {
+    setPlaybackPositionFromFrame(Math.round(target.startSeconds * getSampleRate()));
+  }
 }
 
 function formatVisibleDuration(seconds: number): string {
@@ -2361,12 +2485,12 @@ function renderWaveformUi(): void {
   const selection = uiState?.selection;
   const sampleRate = uiState?.playback.sampleRate || getSampleRate();
   const selectionLabel = selection && sampleRate > 0 && selection.startFrame !== null && selection.endFrame !== null
-    ? `Loop ${formatAxisLabel(selection.startFrame / sampleRate)} - ${formatAxisLabel(selection.endFrame / sampleRate)}`
-    : 'Drag to set loop';
+    ? `Selection ${formatAxisLabel(selection.startFrame / sampleRate)} - ${formatAxisLabel(selection.endFrame / sampleRate)}`
+    : 'Drag to select audio';
 
-  elements.waveLoopLabel.textContent = '↻ Loop';
+  elements.waveLoopLabel.textContent = selection?.loopEnabled ? '↻ Loop' : 'Selection';
   elements.waveLoopLabel.setAttribute('aria-label', selectionLabel);
-  const loopActive = selection?.committed === true;
+  const loopActive = selection?.committed === true && selection.loopEnabled;
   elements.waveLoopLabel.dataset.active = loopActive ? 'true' : 'false';
   elements.waveLoopLabel.parentElement?.setAttribute('data-active', loopActive ? 'true' : 'false');
   elements.waveClearLoop.disabled = !(selection?.committed);
@@ -2382,6 +2506,296 @@ function renderWaveformUi(): void {
   renderWaveformAxis();
   renderSelectionAndLoop(uiState);
   renderPlaybackIndicators(uiState);
+  renderSelectionTools();
+}
+
+function currentSelectionFrames(): { startFrame: number; endFrame: number } | null {
+  const selection = state.engineUiState?.selection;
+  return selection?.committed && selection.startFrame !== null && selection.endFrame !== null
+    ? { startFrame: selection.startFrame, endFrame: selection.endFrame }
+    : null;
+}
+
+function formatSelectionSeconds(frame: number): string {
+  const sampleRate = getSampleRate();
+  return sampleRate > 0 ? (frame / sampleRate).toFixed(6).replace(/0+$/, '').replace(/\.$/, '') : '0';
+}
+
+function renderSelectionTools(): void {
+  const selection = currentSelectionFrames();
+  elements.waveSelectionToggle.disabled = getDurationFrames() <= 0;
+  const start = selection?.startFrame ?? clamp(getCurrentAudioFrame(), 0, getDurationFrames());
+  const end = selection?.endFrame ?? Math.min(getDurationFrames(), start + Math.max(1, getSampleRate()));
+  if (!state.selectionInputsDirty) {
+    elements.selectionStartInput.value = formatSelectionSeconds(start);
+    elements.selectionEndInput.value = formatSelectionSeconds(end);
+  }
+  if (!state.viewInputsDirty) {
+    elements.viewStartInput.value = formatSelectionSeconds(state.engineUiState?.presentedStartFrame ?? 0);
+    elements.viewEndInput.value = formatSelectionSeconds(state.engineUiState?.presentedEndFrame ?? getDurationFrames());
+  }
+  elements.selectionDuration.textContent = selection && getSampleRate() > 0
+    ? `${formatSelectionSeconds(selection.endFrame - selection.startFrame)} s`
+    : '--';
+  elements.selectionLoopToggle.checked = state.engineUiState?.selection.loopEnabled ?? false;
+  elements.selectionLoopToggle.disabled = !selection || selection.endFrame - selection.startFrame < Math.round(getSampleRate() * 0.05);
+  elements.selectionSnapZero.checked = state.snapZeroEnabled;
+  elements.selectionZoom.disabled = !selection;
+  elements.selectionAnalyze.disabled = !selection || !state.analysisWorker || !state.analysis?.initialized;
+  elements.viewApply.disabled = getDurationFrames() <= 0;
+  elements.waveSelectionToggle.setAttribute('aria-expanded', state.selectionToolsOpen ? 'true' : 'false');
+  elements.waveSelectionLayer.hidden = !state.selectionToolsOpen;
+}
+
+function applySelectionTimes(): void {
+  const sampleRate = getSampleRate();
+  const durationFrames = getDurationFrames();
+  if (sampleRate <= 0 || durationFrames <= 0) {
+    return;
+  }
+  const startSeconds = Number(elements.selectionStartInput.value);
+  const endSeconds = Number(elements.selectionEndInput.value);
+  const startFrame = Math.round(startSeconds * sampleRate);
+  const endFrame = Math.round(endSeconds * sampleRate);
+  const valid = elements.selectionStartInput.value.trim() !== ''
+    && elements.selectionEndInput.value.trim() !== ''
+    && Number.isFinite(startSeconds) && Number.isFinite(endSeconds)
+    && startFrame >= 0 && endFrame <= durationFrames && endFrame > startFrame;
+  elements.selectionEndInput.setCustomValidity(valid ? '' : 'Enter start and end times within the file, with end after start.');
+  if (!valid) {
+    elements.selectionEndInput.reportValidity();
+    return;
+  }
+  sendViewportIntent({ kind: 'setSelectionFrameRange', startFrame, endFrame });
+  state.selectionInputsDirty = false;
+  scheduleKeyboardSurfaceFocus();
+}
+
+function applyViewTimes(): void {
+  const sampleRate = getSampleRate();
+  const durationFrames = getDurationFrames();
+  const startSeconds = Number(elements.viewStartInput.value);
+  const endSeconds = Number(elements.viewEndInput.value);
+  const startFrame = Math.round(startSeconds * sampleRate);
+  const endFrame = Math.round(endSeconds * sampleRate);
+  const valid = sampleRate > 0 && durationFrames > 0
+    && elements.viewStartInput.value.trim() !== '' && elements.viewEndInput.value.trim() !== ''
+    && Number.isFinite(startSeconds) && Number.isFinite(endSeconds)
+    && startFrame >= 0 && endFrame <= durationFrames && endFrame > startFrame;
+  elements.viewEndInput.setCustomValidity(valid ? '' : 'Enter visible start and end times within the file, with end after start.');
+  if (!valid) {
+    elements.viewEndInput.reportValidity();
+    return;
+  }
+  sendViewportIntent({ kind: 'setViewFrameRange', startFrame, endFrame });
+  state.viewInputsDirty = false;
+  scheduleKeyboardSurfaceFocus();
+}
+
+function nearestZeroCrossing(frame: number): number {
+  const session = state.playbackSession;
+  const buffer = state.splitChannels
+    ? session?.channelBuffers[0]
+    : (session?.monoBuffer ?? session?.channelBuffers[0]);
+  if (!(buffer instanceof ArrayBuffer)) {
+    return frame;
+  }
+  const pcm = new Float32Array(buffer);
+  if (pcm.length < 2) {
+    return frame;
+  }
+  const center = clamp(frame, 1, pcm.length - 1);
+  const radius = Math.max(1, Math.round(getSampleRate() * 0.005));
+  let bestFrame = frame;
+  let bestDistance = Infinity;
+  let bestAmplitude = Infinity;
+  for (let candidate = Math.max(1, center - radius); candidate <= Math.min(pcm.length - 1, center + radius); candidate += 1) {
+    const before = pcm[candidate - 1];
+    const after = pcm[candidate];
+    if ((before > 0 && after > 0) || (before < 0 && after < 0)) {
+      continue;
+    }
+    const distance = Math.abs(candidate - center);
+    const amplitude = Math.abs(before) + Math.abs(after);
+    if (distance < bestDistance || (distance === bestDistance && amplitude < bestAmplitude)) {
+      bestFrame = candidate;
+      bestDistance = distance;
+      bestAmplitude = amplitude;
+    }
+  }
+  return bestFrame;
+}
+
+function snapCurrentSelectionToZero(): void {
+  if (!state.snapZeroEnabled) {
+    return;
+  }
+  const range = currentSelectionFrames();
+  if (!range) {
+    return;
+  }
+  const startFrame = nearestZeroCrossing(range.startFrame);
+  const endFrame = nearestZeroCrossing(range.endFrame);
+  if (endFrame > startFrame && (startFrame !== range.startFrame || endFrame !== range.endFrame)) {
+    sendViewportIntent({ kind: 'setSelectionFrameRange', startFrame, endFrame });
+  }
+}
+
+function requestSelectionAnalysis(): void {
+  const selection = currentSelectionFrames();
+  if (!selection || !state.analysisWorker || !state.analysis?.initialized) {
+    return;
+  }
+  state.selectionAnalysisOpen = true;
+  state.selectionToolsOpen = false;
+  state.selectionAnalysisResult = null;
+  state.selectionAnalysisError = null;
+  state.selectionAnalysisRequestId += 1;
+  state.analysisWorker.postMessage({
+    type: 'requestSelectionAnalysis',
+    body: {
+      ...selection,
+      requestId: state.selectionAnalysisRequestId,
+      sessionVersion: state.spectrogramSessionRevision,
+    },
+  });
+  renderSelectionTools();
+  renderSelectionAnalysis();
+  elements.selectionAnalysisClose.focus();
+}
+
+function formatAmplitudeDbfs(amplitude: number): string {
+  return amplitude > 0 ? `${(20 * Math.log10(amplitude)).toFixed(1)} dBFS` : '−∞ dBFS';
+}
+
+function renderSelectionAnalysis(): void {
+  elements.selectionAnalysisDrawer.hidden = !state.selectionAnalysisOpen;
+  if (!state.selectionAnalysisOpen) {
+    return;
+  }
+  const result = state.selectionAnalysisResult;
+  const selection = currentSelectionFrames();
+  const current = result && selection
+    && result.startFrame === selection.startFrame && result.endFrame === selection.endFrame;
+  elements.selectionAnalysisStatus.textContent = state.selectionAnalysisError
+    ?? (current ? `dBFS mean-power spectrum · ${result.spectrumWindowCount} Hann windows · FFT 4096 · ${result.sampleCount} samples · ${state.splitChannels ? 'channel 1' : 'mono mix'}`
+      : selection ? 'Analyzing selected range…' : 'Select a range to analyze.');
+  elements.selectionAnalysisCopyCsv.disabled = !current;
+  elements.selectionAnalysisCopySummary.disabled = !current;
+  elements.selectionAnalysisPeak.textContent = current ? formatAmplitudeDbfs(result.peakAmplitude) : '--';
+  elements.selectionAnalysisRms.textContent = current ? formatAmplitudeDbfs(result.rms) : '--';
+  elements.selectionAnalysisDc.textContent = current ? result.dcOffset.toFixed(6) : '--';
+  elements.selectionAnalysisClipping.textContent = current
+    ? `${result.clippingSampleCount} near-full-scale samples` : '--';
+  const locations = document.createDocumentFragment();
+  if (current) {
+    const positions = [
+      ...(result.peakFrame === null ? [] : [{ frame: result.peakFrame, label: 'Peak' }]),
+      ...result.clippingFrames.map((frame, index) => ({ frame, label: `Clip ${index + 1}` })),
+    ];
+    for (const position of positions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'wave-tool-button';
+      button.dataset.analysisFrame = String(position.frame);
+      button.textContent = `${position.label} @ ${formatSelectionSeconds(position.frame)} s`;
+      button.setAttribute('aria-label', `Seek to ${button.textContent}`);
+      locations.append(button);
+    }
+  }
+  elements.selectionAnalysisLocations.replaceChildren(locations);
+  const canvas = elements.selectionAnalysisCanvas;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return;
+  }
+  const width = canvas.width;
+  const height = canvas.height;
+  context.clearRect(0, 0, width, height);
+  if (!current) {
+    return;
+  }
+  const left = 56;
+  const right = width - 18;
+  const top = 18;
+  const bottom = height - 35;
+  const maxFrequency = Math.max(100, getSampleRate() / 2);
+  const minFrequency = 20;
+  const xAt = (frequency: number) => left + (Math.log10(Math.max(minFrequency, frequency) / minFrequency)
+    / Math.log10(maxFrequency / minFrequency)) * (right - left);
+  const yAt = (level: number) => bottom - (clamp(level, -140, 20) + 140) / 160 * (bottom - top);
+  context.font = '12px sans-serif';
+  context.strokeStyle = 'rgba(150, 160, 180, 0.35)';
+  context.fillStyle = '#9ca3af';
+  for (const level of [-120, -80, -40, 0]) {
+    const y = yAt(level);
+    context.beginPath();
+    context.moveTo(left, y);
+    context.lineTo(right, y);
+    context.stroke();
+    context.fillText(`${level}`, 8, y + 4);
+  }
+  for (const frequency of [20, 100, 1000, 5000, 10000, 20000]) {
+    if (frequency > maxFrequency) {
+      continue;
+    }
+    const x = xAt(frequency);
+    context.beginPath();
+    context.moveTo(x, top);
+    context.lineTo(x, bottom);
+    context.stroke();
+    context.fillText(frequency >= 1000 ? `${frequency / 1000}k` : `${frequency}`, x - 12, height - 10);
+  }
+  context.beginPath();
+  let started = false;
+  for (let index = 0; index < result.frequenciesHz.length; index += 1) {
+    const frequency = result.frequenciesHz[index];
+    if (frequency < minFrequency) {
+      continue;
+    }
+    const x = xAt(frequency);
+    const y = yAt(result.levelsDb[index]);
+    if (started) { context.lineTo(x, y); } else { context.moveTo(x, y); started = true; }
+  }
+  context.strokeStyle = '#54c5c7';
+  context.lineWidth = 2;
+  context.stroke();
+}
+
+function copySelectionAnalysisCsv(): void {
+  const result = state.selectionAnalysisResult;
+  const selection = currentSelectionFrames();
+  if (!result || !selection || result.startFrame !== selection.startFrame || result.endFrame !== selection.endFrame) {
+    return;
+  }
+  const lines = ['frequency_hz,level_dbfs'];
+  for (let index = 0; index < result.frequenciesHz.length; index += 1) {
+    lines.push(`${result.frequenciesHz[index].toFixed(3)},${result.levelsDb[index].toFixed(3)}`);
+  }
+  vscode.postMessage({ type: 'copySelectionCsv', body: { csv: lines.join('\n') } });
+  elements.selectionAnalysisStatus.textContent = 'Spectrum CSV sent to clipboard.';
+}
+
+function copySelectionSummary(): void {
+  const result = state.selectionAnalysisResult;
+  const selection = currentSelectionFrames();
+  if (!result || !selection || result.startFrame !== selection.startFrame || result.endFrame !== selection.endFrame) {
+    return;
+  }
+  const rows = [
+    'metric,value',
+    `start_seconds,${formatSelectionSeconds(result.startFrame)}`,
+    `end_seconds,${formatSelectionSeconds(result.endFrame)}`,
+    `duration_seconds,${formatSelectionSeconds(result.sampleCount)}`,
+    `sample_count,${result.sampleCount}`,
+    `peak_dbfs,${result.peakAmplitude > 0 ? (20 * Math.log10(result.peakAmplitude)).toFixed(3) : '-Infinity'}`,
+    `peak_frame,${result.peakFrame ?? ''}`,
+    `rms_dbfs,${result.rms > 0 ? (20 * Math.log10(result.rms)).toFixed(3) : '-Infinity'}`,
+    `dc_offset,${result.dcOffset.toFixed(8)}`,
+    `near_full_scale_samples,${result.clippingSampleCount}`,
+  ];
+  vscode.postMessage({ type: 'copySelectionCsv', body: { csv: rows.join('\n') } });
+  elements.selectionAnalysisStatus.textContent = 'Measurement values sent to clipboard.';
 }
 
 function normalizeWaveformAmplitudeMax(value: unknown): number {
@@ -2611,6 +3025,8 @@ function openWaveExportMenu(): void {
     return;
   }
   closeWaveOverflowMenu();
+  state.selectionToolsOpen = false;
+  renderSelectionTools();
   closePlaybackRateMenu();
   setSpectrogramMetaOpen(false);
   state.waveExportMenuOpen = true;
@@ -2633,6 +3049,8 @@ function closeWaveOverflowMenu({ restoreFocus = false } = {}): void {
 
 function openWaveOverflowMenu(): void {
   closeWaveExportMenu();
+  state.selectionToolsOpen = false;
+  renderSelectionTools();
   closePlaybackRateMenu();
   setSpectrogramMetaOpen(false);
   state.waveOverflowMenuOpen = true;
@@ -2788,6 +3206,10 @@ function renderSpectrogramMeta(): void {
   const isChroma = analysisType === 'chroma';
   const isLoudness = analysisType === 'loudness';
   const supportsScale = analysisType === 'spectrogram';
+  const frequencyAxisZoomable = supportsScale && getSampleRate() > 0;
+  elements.spectrogramAxis.dataset.zoomable = frequencyAxisZoomable ? 'true' : 'false';
+  elements.spectrogramAxis.setAttribute('aria-disabled', frequencyAxisZoomable ? 'false' : 'true');
+  elements.spectrogramAxis.tabIndex = frequencyAxisZoomable ? 0 : -1;
   const supportsMelBands = analysisType === 'mel';
   const supportsMfccOptions = analysisType === 'mfcc';
   const supportsScalogramOptions = analysisType === 'scalogram';
@@ -2807,6 +3229,27 @@ function renderSpectrogramMeta(): void {
   );
   elements.spectrogramTypeSelect.value = analysisType;
   elements.spectrogramFftSelect.value = String(state.spectrogramConfig.fftSize);
+  const sampleRate = getSampleRate();
+  elements.spectrogramWindowDuration.textContent = sampleRate > 0
+    ? `${((state.spectrogramConfig.fftSize / sampleRate) * 1000).toFixed(2)} ms`
+    : '-- ms';
+  elements.spectrogramSpeechPresets.hidden = !supportsScale;
+  if (sampleRate > 0) {
+    for (const [button, presetName] of [
+      [elements.spectrogramSpeechWideband, 'formants'],
+      [elements.spectrogramSpeechNarrowband, 'harmonics'],
+    ] as const) {
+      const preset = getSpeechSpectrogramPreset(presetName, sampleRate);
+      const active = supportsScale
+        && state.spectrogramConfig.fftSize === preset.fftSize
+        && state.spectrogramConfig.frequencyScale === preset.frequencyScale
+        && state.spectrogramConfig.spectrogramMinFrequency === preset.spectrogramMinFrequency
+        && state.spectrogramConfig.spectrogramMaxFrequency === preset.spectrogramMaxFrequency
+        && state.spectrogramConfig.windowFunction === preset.windowFunction
+        && state.spectrogramConfig.overlapRatio === preset.overlapRatio;
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+  }
   elements.spectrogramOverlapSelect.value = String(normalizedOverlapRatio);
   elements.spectrogramWindowSelect.value = normalizeSpectrogramWindowFunction(state.spectrogramConfig.windowFunction);
   elements.spectrogramScaleSelect.value = normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale);
@@ -2909,6 +3352,43 @@ function renderSpectrogramMeta(): void {
 
   renderSpectrogramDbWindowUi(dbWindow);
   setSpectrogramMetaOpen(state.spectrogramMetaOpen);
+}
+
+function applySpeechSpectrogramPreset(preset: 'formants' | 'harmonics'): void {
+  const sampleRate = getSampleRate();
+  if (sampleRate <= 0) {
+    return;
+  }
+  const settings = getSpeechSpectrogramPreset(preset, sampleRate);
+  state.spectrogramConfig.analysisType = settings.analysisType;
+  state.spectrogramConfig.fftSize = settings.fftSize;
+  state.spectrogramConfig.frequencyScale = settings.frequencyScale;
+  state.spectrogramConfig.overlapRatio = settings.overlapRatio;
+  state.spectrogramConfig.spectrogramMinFrequency = settings.spectrogramMinFrequency;
+  state.spectrogramConfig.spectrogramMaxFrequency = settings.spectrogramMaxFrequency;
+  state.spectrogramConfig.windowFunction = settings.windowFunction;
+  refreshSpectrogramAnalysisConfig();
+  scheduleKeyboardSurfaceFocus();
+}
+
+function resetSpectrogramFrequencyRange(): void {
+  if (normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType) !== 'spectrogram') {
+    return;
+  }
+  state.spectrogramConfig.spectrogramMinFrequency = DEFAULT_SCALOGRAM_MIN_FREQUENCY;
+  state.spectrogramConfig.spectrogramMaxFrequency = getSpectrogramFrequencyCeiling();
+  refreshSpectrogramAnalysisConfig();
+}
+
+function frequencyAtAxisPosition(position: number, minFrequency: number, maxFrequency: number): number {
+  const scale = normalizeSpectrogramFrequencyScale(state.spectrogramConfig.frequencyScale);
+  if (scale === 'linear') {
+    return getFrequencyAtLinearPosition(position, minFrequency, maxFrequency);
+  }
+  if (scale === 'mixed') {
+    return getFrequencyAtMixedPosition(position, minFrequency, maxFrequency);
+  }
+  return getFrequencyAtLogPosition(position, minFrequency, maxFrequency);
 }
 
 function renderSpectrogramDbWindowUi(dbWindow: { maxDecibels: number; minDecibels: number }): void {
@@ -4398,6 +4878,26 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
     return;
   }
 
+  if (message?.type === 'selectionAnalysisResult') {
+    if (message.body.requestId !== state.selectionAnalysisRequestId) {
+      return;
+    }
+    state.selectionAnalysisResult = message.body.result;
+    state.selectionAnalysisError = null;
+    renderSelectionAnalysis();
+    return;
+  }
+
+  if (message?.type === 'selectionAnalysisError') {
+    if (message.body.requestId !== state.selectionAnalysisRequestId) {
+      return;
+    }
+    state.selectionAnalysisResult = null;
+    state.selectionAnalysisError = message.body.message;
+    renderSelectionAnalysis();
+    return;
+  }
+
   if (!state.analysis) {
     return;
   }
@@ -4417,6 +4917,7 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
     state.analysis.sampleCount = Number(message.body?.sampleCount) || state.analysis.sampleCount;
     state.analysis.minFrequency = Number(message.body?.minFrequency) || state.analysis.minFrequency;
     state.analysis.maxFrequency = Number(message.body?.maxFrequency) || state.analysis.maxFrequency;
+    renderSelectionTools();
     scheduleSpectrogramRender({ force: true });
     return;
   }
@@ -4698,6 +5199,9 @@ function applyPlaybackClock(playback: PlaybackClockState): void {
 
   applyPlaybackToUiState(state.engineUiState, playback);
   renderPlaybackPosition(state.engineUiState);
+  if (!elements.chapterNavigation.hidden) {
+    renderCurrentChapter();
+  }
 }
 
 function getHoverTarget(surface: SurfaceKind): HTMLElement {
@@ -4887,6 +5391,7 @@ async function initializePlaybackFromPreparedData(
   state.playbackTransportKind = audioTransport.getTransportKind() ?? 'unavailable';
   state.playbackTransportError = audioTransport.getLastFallbackReason() ?? null;
   renderMediaMetadata();
+  renderChapterNavigation();
   renderWaveformUi();
   syncTransport();
   refreshSpectrogramAnalysisConfig({ persist: false });
@@ -4916,7 +5421,7 @@ const {
   normalizeExternalToolStatus,
   preparePlaybackAnalysisData,
   resetSpectrogramCanvasElement,
-  renderMediaMetadata,
+  renderMediaMetadata: () => { renderMediaMetadata(); renderChapterNavigation(); },
   renderSpectrogramScale,
   renderWaveformUi,
   setAnalysisStatus,
@@ -4936,6 +5441,15 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
   const message = event.data;
 
   if (message?.type === 'loadAudio') {
+    state.selectionToolsOpen = false;
+    state.selectionInputsDirty = false;
+    state.viewInputsDirty = false;
+    state.selectionAnalysisOpen = false;
+    state.selectionAnalysisRequestId += 1;
+    state.selectionAnalysisResult = null;
+    state.selectionAnalysisError = null;
+    renderSelectionTools();
+    renderSelectionAnalysis();
     if (message.body && typeof message.body === 'object') {
       const { audioBytes: _audioBytes, ...activeFile } = message.body;
       state.activeFile = activeFile;
@@ -4963,6 +5477,7 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
   if (message?.type === 'externalToolStatus') {
     state.externalTools = normalizeExternalToolStatus(message.body, EMBEDDED_MEDIA_TOOLS_GUIDANCE);
     renderMediaMetadata();
+    renderChapterNavigation();
     return;
   }
 
@@ -4979,6 +5494,7 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
       summary: message.body?.metadata?.summary ?? null,
     };
     renderMediaMetadata();
+    renderChapterNavigation();
     return;
   }
 
@@ -4995,6 +5511,7 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
       summary: null,
     };
     renderMediaMetadata();
+    renderChapterNavigation();
     return;
   }
 
@@ -5096,12 +5613,18 @@ function attachUiEvents(): void {
   elements.waveToolbar.addEventListener('scroll', () => {
     updateMediaMetadataDetailPosition();
     closeWaveMenus();
+    if (state.selectionToolsOpen) {
+      positionWaveMenu(elements.waveSelectionPanel, elements.waveSelectionToggle);
+    }
   }, { passive: true });
 
   window.addEventListener('resize', () => {
     updateMediaMetadataDetailPosition();
     closePlaybackRateMenu();
     closeWaveMenus();
+    if (state.selectionToolsOpen) {
+      positionWaveMenu(elements.waveSelectionPanel, elements.waveSelectionToggle);
+    }
     if (state.spectrogramMetaOpen) {
       setSpectrogramMetaOpen(true);
     }
@@ -5153,6 +5676,14 @@ function attachUiEvents(): void {
   });
 
   document.addEventListener('pointerdown', (event) => {
+    if (state.selectionToolsOpen && event.target instanceof Node
+      && !elements.waveSelectionPanel.contains(event.target)
+      && !elements.waveSelectionToggle.contains(event.target)) {
+      state.selectionToolsOpen = false;
+      state.selectionInputsDirty = false;
+      state.viewInputsDirty = false;
+      renderSelectionTools();
+    }
     if (!isPlaybackRateUiTarget(event.target)) {
       closePlaybackRateMenu();
     }
@@ -5178,6 +5709,19 @@ function attachUiEvents(): void {
 
   const handleGlobalShortcutKeydown = (event: KeyboardEvent) => {
     if (event.defaultPrevented) {
+      return;
+    }
+
+    if (event.code === 'Escape' && (state.selectionToolsOpen || state.selectionAnalysisOpen)) {
+      handleGlobalShortcut(event, () => {
+        state.selectionToolsOpen = false;
+        state.selectionInputsDirty = false;
+        state.viewInputsDirty = false;
+        state.selectionAnalysisOpen = false;
+        renderSelectionTools();
+        renderSelectionAnalysis();
+        scheduleKeyboardSurfaceFocus();
+      });
       return;
     }
 
@@ -5264,6 +5808,98 @@ function attachUiEvents(): void {
 
   window.addEventListener('keydown', handleGlobalShortcutKeydown, { capture: true });
 
+  const frequencyAxis = elements.spectrogramAxis;
+  let frequencyAxisDrag: {
+    lane: number;
+    laneCount: number;
+    maxFrequency: number;
+    minFrequency: number;
+    pointerId: number;
+    startClientY: number;
+    startRatio: number;
+  } | null = null;
+  const axisLocalRatio = (clientY: number, lane: number, laneCount: number): number => {
+    const rect = frequencyAxis.getBoundingClientRect();
+    return clamp(((clientY - rect.top) / Math.max(1, rect.height)) * laneCount - lane, 0, 1);
+  };
+  frequencyAxis.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || frequencyAxis.dataset.zoomable !== 'true' || getSampleRate() <= 0) {
+      return;
+    }
+    const rect = frequencyAxis.getBoundingClientRect();
+    const laneCount = getSpectrogramLaneCount();
+    const overallRatio = clamp((event.clientY - rect.top) / Math.max(1, rect.height), 0, 0.999999);
+    const lane = Math.floor(overallRatio * laneCount);
+    const range = normalizeSpectrogramScalogramFrequencyRange(
+      state.spectrogramConfig.spectrogramMinFrequency,
+      state.spectrogramConfig.spectrogramMaxFrequency,
+    );
+    frequencyAxisDrag = {
+      lane,
+      laneCount,
+      maxFrequency: range.maxFrequency,
+      minFrequency: range.minFrequency,
+      pointerId: event.pointerId,
+      startClientY: event.clientY,
+      startRatio: axisLocalRatio(event.clientY, lane, laneCount),
+    };
+    frequencyAxis.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  frequencyAxis.addEventListener('pointermove', (event) => {
+    const drag = frequencyAxisDrag;
+    if (!drag || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    const endRatio = axisLocalRatio(event.clientY, drag.lane, drag.laneCount);
+    const startOverall = (drag.lane + drag.startRatio) / drag.laneCount;
+    const endOverall = (drag.lane + endRatio) / drag.laneCount;
+    frequencyAxis.dataset.dragging = 'true';
+    frequencyAxis.style.setProperty('--axis-drag-top', `${Math.min(startOverall, endOverall) * 100}%`);
+    frequencyAxis.style.setProperty('--axis-drag-height', `${Math.abs(endOverall - startOverall) * 100}%`);
+  });
+  const finishFrequencyAxisDrag = (event: PointerEvent, cancelled: boolean): void => {
+    const drag = frequencyAxisDrag;
+    if (!drag || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    frequencyAxisDrag = null;
+    delete frequencyAxis.dataset.dragging;
+    frequencyAxis.style.removeProperty('--axis-drag-top');
+    frequencyAxis.style.removeProperty('--axis-drag-height');
+    if (frequencyAxis.hasPointerCapture(event.pointerId)) {
+      frequencyAxis.releasePointerCapture(event.pointerId);
+    }
+    if (cancelled || Math.abs(event.clientY - drag.startClientY) < 8) {
+      return;
+    }
+    const endRatio = axisLocalRatio(event.clientY, drag.lane, drag.laneCount);
+    const startHz = frequencyAtAxisPosition(drag.startRatio, drag.minFrequency, drag.maxFrequency);
+    const endHz = frequencyAtAxisPosition(endRatio, drag.minFrequency, drag.maxFrequency);
+    const nextRange = normalizeSpectrogramScalogramFrequencyRange(
+      Math.min(startHz, endHz),
+      Math.max(startHz, endHz),
+    );
+    if (nextRange.maxFrequency - nextRange.minFrequency < 2) {
+      return;
+    }
+    state.spectrogramConfig.spectrogramMinFrequency = nextRange.minFrequency;
+    state.spectrogramConfig.spectrogramMaxFrequency = nextRange.maxFrequency;
+    refreshSpectrogramAnalysisConfig();
+  };
+  frequencyAxis.addEventListener('pointerup', (event) => finishFrequencyAxisDrag(event, false));
+  frequencyAxis.addEventListener('pointercancel', (event) => finishFrequencyAxisDrag(event, true));
+  frequencyAxis.addEventListener('dblclick', (event) => {
+    event.preventDefault();
+    resetSpectrogramFrequencyRange();
+  });
+  frequencyAxis.addEventListener('keydown', (event) => {
+    if (event.code === 'Enter') {
+      event.preventDefault();
+      resetSpectrogramFrequencyRange();
+    }
+  });
+
   elements.spectrogramTypeSelect.addEventListener('change', () => {
     const previousAnalysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
     const previousDefaults = getDefaultSpectrogramDbWindow(previousAnalysisType);
@@ -5287,6 +5923,8 @@ function attachUiEvents(): void {
     refreshSpectrogramAnalysisConfig();
     scheduleKeyboardSurfaceFocus();
   });
+  elements.spectrogramSpeechWideband.addEventListener('click', () => applySpeechSpectrogramPreset('formants'));
+  elements.spectrogramSpeechNarrowband.addEventListener('click', () => applySpeechSpectrogramPreset('harmonics'));
   elements.spectrogramFftSelect.addEventListener('change', () => {
     state.spectrogramConfig.fftSize = normalizeSpectrogramFftSize(elements.spectrogramFftSelect.value);
     refreshSpectrogramAnalysisConfig();
@@ -5361,6 +5999,10 @@ function attachUiEvents(): void {
   elements.spectrogramSplitChannelsToggle.addEventListener('change', () => {
     const enabled = elements.spectrogramSplitChannelsToggle.checked;
     state.splitChannels = enabled;
+    state.selectionAnalysisRequestId += 1;
+    state.selectionAnalysisResult = null;
+    state.selectionAnalysisError = 'Channel mode changed. Analyze the selection again.';
+    renderSelectionAnalysis();
     if (state.activeFile) {
       (state.activeFile as { splitChannels?: boolean }).splitChannels = enabled;
     }
@@ -5533,6 +6175,80 @@ function attachUiEvents(): void {
   elements.waveZoomOut.addEventListener('click', () => sendViewportIntent({ direction: 'out', kind: 'zoomStep' }));
   elements.waveZoomReset.addEventListener('click', () => sendViewportIntent({ kind: 'resetZoom' }));
   elements.waveZoomIn.addEventListener('click', () => sendViewportIntent({ direction: 'in', kind: 'zoomStep' }));
+  elements.waveSelectionToggle.addEventListener('click', () => {
+    state.selectionToolsOpen = !state.selectionToolsOpen;
+    state.selectionInputsDirty = false;
+    state.viewInputsDirty = false;
+    if (state.selectionToolsOpen) {
+      closeWaveMenus();
+      closePlaybackRateMenu();
+      setSpectrogramMetaOpen(false);
+    }
+    renderSelectionTools();
+    if (state.selectionToolsOpen) {
+      positionWaveMenu(elements.waveSelectionPanel, elements.waveSelectionToggle);
+      elements.selectionStartInput.focus();
+    }
+  });
+  for (const input of [elements.selectionStartInput, elements.selectionEndInput]) {
+    input.addEventListener('input', () => {
+      state.selectionInputsDirty = true;
+      elements.selectionEndInput.setCustomValidity('');
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.code === 'Enter') {
+        event.preventDefault();
+        applySelectionTimes();
+      }
+    });
+  }
+  elements.selectionApply.addEventListener('click', applySelectionTimes);
+  for (const input of [elements.viewStartInput, elements.viewEndInput]) {
+    input.addEventListener('input', () => {
+      state.viewInputsDirty = true;
+      elements.viewEndInput.setCustomValidity('');
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.code === 'Enter') {
+        event.preventDefault();
+        applyViewTimes();
+      }
+    });
+  }
+  elements.viewApply.addEventListener('click', applyViewTimes);
+  elements.selectionZoom.addEventListener('click', () => sendViewportIntent({ kind: 'zoomToSelection' }));
+  elements.selectionLoopToggle.addEventListener('change', () => sendViewportIntent({
+    kind: 'setLoopEnabled', enabled: elements.selectionLoopToggle.checked,
+  }));
+  elements.selectionSnapZero.addEventListener('change', () => {
+    state.snapZeroEnabled = elements.selectionSnapZero.checked;
+    snapCurrentSelectionToZero();
+  });
+  elements.selectionAnalyze.addEventListener('click', requestSelectionAnalysis);
+  elements.selectionAnalysisClose.addEventListener('click', () => {
+    state.selectionAnalysisOpen = false;
+    renderSelectionAnalysis();
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.selectionAnalysisCopyCsv.addEventListener('click', copySelectionAnalysisCsv);
+  elements.selectionAnalysisCopySummary.addEventListener('click', copySelectionSummary);
+  elements.selectionAnalysisLocations.addEventListener('click', (event) => {
+    const button = event.target instanceof Element
+      ? event.target.closest<HTMLButtonElement>('[data-analysis-frame]') : null;
+    if (button) {
+      setPlaybackPositionFromFrame(Number(button.dataset.analysisFrame));
+    }
+  });
+  elements.chapterPrev.addEventListener('click', () => seekChapter('previous'));
+  elements.chapterNext.addEventListener('click', () => seekChapter('next'));
+  elements.timelineChapterMarkers.addEventListener('click', (event) => {
+    const marker = event.target instanceof Element
+      ? event.target.closest<HTMLButtonElement>('[data-chapter-index]') : null;
+    const chapter = marker ? navigableChapters()[Number(marker.dataset.chapterIndex)] : null;
+    if (chapter?.startSeconds !== null && chapter?.startSeconds !== undefined) {
+      setPlaybackPositionFromFrame(Math.round(chapter.startSeconds * getSampleRate()));
+    }
+  });
   elements.waveAmpReset.addEventListener('click', () => applyWaveformAmplitudeMax(DEFAULT_WAVEFORM_AMPLITUDE_MAX));
   elements.waveAmpOut.addEventListener('click', () => applyWaveformAmplitudeMax(stepWaveformAmplitudeMax('out')));
   elements.waveAmpIn.addEventListener('click', () => applyWaveformAmplitudeMax(stepWaveformAmplitudeMax('in')));

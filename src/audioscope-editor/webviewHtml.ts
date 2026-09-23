@@ -96,6 +96,17 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                   </span>
                 </label>
               </div>
+              <div class="wave-toolbar-group wave-toolbar-group-selection">
+                <button
+                  id="wave-selection-toggle"
+                  class="wave-tool-button"
+                  type="button"
+                  aria-label="Edit and analyze selection"
+                  aria-controls="wave-selection-panel"
+                  aria-expanded="false"
+                  title="Edit and analyze selection"
+                >Selection</button>
+              </div>
               <div class="wave-toolbar-group wave-toolbar-group-export">
                 <button
                   id="wave-export"
@@ -172,7 +183,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           tabindex="0"
         ></div>
         <div id="spectrogram-panel" class="spectrogram-panel">
-          <div id="spectrogram-axis" class="spectrogram-axis" aria-hidden="true"></div>
+          <div id="spectrogram-axis" class="spectrogram-axis" role="button" aria-label="Drag to zoom frequency range; double-click or press Enter to reset" aria-disabled="false" title="Drag to zoom frequency range · double-click to reset" tabindex="0"></div>
           <div id="spectrogram-stage" class="spectrogram-stage">
             <canvas id="spectrogram" class="spectrogram-canvas" aria-label="Spectrogram"></canvas>
             <div id="spectrogram-meta" class="spectrogram-meta" data-open="false">
@@ -209,14 +220,26 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                 </label>
                 <label id="spectrogram-fft-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">FFT</span>
-                  <select id="spectrogram-fft-select" class="spectrogram-control-select" aria-label="Spectrogram FFT size">
-                    <option value="1024">1024</option>
-                    <option value="2048">2048</option>
-                    <option value="4096" selected>4096</option>
-                    <option value="8192">8192</option>
-                    <option value="16384">16384</option>
-                  </select>
+                  <span class="spectrogram-control-inline">
+                    <select id="spectrogram-fft-select" class="spectrogram-control-select" aria-label="Spectrogram FFT size">
+                      <option value="256">256</option>
+                      <option value="512">512</option>
+                      <option value="1024">1024</option>
+                      <option value="2048">2048</option>
+                      <option value="4096" selected>4096</option>
+                      <option value="8192">8192</option>
+                      <option value="16384">16384</option>
+                    </select>
+                    <span id="spectrogram-window-duration" class="spectrogram-control-meta" aria-label="FFT window duration">-- ms</span>
+                  </span>
                 </label>
+                <div id="spectrogram-speech-presets" class="spectrogram-control spectrogram-speech-presets" role="group" aria-label="Speech spectrogram presets">
+                  <span class="spectrogram-control-label">Speech</span>
+                  <span class="spectrogram-control-inline">
+                    <button id="spectrogram-speech-wideband" class="spectrogram-control-button" type="button" data-speech-preset="wideband" title="Short window for speech formants">Wideband</button>
+                    <button id="spectrogram-speech-narrowband" class="spectrogram-control-button" type="button" data-speech-preset="narrowband" title="Longer window for speech harmonics">Harmonics</button>
+                  </span>
+                </div>
                 <label id="spectrogram-overlap-control" class="spectrogram-control">
                   <span class="spectrogram-control-label">Overlap</span>
                   <span class="spectrogram-control-inline">
@@ -450,12 +473,12 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           </div>
         </div>
         <div class="transport-loop-control">
-          <div class="wave-toolbar-group wave-toolbar-group-loop wave-seg" role="group" aria-label="Loop selection" data-active="false">
+          <div class="wave-toolbar-group wave-toolbar-group-loop wave-seg" role="group" aria-label="Audio selection" data-active="false">
             <div
               id="wave-loop-label"
               class="wave-toolbar-pill wave-toolbar-pill-loop"
               role="status"
-              aria-label="Drag to set loop"
+              aria-label="Drag to select audio"
               aria-describedby="wave-loop-tooltip"
               aria-live="polite"
               data-active="false"
@@ -464,12 +487,12 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               id="wave-clear-loop"
               class="wave-tool-button wave-tool-button-symbol wave-tool-button-quiet"
               type="button"
-              aria-label="Clear loop selection"
-              title="Clear loop selection"
+              aria-label="Clear selection"
+              title="Clear selection"
               disabled
             >×</button>
           </div>
-          <div id="wave-loop-tooltip" class="transport-tooltip wave-loop-tooltip" role="tooltip">Drag to select a loop range</div>
+          <div id="wave-loop-tooltip" class="transport-tooltip wave-loop-tooltip" role="tooltip">Drag to select audio</div>
         </div>
         <div class="transport-volume" role="group" aria-label="Playback volume">
           <button
@@ -498,12 +521,18 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           </div>
         </div>
         <div id="time-readout" class="time-readout">0:00.00 / --:--.--</div>
+        <div id="chapter-navigation" class="chapter-navigation" role="group" aria-label="Chapter navigation" hidden>
+          <button id="chapter-prev" class="wave-tool-button" type="button" aria-label="Previous chapter" title="Previous chapter" disabled>‹</button>
+          <span id="chapter-current-label" class="chapter-current-label" aria-live="polite">Chapter</span>
+          <button id="chapter-next" class="wave-tool-button" type="button" aria-label="Next chapter" title="Next chapter" disabled>›</button>
+        </div>
         <div id="waveform-overview" class="timeline-shell">
           <div id="waveform-overview-thumb" class="timeline-viewport" aria-hidden="true"></div>
           <div id="timeline-loop-range" class="timeline-loop-range" aria-hidden="true" hidden></div>
           <div id="timeline-current-marker" class="timeline-current-marker" aria-hidden="true" hidden></div>
           <div id="timeline-hover-tooltip" class="timeline-hover-tooltip" aria-hidden="true"></div>
           <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.00001" value="0" disabled />
+          <div id="timeline-chapter-markers" class="timeline-chapter-markers" aria-label="Chapter markers"></div>
         </div>
         <div id="loudness-summary" class="loudness-summary" data-state="idle" aria-label="Loudness summary" aria-live="polite" hidden>
           <div class="loudness-chip">
@@ -544,6 +573,52 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           <button class="wave-menu-option" type="button" role="menuitem" data-export-format="flac">Export FLAC</button>
         </div>
       </div>
+      <div id="wave-selection-layer" class="wave-selection-layer" hidden>
+        <section id="wave-selection-panel" class="wave-selection-panel" aria-label="Selection tools">
+          <div class="wave-selection-heading">Selection</div>
+          <div class="wave-selection-times">
+            <label class="wave-selection-field" for="selection-start-input"><span>Start</span><input id="selection-start-input" type="number" min="0" step="any" inputmode="decimal" aria-label="Selection start in seconds" /><span>s</span></label>
+            <label class="wave-selection-field" for="selection-end-input"><span>End</span><input id="selection-end-input" type="number" min="0" step="any" inputmode="decimal" aria-label="Selection end in seconds" /><span>s</span></label>
+            <div class="wave-selection-duration"><span>Length</span><output id="selection-duration">--</output></div>
+          </div>
+          <div class="wave-selection-view">
+            <div class="wave-selection-heading">Visible range</div>
+            <div class="wave-selection-times">
+              <label class="wave-selection-field" for="view-start-input"><span>Start</span><input id="view-start-input" type="number" min="0" step="any" inputmode="decimal" aria-label="Visible range start in seconds" /><span>s</span></label>
+              <label class="wave-selection-field" for="view-end-input"><span>End</span><input id="view-end-input" type="number" min="0" step="any" inputmode="decimal" aria-label="Visible range end in seconds" /><span>s</span></label>
+            </div>
+            <button id="view-apply" class="wave-tool-button" type="button">Apply view</button>
+          </div>
+          <div class="wave-selection-options">
+            <label><input id="selection-loop-toggle" type="checkbox" checked /> Loop playback</label>
+            <label title="Uses the mono mix, or channel 1 when channels are split"><input id="selection-snap-zero" type="checkbox" /> Snap to zero crossing</label>
+          </div>
+          <div class="wave-selection-actions">
+            <button id="selection-apply" class="wave-tool-button" type="button">Apply times</button>
+            <button id="selection-zoom" class="wave-tool-button" type="button">Zoom to selection</button>
+            <button id="selection-analyze" class="wave-tool-button wave-selection-primary" type="button">Analyze</button>
+          </div>
+        </section>
+      </div>
+      <section id="selection-analysis-drawer" class="selection-analysis-drawer" aria-label="Selection analysis" hidden>
+        <div class="selection-analysis-header">
+          <h2>Selection analysis</h2>
+          <div class="selection-analysis-header-actions">
+            <button id="selection-analysis-copy-summary" class="wave-tool-button" type="button" disabled>Copy values</button>
+            <button id="selection-analysis-copy-csv" class="wave-tool-button" type="button" disabled>Copy CSV</button>
+            <button id="selection-analysis-close" class="wave-tool-button wave-tool-button-symbol" type="button" aria-label="Close selection analysis">×</button>
+          </div>
+        </div>
+        <div id="selection-analysis-status" class="selection-analysis-status" role="status" aria-live="polite">Select a range to analyze.</div>
+        <canvas id="selection-analysis-canvas" class="selection-analysis-canvas" width="960" height="320" aria-label="Selected range frequency spectrum"></canvas>
+        <div class="selection-analysis-metrics">
+          <div><span>Peak</span><output id="selection-analysis-peak">--</output></div>
+          <div><span>RMS</span><output id="selection-analysis-rms">--</output></div>
+          <div><span>DC offset</span><output id="selection-analysis-dc">--</output></div>
+          <div><span>Clipping</span><output id="selection-analysis-clipping">--</output></div>
+        </div>
+        <div id="selection-analysis-locations" class="selection-analysis-locations" aria-label="Measured sample positions"></div>
+      </section>
       <div id="status" class="status-overlay" role="alertdialog" aria-modal="true" aria-label="audioscope error" hidden></div>
     </main>
 
