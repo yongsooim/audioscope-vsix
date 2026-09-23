@@ -219,6 +219,17 @@ function parseNumberValue(value: unknown): number | null {
   return null;
 }
 
+function clampChapterTimeSeconds(value: number | null, durationSeconds: number | null): number | null {
+  if (value === null) {
+    return null;
+  }
+
+  const nonnegativeValue = Math.max(0, value);
+  return durationSeconds !== null && durationSeconds > 0
+    ? Math.min(nonnegativeValue, durationSeconds)
+    : nonnegativeValue;
+}
+
 function formatFrequencyText(value: number | null): string | null {
   if (!Number.isFinite(value) || !value || value <= 0) {
     return null;
@@ -406,6 +417,7 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
   const audioStreams = streams.filter((stream) => stream.codec_type === 'audio');
   const primaryAudioStream = audioStreams[0] ?? null;
   const formatSection = rawPayload.format;
+  const durationSeconds = parseNumberValue(primaryAudioStream?.duration) ?? parseNumberValue(formatSection?.duration);
 
   const summary: MediaMetadataSummaryPayload = {
     bitrateText: formatBitrateText(parseNumberValue(primaryAudioStream?.bit_rate) ?? parseNumberValue(formatSection?.bit_rate)),
@@ -417,7 +429,7 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
     channelText: formatChannelText(primaryAudioStream?.channels ?? null, primaryAudioStream?.channel_layout ?? null),
     codecText: formatCodecText(primaryAudioStream),
     containerText: formatContainerText(formatSection),
-    durationText: formatDurationText(parseNumberValue(primaryAudioStream?.duration) ?? parseNumberValue(formatSection?.duration)),
+    durationText: formatDurationText(durationSeconds),
     profileText: primaryAudioStream?.profile?.trim() || null,
     sampleRateText: formatFrequencyText(parseNumberValue(primaryAudioStream?.sample_rate)),
     segments: [],
@@ -434,12 +446,21 @@ function summarizeMetadata(rawPayload: FfprobeJsonPayload, toolStatus: ExternalT
 
   return {
     audioStreamCount: audioStreams.length,
-    chapters: (Array.isArray(rawPayload.chapters) ? rawPayload.chapters : []).map((chapter) => ({
-      endText: formatDurationText(parseNumberValue(chapter.end_time)),
-      id: typeof chapter.id === 'number' ? chapter.id : null,
-      startText: formatDurationText(parseNumberValue(chapter.start_time)),
-      title: chapter.tags?.title?.trim() || null,
-    })),
+    chapters: (Array.isArray(rawPayload.chapters) ? rawPayload.chapters : []).map((chapter) => {
+      const rawStartSeconds = parseNumberValue(chapter.start_time);
+      const rawEndSeconds = parseNumberValue(chapter.end_time);
+      const startSeconds = clampChapterTimeSeconds(rawStartSeconds, durationSeconds);
+      const endSeconds = clampChapterTimeSeconds(rawEndSeconds, durationSeconds);
+
+      return {
+        endSeconds: startSeconds !== null && endSeconds !== null && endSeconds < startSeconds ? null : endSeconds,
+        endText: formatDurationText(rawEndSeconds),
+        id: typeof chapter.id === 'number' ? chapter.id : null,
+        startSeconds,
+        startText: formatDurationText(rawStartSeconds),
+        title: chapter.tags?.title?.trim() || null,
+      };
+    }),
     chaptersCount: Array.isArray(rawPayload.chapters) ? rawPayload.chapters.length : 0,
     fileBacked: toolStatus.fileBacked,
     formatLongName: formatSection?.format_long_name ?? null,

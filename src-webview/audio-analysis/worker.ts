@@ -3,6 +3,7 @@ import {
   TILE_COLUMN_COUNT,
 } from '../sharedBuffers';
 import { computeLoudnessData, type LoudnessData } from '../audio-engine-worker/loudnessAnalysis';
+import { analyzeSelection } from '../audioscope/core/selectionAnalysis';
 import {
   buildConstantQFrequencies,
   buildCqtChromaAssignments,
@@ -595,6 +596,44 @@ self.onmessage = (event) => {
         },
       });
       return;
+    case 'requestSelectionAnalysis': {
+      const request = message.body ?? {};
+      if (request.sessionVersion !== analysisState.attachedSessionVersion) {
+        return;
+      }
+      const pcm = getSessionPcmData();
+      if (!pcm) {
+        return;
+      }
+      try {
+        const result = analyzeSelection({
+          pcm,
+          sampleRate: analysisState.sampleRate,
+          startFrame: Number(request.startFrame),
+          endFrame: Number(request.endFrame),
+          fftSize: 4096,
+          windowFunction: 'hann',
+        });
+        self.postMessage({
+          type: 'selectionAnalysisResult',
+          body: {
+            requestId: Number(request.requestId) || 0,
+            sessionVersion: analysisState.attachedSessionVersion,
+            result,
+          },
+        }, [result.frequenciesHz.buffer, result.levelsDb.buffer]);
+      } catch (error) {
+        self.postMessage({
+          type: 'selectionAnalysisError',
+          body: {
+            requestId: Number(request.requestId) || 0,
+            sessionVersion: analysisState.attachedSessionVersion,
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+      return;
+    }
     case 'disposeSession':
       enqueueRequest(async () => {
         const runtime = await getRuntime();

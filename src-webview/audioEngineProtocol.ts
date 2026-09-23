@@ -118,6 +118,7 @@ export interface SelectionUiState {
   committed: boolean;
   endFrame: number | null;
   leftPercent: number;
+  loopEnabled: boolean;
   startFrame: number | null;
   widthPercent: number;
 }
@@ -219,6 +220,18 @@ export interface PlaybackClockTickMessage {
 export type ViewportIntent =
   | {
       kind: 'clearLoop';
+    }
+  | {
+      enabled: boolean;
+      kind: 'setLoopEnabled';
+    }
+  | {
+      endFrame: number;
+      kind: 'setSelectionFrameRange';
+      startFrame: number;
+    }
+  | {
+      kind: 'zoomToSelection';
     }
   | {
       kind: 'loopHandleEnd';

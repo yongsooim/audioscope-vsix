@@ -355,6 +355,16 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           }
           return;
         }
+
+        case 'copySelectionCsv': {
+          const csv = message.body?.csv;
+          if (typeof csv === 'string'
+            && (csv.startsWith('frequency_hz,level_dbfs\n') || csv.startsWith('metric,value\n'))
+            && csv.length <= 250_000) {
+            await vscode.env.clipboard.writeText(csv);
+          }
+          return;
+        }
       }
     });
 

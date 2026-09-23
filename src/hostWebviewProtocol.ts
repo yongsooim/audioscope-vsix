@@ -97,8 +97,10 @@ export interface MediaMetadataTagPayload {
 }
 
 export interface MediaMetadataChapterPayload {
+  endSeconds: number | null;
   endText: string | null;
   id: number | null;
+  startSeconds: number | null;
   startText: string | null;
   title: string | null;
 }
@@ -225,6 +227,11 @@ export interface OpenExternalMessage {
   body: { url: string };
 }
 
+export interface CopySelectionCsvMessage {
+  type: 'copySelectionCsv';
+  body: { csv: string };
+}
+
 export interface PlaybackStateMessage {
   type: 'playbackState';
   body: { playing: boolean };
@@ -244,6 +251,7 @@ export type WebviewToHostMessage =
   | RequestDecodeFallbackMessage
   | RequestLoudnessSummaryMessage
   | OpenExternalMessage
+  | CopySelectionCsvMessage
   | PlaybackStateMessage;
 
 // --- Host → Webview messages ---

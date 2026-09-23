@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>Audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review.</strong>
+  <strong>Audio inspector for waveform, spectrogram, playback, selection analysis, loudness, and metadata review.</strong>
 </p>
 
 <p align="center">
@@ -62,10 +62,10 @@
 - Playback speed control
 - Follow playback mode
 - Playback volume slider
-- Loop selection and loop handles
+- Audio selection with editable start/end times, numeric visible range, edge handles, optional loop playback, zero-crossing snap, and zoom to selection
 - Waveform zoom controls
 - Waveform amplitude (vertical) scale controls
-- Export the loop selection (or the whole file) to `wav`, `mp3`, `m4a`, or `flac` via the embedded FFmpeg encoder
+- Export the selection (or the whole file) to `wav`, `mp3`, `m4a`, or `flac` via the embedded FFmpeg encoder
 
 ### Spectrogram and analysis
 
@@ -73,9 +73,12 @@
 - Audio analysis uses WebGPU when available, with WASM fallback for unsupported environments
 - Spectrogram, mel-spectrogram, MFCC, scalogram, and chroma analysis are computed from a mono downmix of the source audio
 - FFT size controls
+- Wideband speech/formant and harmonic spectrogram presets with displayed FFT window duration
+- On-demand selection spectrum (CSV copy), peak, RMS, DC offset, and near-full-scale sample counts
 - Overlap ratio controls
 - Window function selection
 - Frequency scale controls
+- Drag the frequency axis to zoom into a band; double-click it to reset the full range
 - Colormap distribution controls
 - Decibel range controls
 - Mel band count controls
@@ -88,7 +91,7 @@
 - Codec name and long name
 - Container / format information
 - Duration, size, bitrate, sample rate, and channel layout
-- Tags and chapter data
+- Tags and chapter data, with timeline markers and previous/next chapter navigation
 - Loudness analysis with LUFS, LRA, Peak, and True Peak
 - FFmpeg / ffprobe tool status and fallback guidance
 

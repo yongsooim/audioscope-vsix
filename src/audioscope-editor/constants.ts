@@ -41,7 +41,7 @@ export const DEFAULT_SPECTROGRAM_DEFAULTS: SpectrogramDefaultsPayload = {
   windowFunction: 'hann',
 };
 
-export const FFT_SIZE_OPTIONS = new Set([1024, 2048, 4096, 8192, 16384]);
+export const FFT_SIZE_OPTIONS = new Set([256, 512, 1024, 2048, 4096, 8192, 16384]);
 export const MEL_BAND_OPTIONS = new Set([128, 256, 512]);
 export const MFCC_COEFFICIENT_OPTIONS = new Set([13, 20, 32, 40]);
 export const OVERLAP_OPTIONS = new Set([0.5, 0.75, 0.875, 0.9375]);
