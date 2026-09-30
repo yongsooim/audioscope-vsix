@@ -48,6 +48,37 @@ function shouldUseSharedHostDecodeLoudness(resource: vscode.Uri): boolean {
   return HOST_SHARED_LOUDNESS_EXTENSIONS.has(extension);
 }
 
+// Mirrors the webview's shouldPreferFfmpegDecode list: local files with these
+// extensions are always decoded by the host before the webview fetches anything.
+const HOST_PREFERRED_DECODE_EXTENSIONS = new Set([
+  'aac',
+  'aif',
+  'aiff',
+  'flac',
+  'm4a',
+  'mp3',
+  'oga',
+  'ogg',
+  'opus',
+  'wav',
+  'wave',
+]);
+
+function shouldPrefetchHostDecode(resource: vscode.Uri): boolean {
+  // Remote webviews fetch the compressed file and decode locally instead.
+  if (vscode.env.remoteName) {
+    return false;
+  }
+
+  const extension = path.posix.extname(resource.path).replace(/^\./, '').toLowerCase();
+  if (!HOST_PREFERRED_DECODE_EXTENSIONS.has(extension)) {
+    return false;
+  }
+
+  const toolStatus = createInitialExternalToolStatus(resource);
+  return toolStatus.fileBacked && toolStatus.canDecodeFallback;
+}
+
 export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProvider<AudioscopeDocument> {
   public static readonly viewType = 'audioscope.editor';
 
@@ -108,6 +139,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
   ): Promise<void> {
     let externalToolStatusPromise: Promise<Awaited<ReturnType<typeof getExternalToolStatus>>> | null = null;
     let resourceRevision: ReturnType<typeof createResourceRevision> | null = null;
+    let prefetchedDecodeRevision: ReturnType<typeof createResourceRevision> | null = null;
     const documentRoot = document.uri.with({
       path: path.posix.dirname(document.uri.path),
       query: '',
@@ -134,6 +166,16 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     void getOrStartExternalToolStatus();
     if (shouldUseSharedHostDecodeLoudness(document.uri)) {
       void prewarmEmbeddedDirectDecodeModule().catch(() => {});
+    }
+    // Start decoding while the webview is still booting; its requestDecodeFallback
+    // then joins this in-flight pipeline through the shared cache.
+    if (shouldPrefetchHostDecode(document.uri)) {
+      prefetchedDecodeRevision = getOrStartResourceRevision();
+      void getCachedDecodeLoudnessPipeline(
+        document.uri,
+        () => decodeWithFfmpegAndLoudness(document.uri),
+        prefetchedDecodeRevision.getKey(),
+      ).catch(() => {});
     }
 
     let disposed = false;
@@ -182,7 +224,12 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
       switch (message.type) {
         case 'ready':
         case 'reload': {
-          resourceRevision = createResourceRevision(document.uri);
+          // The first ready reuses the prefetch revision so its cache key is not
+          // recomputed; reloads always re-stat the file.
+          if (message.type !== 'ready' || resourceRevision !== prefetchedDecodeRevision) {
+            resourceRevision = createResourceRevision(document.uri);
+          }
+          prefetchedDecodeRevision = null;
           await postAudioPayload();
           return;
         }

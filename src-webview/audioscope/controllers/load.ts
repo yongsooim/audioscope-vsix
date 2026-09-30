@@ -520,6 +520,13 @@ export function createAudioscopeLoadController({
       sourceBytes,
     });
 
+    // The host decodes from the file itself, so don't hold its request behind
+    // spinning up the webview decode worker (and its 2 MB WASM fetch).
+    if (decodeTarget === 'host-worker') {
+      requestHostDecodeFallbackForActiveRequest(loadToken);
+      return state.decodeFallbackPromise;
+    }
+
     void createDecodeWorker()
       .then((worker) => {
         if (loadToken !== state.loadToken) {
