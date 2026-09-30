@@ -8,7 +8,9 @@
   <strong>Inspect, play, and compare audio inside VS Code.</strong>
 </p>
 
-![audioscope waveform and spectrogram](./images/audioscope-full.png)
+<p align="center">
+  <img src="./images/audioscope-full.png" width="720" alt="audioscope sample-level waveform and spectrogram">
+</p>
 
 ## Features
 
