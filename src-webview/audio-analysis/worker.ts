@@ -1986,6 +1986,15 @@ async function pumpVisibleLoop() {
       if (isEquivalentPlan(plan, analysisState.visible.plan) && analysisState.visible.ready) {
         analysisState.visible.generation = plan.generation;
         scheduleSpectrogramDisplayPaint();
+        // The main thread drops readiness for superseded generations, so an
+        // equivalent re-request still has to be acknowledged under its own generation.
+        self.postMessage({
+          type: 'visibleReady',
+          body: {
+            ...createLayerReadyBody(analysisState.runtimeVariant, plan),
+            sessionVersion: analysisState.attachedSessionVersion,
+          },
+        });
         continue;
       }
 
