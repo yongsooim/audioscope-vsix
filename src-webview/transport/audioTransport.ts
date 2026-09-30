@@ -57,6 +57,8 @@ export interface AudioTransport {
   pause(): void;
   play(): Promise<void>;
   seek(timeSeconds: number): void;
+  // Output channel -> playback-session channel; null plays channels in order.
+  setChannelMap(map: number[] | null): void;
   setLoop(loopRangeOrNull: PlaybackLoopRange | null): void;
   setPlaybackRate(rate: number): void;
   setVolume(volume: number): void;
@@ -163,6 +165,7 @@ export function createAudioTransport(options: AudioTransportOptions = {}): Audio
 
 class AudioWorkletCopyTransport {
   private audioContext: AudioContext | null;
+  private channelMap: number[] | null = null;
   private ended: boolean;
   private lastFallbackReason: string | null;
   private loopRange: PlaybackLoopRange | null;
@@ -298,6 +301,15 @@ class AudioWorkletCopyTransport {
     this.snapshotState = null;
     this.updateControlState(nextTime);
     this.notifyStateChange();
+  }
+
+  setChannelMap(map: number[] | null): void {
+    if (areChannelMapsEqual(this.channelMap, map)) {
+      return;
+    }
+
+    this.channelMap = map ? [...map] : null;
+    this.pushPortControl();
   }
 
   getCurrentTime(): number {
@@ -465,6 +477,7 @@ class AudioWorkletCopyTransport {
         initialFrame,
         initialLoopEnabled: Boolean(this.loopRange),
         initialLoopEndFrame: controlFrames.loopEndFrame,
+        initialChannelMap: this.channelMap,
         initialLoopStartFrame: controlFrames.loopStartFrame,
         initialPlaying: false,
         initialSeekSerial: this.seekSerial,
@@ -660,6 +673,7 @@ class AudioWorkletCopyTransport {
     this.workletNode.port.postMessage({
       type: 'setControl',
       body: {
+        channelMap: this.channelMap,
         loopEnabled: Boolean(this.loopRange),
         loopEndFrame: controlFrames.loopEndFrame,
         loopStartFrame: controlFrames.loopStartFrame,
@@ -877,6 +891,11 @@ class HybridAudioTransport implements AudioTransport {
     this.notifyStateChange();
   }
 
+  setChannelMap(map: number[] | null): void {
+    this.copyTransport.setChannelMap(map);
+    this.stretchTransport.setChannelMap(map);
+  }
+
   setPlaybackRate(rate: number): void {
     const nextRate = normalizePlaybackRate(rate);
 
@@ -979,6 +998,7 @@ class HybridAudioTransport implements AudioTransport {
 
 class StretchAudioTransport implements AudioTransport {
   private audioContext: AudioContext | null;
+  private channelMap: number[] | null = null;
   private ended: boolean;
   private inputTimeSeconds: number;
   private lastFallbackReason: string | null;
@@ -1123,6 +1143,31 @@ class StretchAudioTransport implements AudioTransport {
       input: this.pausedAtSeconds,
     });
     this.notifyStateChange();
+  }
+
+  // The stretch node takes its buffers once, so a new map rebuilds the node and
+  // resumes from the current position (a short gap, unlike the copy transport).
+  setChannelMap(map: number[] | null): void {
+    if (areChannelMapsEqual(this.channelMap, map)) {
+      return;
+    }
+
+    this.channelMap = map ? [...map] : null;
+    if (!this.stretchNode) {
+      return;
+    }
+
+    const wasPlaying = this.playing;
+    const currentTime = this.getCurrentTime();
+    this.disposeStretchNode();
+    this.playing = false;
+    this.pausedAtSeconds = currentTime;
+    this.inputTimeSeconds = currentTime;
+    if (wasPlaying) {
+      void this.play().catch(() => {
+        this.notifyStateChange();
+      });
+    }
   }
 
   setPlaybackRate(rate: number): void {
@@ -1286,7 +1331,11 @@ class StretchAudioTransport implements AudioTransport {
       this.markUnavailable(new Error('Signalsmith Stretch processor failed.'));
     };
 
-    const channelViews = this.playbackSession?.channelBuffers.map((buffer) => new Float32Array(buffer)) ?? [];
+    const channelViews = selectMappedChannelBuffers(
+      this.playbackSession?.channelBuffers ?? [],
+      this.channelMap,
+      outputChannelCount,
+    ).map((buffer) => new Float32Array(buffer));
     await node.addBuffers(channelViews);
     await node.setUpdateInterval(STRETCH_TIME_UPDATE_INTERVAL_SECONDS, (seconds) => {
       this.handleStretchTimeUpdate(seconds);
@@ -1639,6 +1688,29 @@ function formatTransportFailureReason(reason: unknown): string {
   }
 
   return 'AudioWorklet playback is unavailable.';
+}
+
+function areChannelMapsEqual(left: number[] | null, right: number[] | null): boolean {
+  if (!left || !right) {
+    return left === right;
+  }
+
+  return left.length === right.length && left.every((index, position) => index === right[position]);
+}
+
+function selectMappedChannelBuffers(
+  buffers: ArrayBuffer[],
+  map: number[] | null,
+  outputChannelCount: number,
+): ArrayBuffer[] {
+  if (!map || map.length === 0) {
+    return buffers;
+  }
+
+  return Array.from(
+    { length: outputChannelCount },
+    (_, channelIndex) => buffers[map[Math.min(channelIndex, map.length - 1)]],
+  ).filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer);
 }
 
 function clamp(value: number, min: number, max: number): number {

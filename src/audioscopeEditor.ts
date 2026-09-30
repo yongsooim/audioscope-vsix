@@ -22,7 +22,7 @@ import {
   getCachedLoudnessSummary,
   getCachedMediaMetadata,
 } from './mediaHostCache';
-import { DEFAULT_SPECTROGRAM_DEFAULTS } from './audioscope-editor/constants';
+import { DEFAULT_SPECTROGRAM_DEFAULTS, KNOWN_AUDIO_EXTENSIONS } from './audioscope-editor/constants';
 import { AudioscopeDocument } from './audioscope-editor/document';
 import { evaluateAudioscopeTarget, getActiveResource } from './audioscope-editor/editorTarget';
 import { normalizeSpectrogramDefaults } from './audioscope-editor/spectrogramDefaults';
@@ -81,6 +81,7 @@ function shouldPrefetchHostDecode(resource: vscode.Uri): boolean {
 
 export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProvider<AudioscopeDocument> {
   public static readonly viewType = 'audioscope.editor';
+  public static readonly compareViewType = 'audioscope.compare';
 
   public static register(context: vscode.ExtensionContext): vscode.Disposable {
     const provider = new AudioscopeEditorProvider(context);
@@ -117,12 +118,100 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
 
         await vscode.commands.executeCommand('vscode.openWith', target, AudioscopeEditorProvider.viewType);
       }),
+      vscode.commands.registerCommand('audioscope.selectForCompare', (resource?: vscode.Uri) =>
+        provider.selectForCompare(resource)),
+      vscode.commands.registerCommand('audioscope.compareWithSelected', (resource?: vscode.Uri) =>
+        provider.compareWithSelected(resource)),
+      vscode.commands.registerCommand('audioscope.compareAudioFiles', (resource?: vscode.Uri, resources?: vscode.Uri[]) =>
+        provider.compareAudioFiles(resource, resources)),
     );
   }
+
+  private selectedForCompare: vscode.Uri | null = null;
 
   private constructor(
     private readonly context: vscode.ExtensionContext,
   ) {}
+
+  private async selectForCompare(resource?: vscode.Uri): Promise<void> {
+    const target = resource ?? getActiveResource();
+    if (!target) {
+      void vscode.window.showInformationMessage('Select or open an audio file first.');
+      return;
+    }
+
+    this.selectedForCompare = target;
+    await vscode.commands.executeCommand('setContext', 'audioscope.compareSelected', true);
+  }
+
+  private async compareWithSelected(resource?: vscode.Uri): Promise<void> {
+    const target = resource ?? getActiveResource();
+    if (!this.selectedForCompare) {
+      void vscode.window.showInformationMessage('Run "Select for Audio Compare" on the reference file first.');
+      return;
+    }
+    if (!target) {
+      void vscode.window.showInformationMessage('Select or open the audio file to compare against.');
+      return;
+    }
+
+    await this.openComparePanel(this.selectedForCompare, target);
+  }
+
+  // Explorer multi-select passes both files; otherwise the active file (if any)
+  // is the reference and a picker supplies the rest.
+  private async compareAudioFiles(resource?: vscode.Uri, resources?: vscode.Uri[]): Promise<void> {
+    let pair = Array.isArray(resources) && resources.length === 2 ? resources : [];
+
+    if (pair.length !== 2) {
+      const reference = resource ?? getActiveResource();
+      const picked = await vscode.window.showOpenDialog({
+        canSelectMany: !reference,
+        defaultUri: reference?.with({ path: path.posix.dirname(reference.path) }),
+        filters: { Audio: [...KNOWN_AUDIO_EXTENSIONS] },
+        openLabel: reference ? 'Compare with reference' : 'Compare',
+        title: reference
+          ? `Compare ${path.posix.basename(reference.path)} with…`
+          : 'Pick two audio files to compare',
+      });
+      if (!picked || picked.length === 0) {
+        return;
+      }
+
+      pair = reference ? [reference, picked[0]] : picked.slice(0, 2);
+      if (pair.length !== 2) {
+        void vscode.window.showInformationMessage('Pick two audio files to compare.');
+        return;
+      }
+    }
+
+    await this.openComparePanel(pair[0], pair[1]);
+  }
+
+  private async openComparePanel(reference: vscode.Uri, candidate: vscode.Uri): Promise<void> {
+    if (reference.toString() === candidate.toString()) {
+      void vscode.window.showInformationMessage('Pick two different audio files to compare.');
+      return;
+    }
+
+    for (const target of [reference, candidate]) {
+      const decision = await evaluateAudioscopeTarget(target);
+      if (decision.kind !== 'allow') {
+        void vscode.window.showWarningMessage(
+          `audioscope cannot compare ${path.posix.basename(target.path)}: ${decision.message}`,
+        );
+        return;
+      }
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      AudioscopeEditorProvider.compareViewType,
+      `${path.posix.basename(reference.path)} ↔ ${path.posix.basename(candidate.path)}`,
+      vscode.ViewColumn.Active,
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+    this.attachAudioscopeWebview(reference, panel, candidate);
+  }
 
   public async openCustomDocument(
     uri: vscode.Uri,
@@ -137,44 +226,71 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken,
   ): Promise<void> {
+    this.attachAudioscopeWebview(document.uri, webviewPanel, null);
+  }
+
+  // Shared by the custom editor (one file) and the compare panel (A = documentUri,
+  // B = compareUri). Every message about "the file" refers to A; B has its own
+  // compare* messages so the single-file flows stay untouched.
+  private attachAudioscopeWebview(
+    documentUri: vscode.Uri,
+    webviewPanel: vscode.WebviewPanel,
+    compareUri: vscode.Uri | null,
+  ): void {
     let externalToolStatusPromise: Promise<Awaited<ReturnType<typeof getExternalToolStatus>>> | null = null;
     let resourceRevision: ReturnType<typeof createResourceRevision> | null = null;
     let prefetchedDecodeRevision: ReturnType<typeof createResourceRevision> | null = null;
-    const documentRoot = document.uri.with({
-      path: path.posix.dirname(document.uri.path),
+    let compareRevision: ReturnType<typeof createResourceRevision> | null = null;
+    const getResourceRoot = (uri: vscode.Uri): vscode.Uri => uri.with({
+      path: path.posix.dirname(uri.path),
       query: '',
       fragment: '',
     });
 
     webviewPanel.webview.options = {
       enableScripts: true,
-      localResourceRoots: [this.context.extensionUri, documentRoot],
+      localResourceRoots: [
+        this.context.extensionUri,
+        getResourceRoot(documentUri),
+        ...(compareUri ? [getResourceRoot(compareUri)] : []),
+      ],
     };
     webviewPanel.webview.html = getAudioscopeWebviewHtml(this.context, webviewPanel.webview);
 
     const getOrStartExternalToolStatus = (): Promise<Awaited<ReturnType<typeof getExternalToolStatus>>> => {
       if (!externalToolStatusPromise) {
-        externalToolStatusPromise = getExternalToolStatus(document.uri);
+        externalToolStatusPromise = getExternalToolStatus(documentUri);
       }
 
       return externalToolStatusPromise;
     };
     const getOrStartResourceRevision = (): ReturnType<typeof createResourceRevision> => {
-      resourceRevision ??= createResourceRevision(document.uri);
+      resourceRevision ??= createResourceRevision(documentUri);
       return resourceRevision;
     };
+    const getOrStartCompareRevision = (uri: vscode.Uri): ReturnType<typeof createResourceRevision> => {
+      compareRevision ??= createResourceRevision(uri);
+      return compareRevision;
+    };
     void getOrStartExternalToolStatus();
-    if (shouldUseSharedHostDecodeLoudness(document.uri)) {
+    if (shouldUseSharedHostDecodeLoudness(documentUri)) {
       void prewarmEmbeddedDirectDecodeModule().catch(() => {});
     }
     // Start decoding while the webview is still booting; its requestDecodeFallback
     // then joins this in-flight pipeline through the shared cache.
-    if (shouldPrefetchHostDecode(document.uri)) {
+    if (shouldPrefetchHostDecode(documentUri)) {
       prefetchedDecodeRevision = getOrStartResourceRevision();
       void getCachedDecodeLoudnessPipeline(
-        document.uri,
-        () => decodeWithFfmpegAndLoudness(document.uri),
+        documentUri,
+        () => decodeWithFfmpegAndLoudness(documentUri),
         prefetchedDecodeRevision.getKey(),
+      ).catch(() => {});
+    }
+    if (compareUri && shouldPrefetchHostDecode(compareUri)) {
+      void getCachedDecodeLoudnessPipeline(
+        compareUri,
+        () => decodeWithFfmpegAndLoudness(compareUri),
+        getOrStartCompareRevision(compareUri).getKey(),
       ).catch(() => {});
     }
 
@@ -183,7 +299,9 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     // the tab title text. It goes AFTER the name so the (proportional UI-font)
     // width difference between ⏵/⏸ only moves the trailing icon, never the name.
     // Shows ⏸ until the webview reports playback.
-    const baseTitle = path.posix.basename(document.uri.path);
+    const baseTitle = compareUri
+      ? `${path.posix.basename(documentUri.path)} ↔ ${path.posix.basename(compareUri.path)}`
+      : path.posix.basename(documentUri.path);
     const PLAY_ICON = '⏵︎';
     const PAUSE_ICON = '⏸︎';
     webviewPanel.title = `${baseTitle} ${PAUSE_ICON}`;
@@ -197,9 +315,11 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
 
     const postAudioPayload = async (): Promise<void> => {
       const payload = await this.buildPayload(
-        document,
+        documentUri,
         webviewPanel.webview,
         getOrStartResourceRevision().getFileSize(),
+        compareUri,
+        compareUri ? getOrStartCompareRevision(compareUri).getFileSize() : null,
       );
       await postIfAlive({ type: 'loadAudio', body: payload });
 
@@ -227,7 +347,8 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           // The first ready reuses the prefetch revision so its cache key is not
           // recomputed; reloads always re-stat the file.
           if (message.type !== 'ready' || resourceRevision !== prefetchedDecodeRevision) {
-            resourceRevision = createResourceRevision(document.uri);
+            resourceRevision = createResourceRevision(documentUri);
+            compareRevision = null;
           }
           prefetchedDecodeRevision = null;
           await postAudioPayload();
@@ -290,7 +411,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         }
 
         case 'exportAudio': {
-          await this.exportAudio(document, message.body);
+          await this.exportAudio(documentUri, message.body);
           return;
         }
 
@@ -298,8 +419,8 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           const loadToken = Number(message.body?.loadToken) || 0;
           try {
             const metadata = await getCachedMediaMetadata(
-              document.uri,
-              () => getMediaMetadata(document.uri),
+              documentUri,
+              () => getMediaMetadata(documentUri),
               getOrStartResourceRevision().getKey(),
             );
             await postIfAlive({
@@ -307,7 +428,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
               body: { loadToken, metadata },
             });
           } catch (error) {
-            const toolStatus = await getExternalToolStatus(document.uri);
+            const toolStatus = await getExternalToolStatus(documentUri);
             await postIfAlive({
               type: 'mediaMetadataError',
               body: {
@@ -324,8 +445,8 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           const loadToken = Number(message.body?.loadToken) || 0;
           try {
             const pipeline = await getCachedDecodeLoudnessPipeline(
-              document.uri,
-              () => decodeWithFfmpegAndLoudness(document.uri),
+              documentUri,
+              () => decodeWithFfmpegAndLoudness(documentUri),
               getOrStartResourceRevision().getKey(),
             );
             void pipeline.loudnessPromise
@@ -345,7 +466,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
               body: { ...pipeline.decode, loadToken },
             });
           } catch (error) {
-            const toolStatus = await getExternalToolStatus(document.uri);
+            const toolStatus = await getExternalToolStatus(documentUri);
             await postIfAlive({
               type: 'decodeFallbackError',
               body: {
@@ -362,8 +483,8 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           const loadToken = Number(message.body?.loadToken) || 0;
           try {
             const summary = await getCachedLoudnessSummary(
-              document.uri,
-              () => getLoudnessSummary(document.uri),
+              documentUri,
+              () => getLoudnessSummary(documentUri),
               getOrStartResourceRevision().getKey(),
             );
             await postIfAlive({
@@ -373,6 +494,44 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           } catch (error) {
             await postIfAlive({
               type: 'loudnessSummaryError',
+              body: {
+                loadToken,
+                message: error instanceof Error ? error.message : String(error),
+              },
+            });
+          }
+          return;
+        }
+
+        case 'requestCompareSource': {
+          const loadToken = Number(message.body?.loadToken) || 0;
+          if (!compareUri) {
+            return;
+          }
+          const revision = getOrStartCompareRevision(compareUri);
+          void getCachedMediaMetadata(compareUri, () => getMediaMetadata(compareUri), revision.getKey())
+            .then((metadata) => postIfAlive({ type: 'compareMetadataReady', body: { loadToken, metadata } }))
+            .catch(() => {});
+          try {
+            const toolStatus = createInitialExternalToolStatus(compareUri);
+            if (!toolStatus.fileBacked || !toolStatus.canDecodeFallback) {
+              throw new Error('Comparison needs both files on a filesystem the extension host can read.');
+            }
+            const pipeline = await getCachedDecodeLoudnessPipeline(
+              compareUri,
+              () => decodeWithFfmpegAndLoudness(compareUri),
+              revision.getKey(),
+            );
+            void pipeline.loudnessPromise
+              .then((summary) => postIfAlive({ type: 'compareLoudnessReady', body: { ...summary, loadToken } }))
+              .catch(() => {});
+            await postIfAlive({
+              type: 'compareSourceReady',
+              body: { ...pipeline.decode, loadToken },
+            });
+          } catch (error) {
+            await postIfAlive({
+              type: 'compareSourceError',
               body: {
                 loadToken,
                 message: error instanceof Error ? error.message : String(error),
@@ -421,7 +580,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     });
   }
 
-  private async exportAudio(document: AudioscopeDocument, body: ExportAudioMessage['body']): Promise<void> {
+  private async exportAudio(documentUri: vscode.Uri, body: ExportAudioMessage['body']): Promise<void> {
     const format = body?.format;
     if (format !== 'wav' && format !== 'mp3' && format !== 'm4a' && format !== 'flac') {
       return;
@@ -433,10 +592,10 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
       return;
     }
 
-    const sourceBaseName = path.posix.basename(document.uri.path).replace(/\.[^.]+$/u, '') || 'audio';
+    const sourceBaseName = path.posix.basename(documentUri.path).replace(/\.[^.]+$/u, '') || 'audio';
     const defaultName = `${sourceBaseName}_${startSeconds.toFixed(2)}s-${endSeconds.toFixed(2)}s.${format}`;
-    const defaultUri = document.uri.scheme === 'file'
-      ? vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), defaultName))
+    const defaultUri = documentUri.scheme === 'file'
+      ? vscode.Uri.file(path.join(path.dirname(documentUri.fsPath), defaultName))
       : vscode.Uri.joinPath(vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir()), defaultName);
 
     const targetUri = await vscode.window.showSaveDialog({
@@ -457,7 +616,7 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           location: vscode.ProgressLocation.Notification,
           title: `audioscope: exporting ${path.basename(targetUri.fsPath)}…`,
         },
-        () => exportAudioSegment(document.uri, targetUri.fsPath, format, startSeconds, endSeconds),
+        () => exportAudioSegment(documentUri, targetUri.fsPath, format, startSeconds, endSeconds),
       );
       void vscode.window.showInformationMessage(`audioscope: exported ${path.basename(targetUri.fsPath)}`);
     } catch (error) {
@@ -468,59 +627,69 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
   }
 
   private async buildPayload(
-    document: AudioscopeDocument,
+    documentUri: vscode.Uri,
     webview: vscode.Webview,
     fileSizePromise: Promise<number | null>,
+    compareUri: vscode.Uri | null = null,
+    compareFileSizePromise: Promise<number | null> | null = null,
   ): Promise<AudioscopePayload> {
-    const fileSize = await fileSizePromise;
+    const [fileSize, compareFileSize] = await Promise.all([fileSizePromise, compareFileSizePromise]);
 
     const spectrogramQuality = vscode.workspace
-      .getConfiguration('audioscope', document.uri)
+      .getConfiguration('audioscope', documentUri)
       .get<'balanced' | 'high' | 'max'>('spectrogramQuality', 'high');
     const spectrogramDefaults = normalizeSpectrogramDefaults(
       vscode.workspace.getConfiguration('audioscope').get('spectrogramDefaults', DEFAULT_SPECTROGRAM_DEFAULTS),
     );
     const enableWebGpuRendering = vscode.workspace
-      .getConfiguration('audioscope', document.uri)
+      .getConfiguration('audioscope', documentUri)
       .get<boolean>('experimental.enableWebGpuRendering', true);
     const splitChannels = vscode.workspace
-      .getConfiguration('audioscope', document.uri)
+      .getConfiguration('audioscope', documentUri)
       .get<boolean>('experimental.splitChannels', false);
     const viewportSplitRatioSetting = Number(
-      vscode.workspace.getConfiguration('audioscope', document.uri).get<number>('viewportSplitRatio', 0.5),
+      vscode.workspace.getConfiguration('audioscope', documentUri).get<number>('viewportSplitRatio', 0.5),
     );
     const viewportSplitRatio = Number.isFinite(viewportSplitRatioSetting)
       ? Math.min(1, Math.max(0, viewportSplitRatioSetting))
       : 0.5;
     const waveformAmplitudeMaxSetting = Number(
-      vscode.workspace.getConfiguration('audioscope', document.uri).get<number>('waveformAmplitudeMax', 1),
+      vscode.workspace.getConfiguration('audioscope', documentUri).get<number>('waveformAmplitudeMax', 1),
     );
     const waveformAmplitudeMax = Number.isFinite(waveformAmplitudeMaxSetting)
       ? Math.min(1, Math.max(0.01, waveformAmplitudeMaxSetting))
       : 1;
     const playbackVolumeSetting = Number(
-      vscode.workspace.getConfiguration('audioscope', document.uri).get<number>('playbackVolume', 1),
+      vscode.workspace.getConfiguration('audioscope', documentUri).get<number>('playbackVolume', 1),
     );
     const playbackVolume = normalizePlaybackVolume(playbackVolumeSetting);
-    const externalTools = createInitialExternalToolStatus(document.uri);
+    const externalTools = createInitialExternalToolStatus(documentUri);
 
     return {
       audioBytes: null,
-      documentUri: document.uri.toString(),
+      compare: compareUri
+        ? {
+          documentUri: compareUri.toString(),
+          fileExtension: path.posix.extname(compareUri.path).replace(/^\./, '').toLowerCase(),
+          fileName: path.posix.basename(compareUri.path),
+          fileSize: compareFileSize ?? null,
+        }
+        : null,
+      documentUri: documentUri.toString(),
       enableWebGpuRendering,
       splitChannels,
       viewportSplitRatio,
       waveformAmplitudeMax,
       playbackVolume,
       externalTools,
-      fileExtension: path.posix.extname(document.uri.path).replace(/^\./, '').toLowerCase(),
+      fileExtension: path.posix.extname(documentUri.path).replace(/^\./, '').toLowerCase(),
       fileBacked: externalTools.fileBacked,
-      fileName: path.posix.basename(document.uri.path),
+      fileName: path.posix.basename(documentUri.path),
       fileSize,
       isRemote: Boolean(vscode.env.remoteName),
       spectrogramDefaults,
       spectrogramQuality,
-      sourceUri: webview.asWebviewUri(document.uri).toString(),
+      sourceUri: webview.asWebviewUri(documentUri).toString(),
     };
   }
 }

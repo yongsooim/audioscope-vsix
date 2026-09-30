@@ -84,11 +84,16 @@ import {
   snapPlaybackVolume,
 } from '../src/playbackVolume';
 import type {
+  DecodeFallbackPayload,
   ExportAudioFormat,
   HostToWebviewMessage,
+  LoudnessSummaryPayload,
   MediaMetadataChapterPayload,
+  MediaMetadataPayload,
   WebviewToHostMessage,
 } from '../src/hostWebviewProtocol';
+import type { CompareStats } from './audioscope/core/compareMath';
+import type { CompareComputedBody } from './compareWorker';
 
 const rawVscode = acquireVsCodeApi();
 const vscode = {
@@ -103,6 +108,7 @@ const waveformWorkerScriptUri = document.body.dataset.waveformWorkerSrc || '';
 const decodeBrowserModuleWasmUri = document.body.dataset.decodeModuleWasmSrc;
 const decodeWorkerScriptUri = document.body.dataset.decodeWorkerSrc;
 const pcmDownmixWorkerScriptUri = document.body.dataset.pcmDownmixWorkerSrc;
+const compareWorkerScriptUri = document.body.dataset.compareWorkerSrc || '';
 const audioTransportProcessorScriptUri = document.body.dataset.audioTransportProcessorSrc;
 const stretchProcessorScriptUri = document.body.dataset.stretchProcessorSrc;
 const wasmCoreSimdScriptUri = document.body.dataset.wasmCoreSimdSrc || '';
@@ -435,6 +441,7 @@ type HoverRequestPoint = {
 type ChannelSampleValueResult = {
   frequencyEndHz: number | null;
   frequencyStartHz: number | null;
+  levelDiff?: boolean;
   timeSeconds: number;
   valueDb: number | null;
   loudnessMomentary?: number | null;
@@ -583,8 +590,50 @@ type WaveformWorkerToMainMessage =
       type: 'error';
     };
 
+type ComparePlaybackSource = 'a' | 'b' | 'diff';
+type CompareDiffMode = 'level' | 'residual';
+
+interface CompareDecodedSource {
+  channelBuffers: ArrayBuffer[];
+  sampleRate: number;
+}
+
+type CompareResultSummary = Omit<
+  CompareComputedBody,
+  'aChannels' | 'bChannels' | 'diffChannels' | 'monoA' | 'monoB' | 'monoDiff' | 'requestId'
+>;
+
+// A compare panel shows A, B (aligned onto A's timeline and rate) and A - B as
+// three lanes; the playback session carries all three channel groups so the
+// transport can switch between them without reloading.
+interface CompareState {
+  busy: boolean;
+  diffMode: CompareDiffMode;
+  error: string | null;
+  fileNameA: string;
+  fileNameB: string;
+  gainMatch: boolean;
+  groups: Record<ComparePlaybackSource, number[]> | null;
+  // What the A-B spectrogram lane was last built with; rebuilt when it drifts.
+  levelLaneBuilt: boolean;
+  levelRangeDb: number;
+  loadToken: number;
+  loudnessA: LoudnessSummaryPayload | null;
+  loudnessB: LoudnessSummaryPayload | null;
+  metadataB: MediaMetadataPayload | null;
+  offsetOverride: number | null;
+  outputChannelCount: number;
+  playbackSource: ComparePlaybackSource;
+  recomputePending: boolean;
+  rejectSource: (error: Error) => void;
+  resolveSource: (source: CompareDecodedSource) => void;
+  result: CompareResultSummary | null;
+  source: Promise<CompareDecodedSource>;
+}
+
 const state = {
   activeFile: null,
+  compare: null as CompareState | null,
   splitChannels: false,
   analysis: null as SpectrogramAnalysisState | null,
   analysisSourceKind: 'native',
@@ -1403,7 +1452,17 @@ function resetSpectrogramCanvasElement(): HTMLCanvasElement {
   return canvas;
 }
 
-function channelLaneLabel(channelIndex: number, channelCount: number): string {
+// The waveform A-B lane always shows the residual signal; only the spectrogram
+// lane can switch to the level difference.
+function channelLaneLabel(
+  channelIndex: number,
+  channelCount: number,
+  surface: 'spectrogram' | 'waveform' = 'spectrogram',
+): string {
+  if (isCompareActive()) {
+    const diffLabel = surface === 'spectrogram' && isCompareLevelDiffLane(2) ? 'dB A−B' : 'A−B';
+    return ['A', 'B', diffLabel][channelIndex] ?? `Ch ${channelIndex + 1}`;
+  }
   if (channelCount === 2) {
     return channelIndex === 0 ? 'L' : 'R';
   }
@@ -1474,6 +1533,7 @@ async function createSpectrogramSatellite(
   sampleRate: number,
   duration: number,
   quality: 'balanced' | 'high' | 'max',
+  referencePcm: Float32Array | null = null,
 ): Promise<void> {
   if (!analysisWorkerScriptUri || loadToken !== state.loadToken) {
     return;
@@ -1542,6 +1602,16 @@ async function createSpectrogramSatellite(
       sessionVersion: state.spectrogramSessionRevision,
     },
   }, [channelPcm.buffer]);
+  if (referencePcm) {
+    worker.postMessage({
+      type: 'attachReferenceSession',
+      body: { samplesBuffer: referencePcm.buffer, sessionVersion: state.spectrogramSessionRevision },
+    }, [referencePcm.buffer]);
+    worker.postMessage({
+      type: 'setLevelDiffMode',
+      body: { enabled: true, rangeDb: state.compare?.levelRangeDb ?? 12 },
+    });
+  }
   // Replay the current overview + visible render so this lane paints the view
   // that the primary already rendered (instead of waiting for the next render).
   if (state.lastSpectrogramOverviewMessage) {
@@ -1552,6 +1622,7 @@ async function createSpectrogramSatellite(
   }
   // Only join the broadcast list after init+attach are queued, so the next
   // render broadcast can't reach the worker before its session is set up.
+  analysisLaneIndexByWorker.set(worker, channelIndex);
   state.analysisLaneWorkers.push(worker);
 }
 
@@ -1576,9 +1647,27 @@ async function setupSpectrogramSatellites(
     if (!(buffer instanceof ArrayBuffer)) {
       continue;
     }
-    const channelPcm = new Float32Array(buffer.slice(0));
+    // A compare level-difference lane renders dB(A) - dB(B): its session is A
+    // and B rides along as the reference.
+    const levelDiffLane = isCompareLevelDiffLane(channelIndex)
+      && session.channelBuffers[0] instanceof ArrayBuffer
+      && session.channelBuffers[1] instanceof ArrayBuffer;
+    const channelPcm = new Float32Array((levelDiffLane ? session.channelBuffers[0] : buffer).slice(0));
+    const referencePcm = levelDiffLane ? new Float32Array(session.channelBuffers[1].slice(0)) : null;
+    if (channelIndex === 2 && state.compare) {
+      state.compare.levelLaneBuilt = levelDiffLane;
+    }
     addSpectrogramLaneLabel(channelIndex, laneCount);
-    tasks.push(createSpectrogramSatellite(loadToken, channelIndex, laneCount, channelPcm, sampleRate, duration, quality));
+    tasks.push(createSpectrogramSatellite(
+      loadToken,
+      channelIndex,
+      laneCount,
+      channelPcm,
+      sampleRate,
+      duration,
+      quality,
+      referencePcm,
+    ));
   }
   await Promise.all(tasks);
 
@@ -1635,7 +1724,7 @@ function layoutWaveformLanePrimary(laneCount: number): void {
 function addWaveformLaneLabel(channelIndex: number, channelCount: number): void {
   const label = document.createElement('div');
   label.className = 'waveform-lane-label';
-  label.textContent = channelLaneLabel(channelIndex, channelCount);
+  label.textContent = channelLaneLabel(channelIndex, channelCount, 'waveform');
   label.style.top = `${(channelIndex / channelCount) * 100}%`;
   elements.waveformCanvasHost.appendChild(label);
   state.waveformLaneLabels.push(label);
@@ -1989,6 +2078,514 @@ function applyChannelModeChange(): void {
   });
 
   void setupWaveformChannels(loadToken, prepared.waveformSamples, state.playbackSession);
+}
+
+// --- Compare (A/B) -------------------------------------------------------------
+
+let compareWorker: Worker | null = null;
+let compareWorkerPromise: Promise<Worker> | null = null;
+let nextCompareRequestId = 1;
+const pendingCompareRequests = new Map<number, {
+  reject: (error: Error) => void;
+  resolve: (result: CompareComputedBody) => void;
+}>();
+
+function isCompareActive(): boolean {
+  return Boolean(state.compare?.result);
+}
+
+// Level difference only exists for the STFT band analyses; other analysis types
+// fall back to the residual signal so the lane never shows A under an A-B label.
+function isCompareLevelDiffLane(laneIndex: number): boolean {
+  const analysisType = normalizeSpectrogramAnalysisType(state.spectrogramConfig.analysisType);
+  return isCompareActive()
+    && state.compare?.diffMode === 'level'
+    && laneIndex === 2
+    && (analysisType === 'spectrogram' || analysisType === 'mel');
+}
+
+function startCompareSession(payload: { compare?: { fileName?: string } | null; fileName?: string } | null): void {
+  const compare = payload?.compare;
+  if (!compare) {
+    state.compare = null;
+    renderCompareBar();
+    return;
+  }
+
+  let resolveSource: (source: CompareDecodedSource) => void = () => {};
+  let rejectSource: (error: Error) => void = () => {};
+  const source = new Promise<CompareDecodedSource>((resolve, reject) => {
+    resolveSource = resolve;
+    rejectSource = reject;
+  });
+  source.catch(() => {});
+
+  state.compare = {
+    busy: false,
+    diffMode: 'residual',
+    error: null,
+    fileNameA: payload?.fileName ?? 'A',
+    fileNameB: compare.fileName ?? 'B',
+    gainMatch: false,
+    groups: null,
+    levelLaneBuilt: false,
+    levelRangeDb: Number(elements.compareDiffRange.value) || 12,
+    loadToken: state.loadToken,
+    loudnessA: null,
+    loudnessB: null,
+    metadataB: null,
+    offsetOverride: null,
+    outputChannelCount: 1,
+    playbackSource: 'a',
+    recomputePending: false,
+    rejectSource,
+    resolveSource,
+    result: null,
+    source,
+  };
+  vscode.postMessage({ type: 'requestCompareSource', body: { loadToken: state.loadToken } });
+  renderCompareBar();
+}
+
+function getCompareForLoadToken(loadToken: unknown): CompareState | null {
+  const compare = state.compare;
+  return compare && Number(loadToken) === compare.loadToken && compare.loadToken === state.loadToken
+    ? compare
+    : null;
+}
+
+async function decodeCompareSource(body: DecodeFallbackPayload): Promise<CompareDecodedSource> {
+  if (body.kind === 'pcm') {
+    const channelBuffers = body.channelBuffers.filter((buffer) => buffer instanceof ArrayBuffer);
+    if (channelBuffers.length === 0 || !(body.sampleRate > 0)) {
+      throw new Error('ffmpeg did not return decoded PCM for B.');
+    }
+    return { channelBuffers, sampleRate: body.sampleRate };
+  }
+
+  const audioBuffer = await decodeAudioData(body.audioBuffer);
+  return {
+    channelBuffers: Array.from(
+      { length: audioBuffer.numberOfChannels },
+      (_, channelIndex) => audioBuffer.getChannelData(channelIndex).slice().buffer,
+    ),
+    sampleRate: audioBuffer.sampleRate,
+  };
+}
+
+function ensureCompareWorker(): Promise<Worker> {
+  if (compareWorker) {
+    return Promise.resolve(compareWorker);
+  }
+  compareWorkerPromise ??= (async () => {
+    const sourceText = await fetchWorkerSourceText(compareWorkerScriptUri);
+    const worker = new Worker(URL.createObjectURL(new Blob([sourceText], { type: 'text/javascript' })), { type: 'module' });
+    worker.addEventListener('message', (event: MessageEvent) => {
+      const body = event.data?.body;
+      const pending = pendingCompareRequests.get(Number(body?.requestId) || 0);
+      if (!pending) {
+        return;
+      }
+      pendingCompareRequests.delete(Number(body.requestId));
+      if (event.data?.type === 'computed') {
+        pending.resolve(body as CompareComputedBody);
+      } else {
+        pending.reject(new Error(body?.message || 'Compare worker failed.'));
+      }
+    });
+    worker.addEventListener('error', (event) => {
+      for (const pending of pendingCompareRequests.values()) {
+        pending.reject(new Error(event.message || 'Compare worker failed.'));
+      }
+      pendingCompareRequests.clear();
+    });
+    compareWorker = worker;
+    return worker;
+  })().catch((error) => {
+    compareWorkerPromise = null;
+    throw error;
+  });
+  return compareWorkerPromise;
+}
+
+async function runCompareCompute(body: {
+  a?: CompareDecodedSource;
+  b?: CompareDecodedSource;
+  gainMatch: boolean;
+  length?: number;
+  offsetSamples: number | null;
+}): Promise<CompareComputedBody> {
+  const worker = await ensureCompareWorker();
+  const requestId = nextCompareRequestId++;
+  const transfer = [...(body.a?.channelBuffers ?? []), ...(body.b?.channelBuffers ?? [])];
+  return new Promise<CompareComputedBody>((resolve, reject) => {
+    pendingCompareRequests.set(requestId, { reject, resolve });
+    worker.postMessage({ type: 'compute', body: { ...body, requestId } }, transfer);
+  });
+}
+
+function buildCompareSessions(compare: CompareState, result: CompareComputedBody): {
+  analysisSession: PlaybackSession;
+  transportSession: PlaybackSession;
+} {
+  const { aChannels, bChannels, diffChannels, monoA, monoB, monoDiff, requestId: _requestId, ...summary } = result;
+  const aEnd = aChannels.length;
+  const bEnd = aEnd + bChannels.length;
+  const range = (start: number, end: number) => Array.from({ length: end - start }, (_, index) => start + index);
+  compare.groups = {
+    a: range(0, aEnd),
+    b: range(aEnd, bEnd),
+    diff: range(bEnd, bEnd + diffChannels.length),
+  };
+  compare.outputChannelCount = Math.max(1, aChannels.length, bChannels.length);
+  compare.result = summary;
+
+  const durationSeconds = result.length / result.sampleRate;
+  return {
+    analysisSession: {
+      channelBuffers: [monoA, monoB, monoDiff],
+      durationSeconds,
+      monoBuffer: monoA,
+      numberOfChannels: 3,
+      sourceLength: result.length,
+      sourceSampleRate: result.sampleRate,
+    },
+    transportSession: {
+      channelBuffers: [...aChannels, ...bChannels, ...diffChannels],
+      durationSeconds,
+      numberOfChannels: compare.outputChannelCount,
+      sourceLength: result.length,
+      sourceSampleRate: result.sampleRate,
+    },
+  };
+}
+
+function getCompareChannelMap(): number[] | null {
+  const compare = state.compare;
+  const group = compare?.groups?.[compare.playbackSource];
+  if (!compare || !group || group.length === 0) {
+    return null;
+  }
+  return Array.from(
+    { length: compare.outputChannelCount },
+    (_, channelIndex) => group[Math.min(channelIndex, group.length - 1)],
+  );
+}
+
+// Decodes B, aligns it onto A and returns the three-lane analysis session plus
+// the A|B|A-B transport session. Null means the load was superseded or failed
+// (the failure is already reported).
+async function prepareComparePlayback(loadToken: number, aSession: PlaybackSession): Promise<{
+  analysisSession: PlaybackSession;
+  transportSession: PlaybackSession;
+} | null> {
+  const compare = getCompareForLoadToken(loadToken);
+  if (!compare) {
+    return null;
+  }
+
+  setAnalysisStatus(`Decoding ${compare.fileNameB}…`);
+  let source: CompareDecodedSource;
+  try {
+    source = await compare.source;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    compare.error = message;
+    renderCompareBar();
+    setFatalStatus(`Unable to load ${compare.fileNameB}: ${message}`);
+    return null;
+  }
+  if (loadToken !== state.loadToken) {
+    return null;
+  }
+
+  const bFrames = (new Float32Array(source.channelBuffers[0] ?? new ArrayBuffer(0)).length * aSession.sourceSampleRate)
+    / Math.max(1, source.sampleRate);
+  const estimatedSamples = aSession.sourceLength * aSession.numberOfChannels + bFrames * source.channelBuffers.length;
+  if (estimatedSamples * 3 > MAX_TOTAL_ANALYSIS_SAMPLES) {
+    setFatalStatus('These files are too long to compare in audioscope. Try shorter excerpts.');
+    return null;
+  }
+
+  setAnalysisStatus('Aligning A and B…');
+  try {
+    const result = await runCompareCompute({
+      a: { channelBuffers: aSession.channelBuffers, sampleRate: aSession.sourceSampleRate },
+      b: source,
+      gainMatch: compare.gainMatch,
+      offsetSamples: null,
+    });
+    if (loadToken !== state.loadToken || state.compare !== compare) {
+      return null;
+    }
+    return buildCompareSessions(compare, result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    compare.error = message;
+    renderCompareBar();
+    setFatalStatus(`Unable to compare the files: ${message}`);
+    return null;
+  }
+}
+
+// Re-aligns B after an offset / gain change and swaps the new PCM into playback
+// and every lane, keeping the playhead and play state.
+async function recomputeCompare(): Promise<void> {
+  const compare = state.compare;
+  const loadToken = state.loadToken;
+  if (!compare?.result) {
+    return;
+  }
+  if (compare.busy) {
+    compare.recomputePending = true;
+    return;
+  }
+
+  compare.busy = true;
+  renderCompareBar();
+  try {
+    const result = await runCompareCompute({
+      gainMatch: compare.gainMatch,
+      length: compare.result.length,
+      offsetSamples: compare.offsetOverride,
+    });
+    if (loadToken !== state.loadToken || state.compare !== compare) {
+      return;
+    }
+
+    const sessions = buildCompareSessions(compare, result);
+    state.playbackSession = sessions.analysisSession;
+    const transport = state.audioTransport;
+    if (transport) {
+      const wasPlaying = transport.isPlaying();
+      const currentTime = transport.getCurrentTime();
+      await transport.load({ playbackSession: sessions.transportSession, workletModuleUrl: audioTransportProcessorScriptUri });
+      transport.setChannelMap(getCompareChannelMap());
+      transport.seek(currentTime);
+      if (wasPlaying) {
+        await transport.play().catch(() => {});
+      }
+    }
+    applyChannelModeChange();
+  } catch (error) {
+    compare.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    compare.busy = false;
+    renderCompareBar();
+    if (compare.recomputePending && state.compare === compare) {
+      compare.recomputePending = false;
+      void recomputeCompare();
+    }
+  }
+}
+
+function setComparePlaybackSource(source: ComparePlaybackSource): void {
+  const compare = state.compare;
+  if (!compare?.result || compare.playbackSource === source) {
+    return;
+  }
+  compare.playbackSource = source;
+  state.audioTransport?.setChannelMap(getCompareChannelMap());
+  renderCompareBar();
+}
+
+function captureCompareLoudnessA(summary: unknown): void {
+  if (state.compare && summary && typeof summary === 'object') {
+    state.compare.loudnessA = summary as LoudnessSummaryPayload;
+    renderCompareBar();
+  }
+}
+
+function setCompareDiffMode(mode: CompareDiffMode): void {
+  const compare = state.compare;
+  if (!compare?.result || compare.diffMode === mode) {
+    return;
+  }
+  compare.diffMode = mode;
+  renderCompareBar();
+  applyChannelModeChange();
+}
+
+function setCompareLevelRange(rangeDb: number): void {
+  const compare = state.compare;
+  if (!compare || !(rangeDb > 0) || compare.levelRangeDb === rangeDb) {
+    return;
+  }
+  compare.levelRangeDb = rangeDb;
+  if (!compare.levelLaneBuilt) {
+    return;
+  }
+  getAnalysisChannelWorkers()[2]?.postMessage({ type: 'setLevelDiffMode', body: { enabled: true, rangeDb } });
+  state.analysisOverviewRefreshPending = true;
+  scheduleSpectrogramRender({ force: true });
+}
+
+function setCompareOffset(offsetSamples: number | null): void {
+  const compare = state.compare;
+  if (!compare?.result) {
+    return;
+  }
+  const next = offsetSamples === null ? null : Math.trunc(offsetSamples);
+  if (next === compare.offsetOverride) {
+    return;
+  }
+  compare.offsetOverride = next;
+  void recomputeCompare();
+}
+
+function formatSignedDb(value: number | null | undefined, digits = 1): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '–';
+  }
+  return `${value > 0 ? '+' : ''}${value.toFixed(digits)}`;
+}
+
+function formatCompareDb(value: number | null | undefined): string {
+  if (value === Number.POSITIVE_INFINITY) {
+    return '∞';
+  }
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(1) : '–';
+}
+
+function getCompareStatsText(compare: CompareState): string {
+  if (compare.error) {
+    return `Compare failed: ${compare.error}`;
+  }
+  const result = compare.result;
+  if (!result) {
+    return `Loading ${compare.fileNameB} and aligning it to ${compare.fileNameA}…`;
+  }
+
+  const stats: CompareStats = result.stats;
+  const offsetMs = (result.offsetSamples / result.sampleRate) * 1000;
+  const offsetSource = compare.offsetOverride === null
+    ? `auto, r ${result.confidence.toFixed(3)}`
+    : `manual, auto ${formatSignedDb(result.autoOffsetSamples, 0)}`;
+  const parts = [
+    `Δt ${formatSignedDb(result.offsetSamples, 0)} smp (${formatSignedDb(offsetMs, 2)} ms, ${offsetSource})`,
+    compare.gainMatch
+      ? `B gain ${formatSignedDb(20 * Math.log10(result.appliedGain))} dB`
+      : `fit gain ${formatSignedDb(20 * Math.log10(result.fitGain))} dB`,
+    `A−B ${formatCompareDb(stats.rmsDiffDbfs)} dBFS RMS`,
+    `peak ${formatCompareDb(stats.peakDiffDbfs)} dBFS`,
+    `null ${formatCompareDb(stats.nullDepthDb)} dB`,
+    `r ${stats.correlation.toFixed(4)}`,
+  ];
+  if (result.bSourceSampleRate !== result.sampleRate) {
+    parts.push(`B resampled ${(result.bSourceSampleRate / 1000).toFixed(1)}→${(result.sampleRate / 1000).toFixed(1)} kHz`);
+  }
+  const lufsA = compare.loudnessA?.integratedLufs;
+  const lufsB = compare.loudnessB?.integratedLufs;
+  if (typeof lufsA === 'number' || typeof lufsB === 'number') {
+    const delta = typeof lufsA === 'number' && typeof lufsB === 'number' ? ` (Δ ${formatSignedDb(lufsA - lufsB)})` : '';
+    parts.push(`LUFS A ${formatCompareDb(lufsA)} / B ${formatCompareDb(lufsB)}${delta}`);
+  }
+  return `${compare.busy ? 'Updating… ' : ''}${parts.join(' · ')}`;
+}
+
+function renderCompareBar(): void {
+  const compare = state.compare;
+  elements.compareBar.hidden = !compare;
+  elements.wavePanel.dataset.compare = compare ? 'true' : 'false';
+  elements.spectrogramSplitChannelsToggle.disabled = Boolean(compare);
+  if (!compare) {
+    return;
+  }
+
+  const ready = Boolean(compare.result);
+  elements.compareFileA.textContent = compare.fileNameA;
+  elements.compareFileA.title = compare.fileNameA;
+  elements.compareFileB.textContent = compare.fileNameB;
+  elements.compareFileB.title = [compare.fileNameB, ...(compare.metadataB?.summary?.segments ?? [])].join(' · ');
+
+  const sourceButtons: Array<[HTMLButtonElement, ComparePlaybackSource]> = [
+    [elements.comparePlayA, 'a'],
+    [elements.comparePlayB, 'b'],
+    [elements.comparePlayDiff, 'diff'],
+  ];
+  for (const [button, source] of sourceButtons) {
+    button.setAttribute('aria-checked', String(compare.playbackSource === source));
+    button.disabled = !ready;
+  }
+
+  const diffButtons: Array<[HTMLButtonElement, CompareDiffMode]> = [
+    [elements.compareDiffResidual, 'residual'],
+    [elements.compareDiffLevel, 'level'],
+  ];
+  for (const [button, mode] of diffButtons) {
+    button.setAttribute('aria-checked', String(compare.diffMode === mode));
+    button.disabled = !ready;
+  }
+  elements.compareDiffRange.disabled = !ready || compare.diffMode !== 'level';
+  elements.compareDiffRange.value = String(compare.levelRangeDb);
+
+  for (const control of [elements.compareOffsetDown, elements.compareOffsetUp, elements.compareOffsetAuto, elements.compareGainMatch]) {
+    control.disabled = !ready;
+  }
+  elements.compareOffsetInput.disabled = !ready;
+  elements.compareOffsetAuto.disabled = !ready || compare.offsetOverride === null;
+  elements.compareGainMatch.checked = compare.gainMatch;
+  if (document.activeElement !== elements.compareOffsetInput) {
+    elements.compareOffsetInput.value = compare.result ? String(compare.result.offsetSamples) : '';
+  }
+  elements.compareStats.textContent = getCompareStatsText(compare);
+  elements.compareStats.title = elements.compareStats.textContent;
+}
+
+function attachCompareUiEvents(): void {
+  const bindSource = (button: HTMLButtonElement, source: ComparePlaybackSource) => {
+    button.addEventListener('click', () => {
+      setComparePlaybackSource(source);
+      scheduleKeyboardSurfaceFocus();
+    });
+  };
+  bindSource(elements.comparePlayA, 'a');
+  bindSource(elements.comparePlayB, 'b');
+  bindSource(elements.comparePlayDiff, 'diff');
+
+  const nudgeOffset = (direction: number, event: MouseEvent) => {
+    const current = state.compare?.offsetOverride ?? state.compare?.result?.offsetSamples ?? 0;
+    setCompareOffset(current + direction * (event.shiftKey ? 10 : 1));
+  };
+  elements.compareOffsetDown.addEventListener('click', (event) => nudgeOffset(-1, event));
+  elements.compareOffsetUp.addEventListener('click', (event) => nudgeOffset(1, event));
+  elements.compareOffsetAuto.addEventListener('click', () => {
+    setCompareOffset(null);
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.compareOffsetInput.addEventListener('change', () => {
+    const value = Number(elements.compareOffsetInput.value);
+    if (Number.isFinite(value)) {
+      setCompareOffset(value);
+    }
+    renderCompareBar();
+  });
+  elements.compareOffsetInput.addEventListener('keydown', (event) => {
+    if (event.code === 'Enter') {
+      elements.compareOffsetInput.blur();
+      scheduleKeyboardSurfaceFocus();
+    }
+  });
+  elements.compareGainMatch.addEventListener('change', () => {
+    const compare = state.compare;
+    if (compare?.result) {
+      compare.gainMatch = elements.compareGainMatch.checked;
+      void recomputeCompare();
+    }
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.compareDiffResidual.addEventListener('click', () => {
+    setCompareDiffMode('residual');
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.compareDiffLevel.addEventListener('click', () => {
+    setCompareDiffMode('level');
+    scheduleKeyboardSurfaceFocus();
+  });
+  elements.compareDiffRange.addEventListener('change', () => {
+    setCompareLevelRange(Number(elements.compareDiffRange.value));
+    scheduleKeyboardSurfaceFocus();
+  });
 }
 
 function applyTransportCommand(command: TransportCommand | null): void {
@@ -3655,6 +4252,9 @@ function scheduleSpectrogramConfigRefresh({ persist = true } = {}): void {
 }
 
 function getSpectrogramLaneCount(): number {
+  if (isCompareActive()) {
+    return 3;
+  }
   const channels = state.playbackSession?.numberOfChannels ?? 1;
   return state.splitChannels && channels > 1 ? channels : 1;
 }
@@ -3684,6 +4284,9 @@ function refreshSpectrogramAnalysisConfig({ persist = true } = {}): void {
   const shouldPersist = persist || state.spectrogramConfigPersistPending;
   state.spectrogramConfigPersistPending = false;
   const renderConfig = getEffectiveSpectrogramRenderConfig();
+  if (state.compare?.result && state.compare.levelLaneBuilt !== isCompareLevelDiffLane(2)) {
+    applyChannelModeChange();
+  }
 
   if (state.engineWorker) {
     state.engineWorker.postMessage({
@@ -4370,7 +4973,7 @@ function applySampleInfo(payload: SampleInfoPayload): void {
 
   const laneCount = Math.max(1, hover.laneCount);
   const channelPrefix = laneCount > 1 && payload.label
-    ? `${channelLaneLabel(hover.laneIndex, laneCount)} • `
+    ? `${channelLaneLabel(hover.laneIndex, laneCount, payload.surface)} • `
     : '';
 
   if (payload.surface === 'waveform') {
@@ -4407,13 +5010,20 @@ function isPerChannelSpectrogramValueType(): boolean {
   return type === 'spectrogram' || type === 'mel' || type === 'scalogram';
 }
 
-// Primary analysis worker is channel 0; satellite lane workers follow in order.
+// Satellites register as they finish booting, so their array order is not lane
+// order; hover readouts are matched to lanes through this index.
+const analysisLaneIndexByWorker = new WeakMap<Worker, number>();
+
+// Primary analysis worker is channel 0; satellite lane workers follow in lane order.
 function getAnalysisChannelWorkers(): Worker[] {
   const workers: Worker[] = [];
   if (state.analysisWorker) {
     workers.push(state.analysisWorker);
   }
-  for (const worker of state.analysisLaneWorkers) {
+  const satellites = [...state.analysisLaneWorkers].sort(
+    (left, right) => (analysisLaneIndexByWorker.get(left) ?? 0) - (analysisLaneIndexByWorker.get(right) ?? 0),
+  );
+  for (const worker of satellites) {
     workers.push(worker);
   }
   return workers;
@@ -4481,7 +5091,7 @@ function buildWaveformChannelHoverModel(sampleIndex: number): HoverTooltipModel 
       }
     }
     channels.push({
-      label: channelCount > 1 ? channelLaneLabel(channelIndex, channelCount) : '',
+      label: channelCount > 1 ? channelLaneLabel(channelIndex, channelCount, 'waveform') : '',
       value: formatWaveformChannelSample(value),
     });
   }
@@ -4534,7 +5144,9 @@ function renderSpectrogramChannelHoverTooltip(): void {
   }
   const channels = aggregation.results.map((entry, channelIndex) => ({
     label: laneCount > 1 ? channelLaneLabel(channelIndex, laneCount) : '',
-    value: formatHoverDb(entry ? entry.valueDb : null),
+    value: entry?.levelDiff
+      ? `${formatSignedDb(entry.valueDb)} dB`
+      : formatHoverDb(entry ? entry.valueDb : null),
   }));
 
   updateSurfaceHoverTooltip(elements.spectrogramHoverTooltip, elements.spectrogramHitTarget, hover, { meta, channels });
@@ -5308,7 +5920,22 @@ async function initializePlaybackFromPreparedData(
     waveformSamples: Float32Array;
   },
 ): Promise<void> {
-  const { monoSamples, playbackSession, waveformSamples } = preparedPlaybackData;
+  let { monoSamples, playbackSession, waveformSamples } = preparedPlaybackData;
+  let transportSession = playbackSession;
+
+  // Compare panels replace the single-file session with the A | B | A-B lanes.
+  if (state.compare) {
+    const compared = await prepareComparePlayback(loadToken, playbackSession);
+    if (!compared || loadToken !== state.loadToken) {
+      return;
+    }
+    const prepared = createPlaybackAnalysisDataFromPlaybackSession(compared.analysisSession);
+    playbackSession = compared.analysisSession;
+    transportSession = compared.transportSession;
+    monoSamples = prepared.monoSamples;
+    waveformSamples = prepared.waveformSamples;
+    renderCompareBar();
+  }
 
   // Refuse files beyond the analysis ceiling: holding per-channel PCM across the
   // transport + waveform + spectrogram workers would multiply into several GB
@@ -5380,9 +6007,10 @@ async function initializePlaybackFromPreparedData(
   });
 
   await audioTransport.load({
-    playbackSession,
+    playbackSession: transportSession,
     workletModuleUrl: audioTransportProcessorScriptUri,
   });
+  audioTransport.setChannelMap(getCompareChannelMap());
 
   if (loadToken !== state.loadToken || state.audioTransport !== audioTransport) {
     return;
@@ -5427,7 +6055,10 @@ const {
   setAnalysisStatus,
   setFatalStatus,
   setLoudnessSummaryUnavailable,
-  setReadyLoudnessSummary,
+  setReadyLoudnessSummary: (summary) => {
+    setReadyLoudnessSummary(summary);
+    captureCompareLoudnessA(summary);
+  },
   setPendingLoudnessSummary,
   clearFatalStatus,
   startPlaybackLoop,
@@ -5471,6 +6102,41 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
     renderSpectrogramMeta();
     state.externalTools = normalizeExternalToolStatus(message.body?.externalTools, EMBEDDED_MEDIA_TOOLS_GUIDANCE);
     void loadAudioFile(message.body);
+    // loadAudioFile bumps the load token synchronously; B is tied to it.
+    startCompareSession(message.body);
+    return;
+  }
+
+  if (message?.type === 'compareSourceReady') {
+    const compare = getCompareForLoadToken(message.body?.loadToken);
+    if (compare) {
+      void decodeCompareSource(message.body).then(compare.resolveSource, (error) => {
+        compare.rejectSource(error instanceof Error ? error : new Error(String(error)));
+      });
+    }
+    return;
+  }
+
+  if (message?.type === 'compareSourceError') {
+    getCompareForLoadToken(message.body?.loadToken)?.rejectSource(new Error(message.body?.message || 'B failed to decode.'));
+    return;
+  }
+
+  if (message?.type === 'compareMetadataReady') {
+    const compare = getCompareForLoadToken(message.body?.loadToken);
+    if (compare) {
+      compare.metadataB = message.body.metadata ?? null;
+      renderCompareBar();
+    }
+    return;
+  }
+
+  if (message?.type === 'compareLoudnessReady') {
+    const compare = getCompareForLoadToken(message.body?.loadToken);
+    if (compare) {
+      compare.loudnessB = message.body;
+      renderCompareBar();
+    }
     return;
   }
 
@@ -5540,6 +6206,7 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
       return;
     }
     setReadyLoudnessSummary(message.body);
+    captureCompareLoudnessA(message.body);
     return;
   }
 
@@ -5752,6 +6419,24 @@ function attachUiEvents(): void {
         void togglePlayback();
       });
       return;
+    }
+
+    if (state.compare?.result && !event.repeat) {
+      const compareSource: ComparePlaybackSource | null = event.code === 'Digit1'
+        ? 'a'
+        : event.code === 'Digit2'
+          ? 'b'
+          : event.code === 'Digit3'
+            ? 'diff'
+            : event.code === 'KeyT'
+              ? (state.compare.playbackSource === 'a' ? 'b' : 'a')
+              : null;
+      if (compareSource) {
+        handleGlobalShortcut(event, () => {
+          setComparePlaybackSource(compareSource);
+        });
+        return;
+      }
     }
 
     if (event.code === 'ArrowLeft') {
@@ -6454,6 +7139,7 @@ if (
   initializePlaybackRateControl();
   initializeKeyboardSurfaceFocus();
   attachUiEvents();
+  attachCompareUiEvents();
   attachResizeObservers();
   applyViewportSplit(true);
   renderWaveformUi();

@@ -542,6 +542,14 @@ self.onmessage = (event) => {
     case 'attachLoudnessChannels':
       attachLoudnessChannels(message.body);
       return;
+    case 'attachReferenceSession':
+      enqueueRequest(async () => {
+        attachReferenceSession(message.body);
+      });
+      return;
+    case 'setLevelDiffMode':
+      setLevelDiffMode(message.body);
+      return;
     case 'renderOverview':
       registerActiveConfigVersion(message.body?.configVersion);
       if (message.body?.analysisType) {
@@ -1636,6 +1644,7 @@ function attachAudioSession(runtime: WaveCoreRuntime, options: AudioSessionOptio
   if (isNewAudioSession) {
     disposeWasmSession(module);
     resetWebGpuComputeSessionResources();
+    levelDiffState.referenceAttached = false;
 
     if (!module._wave_prepare_session(sampleCount, sampleRate, duration)) {
       throw new Error('Failed to allocate spectrogram session.');
@@ -2394,7 +2403,27 @@ function renderTileChunk(
 
   ensureSpectrogramOutputCapacity(runtime.module, byteLength);
 
-  const ok = runtime.module._wave_render_spectrogram_tile_rgba(
+  const ok = isLevelDiffActive(plan.analysisType)
+    ? runtime.module._wave_render_spectrogram_level_diff_tile_rgba(
+      tileRecord.tileStartSample,
+      tileSampleSpan,
+      startColumn,
+      TILE_COLUMN_COUNT,
+      columnCount,
+      plan.rowCount,
+      plan.melBandCount,
+      plan.fftSize,
+      plan.decimationFactor,
+      plan.minFrequency,
+      plan.maxFrequency,
+      ANALYSIS_TYPE_CODES[plan.analysisType] ?? ANALYSIS_TYPE_CODES.spectrogram,
+      FREQUENCY_SCALE_CODES[plan.frequencyScale] ?? FREQUENCY_SCALE_CODES.log,
+      plan.minDecibels,
+      levelDiffState.rangeDb,
+      WINDOW_FUNCTION_CODES[plan.windowFunction] ?? 0,
+      analysisState.spectrogramOutputPointer,
+    )
+    : runtime.module._wave_render_spectrogram_tile_rgba(
     tileRecord.tileStartSample,
     tileSampleSpan,
     startColumn,
@@ -3813,6 +3842,7 @@ function recordScalogramFftPathFailure(computeState: WebGpuScalogramComputeState
 function canUseWebGpuNativeCompute(plan: RenderRequestPlan): boolean {
   const samples = getSessionPcmData();
   return surfaceState.backend === 'webgpu'
+    && !isLevelDiffActive(plan.analysisType)
     && !surfaceState.webGpu?.analysisFallbackReasons[plan.analysisType]
     && analysisState.sampleRate > 0
     && analysisState.sampleCount > 0
@@ -6448,6 +6478,8 @@ interface ChannelSampleValue {
   frequencyStartHz: number | null;
   timeSeconds: number;
   valueDb: number | null;
+  // True when valueDb is dB(A) - dB(B) from a compare diff lane.
+  levelDiff?: boolean;
   // Loudness readout (LUFS / sample-peak dBFS) for the loudness analysis type.
   loudnessMomentary?: number | null;
   loudnessShortTerm?: number | null;
@@ -6455,6 +6487,59 @@ interface ChannelSampleValue {
 }
 
 let analysisSampleScratchPointer = 0;
+
+// Compare views: the diff lane can render dB(session) - dB(reference) instead of
+// the session's own spectrogram. Only the STFT band analyses support it.
+const levelDiffState = {
+  enabled: false,
+  rangeDb: 12,
+  referenceAttached: false,
+};
+
+function isLevelDiffActive(analysisType: AnalysisType): boolean {
+  return levelDiffState.enabled
+    && levelDiffState.referenceAttached
+    && (analysisType === 'spectrogram' || analysisType === 'mel');
+}
+
+function resetRenderedLayers(): void {
+  clearTileCache();
+  analysisState.overview = createEmptyLayerState('overview');
+  analysisState.visible = createEmptyLayerState('visible');
+}
+
+function attachReferenceSession(options: { samplesBuffer?: ArrayBuffer; sessionVersion?: number } | undefined): void {
+  const module = analysisState.module;
+  const sessionVersion = Number.isFinite(options?.sessionVersion) ? Number(options?.sessionVersion) : -1;
+  if (!module || sessionVersion !== analysisState.attachedSessionVersion || !(options?.samplesBuffer instanceof ArrayBuffer)) {
+    return;
+  }
+
+  const samples = new Float32Array(options.samplesBuffer);
+  const pointer = samples.length === analysisState.sampleCount
+    ? module._wave_prepare_reference(analysisState.sampleCount)
+    : 0;
+  if (!pointer) {
+    levelDiffState.referenceAttached = false;
+    return;
+  }
+
+  getHeapF32View(module, pointer, analysisState.sampleCount).set(samples);
+  levelDiffState.referenceAttached = true;
+  resetRenderedLayers();
+}
+
+function setLevelDiffMode(options: { enabled?: boolean; rangeDb?: number } | undefined): void {
+  const enabled = Boolean(options?.enabled);
+  const rangeDb = clamp(Number(options?.rangeDb) || 12, 1, 60);
+  if (enabled === levelDiffState.enabled && rangeDb === levelDiffState.rangeDb) {
+    return;
+  }
+
+  levelDiffState.enabled = enabled;
+  levelDiffState.rangeDb = rangeDb;
+  resetRenderedLayers();
+}
 
 function getAnalysisRowIndexFromRatio(positionRatio: number, rowCount: number): number {
   return clamp(
@@ -6520,7 +6605,8 @@ function computeChannelSampleValue(pointerRatioX: number, pointerRatioY: number)
   }
 
   const rowIndex = getAnalysisRowIndexFromRatio(pointerRatioY, plan.rowCount);
-  const ok = module._wave_sample_analysis_value_at_frame(
+  const scratchPointer = analysisSampleScratchPointer;
+  const sampleValue = (): boolean => Boolean(module._wave_sample_analysis_value_at_frame(
     frame,
     rowIndex,
     plan.rowCount,
@@ -6533,18 +6619,35 @@ function computeChannelSampleValue(pointerRatioX: number, pointerRatioY: number)
     FREQUENCY_SCALE_CODES[plan.frequencyScale] ?? 0,
     plan.scalogramOmega0,
     WINDOW_FUNCTION_CODES[plan.windowFunction] ?? 0,
-    analysisSampleScratchPointer,
-  );
+    scratchPointer,
+  ));
 
-  if (!ok) {
+  if (!sampleValue()) {
     return { frequencyEndHz: null, frequencyStartHz: null, timeSeconds, valueDb: null };
   }
 
-  const output = getHeapF32View(module, analysisSampleScratchPointer, 3);
-  const valueDb = Number(output[0]);
+  const output = getHeapF32View(module, scratchPointer, 3);
+  const frequencyStartHz = Number(output[1]);
+  const frequencyEndHz = Number(output[2]);
+  let valueDb = Number(output[0]);
+
+  if (isLevelDiffActive(plan.analysisType) && module._wave_swap_reference_samples()) {
+    const referenceOk = sampleValue();
+    module._wave_swap_reference_samples();
+    const referenceDb = Number(getHeapF32View(module, scratchPointer, 3)[0]);
+    valueDb = referenceOk && Number.isFinite(referenceDb) ? valueDb - referenceDb : Number.NaN;
+    return {
+      frequencyEndHz,
+      frequencyStartHz,
+      levelDiff: true,
+      timeSeconds,
+      valueDb: Number.isFinite(valueDb) ? valueDb : null,
+    };
+  }
+
   return {
-    frequencyEndHz: Number(output[2]),
-    frequencyStartHz: Number(output[1]),
+    frequencyEndHz,
+    frequencyStartHz,
     timeSeconds,
     valueDb: Number.isFinite(valueDb) ? valueDb : null,
   };

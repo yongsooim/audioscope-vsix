@@ -15,6 +15,10 @@ const exportedFunctionNames = [
   'wave_sample_analysis_value_at_frame',
   'wave_sample_mfcc_value_at_frame',
   'wave_render_spectrogram_tile_rgba',
+  'wave_prepare_reference',
+  'wave_clear_reference',
+  'wave_swap_reference_samples',
+  'wave_render_spectrogram_level_diff_tile_rgba',
 ] as const;
 
 type ExportedFunctionName = (typeof exportedFunctionNames)[number];
@@ -123,6 +127,28 @@ export interface WaveCoreModule {
     minDecibels: number,
     maxDecibels: number,
     scalogramOmega0: number,
+    windowFunction: number,
+    outputPointer: number,
+  ): number;
+  _wave_prepare_reference(sampleCount: number): number;
+  _wave_clear_reference(): void;
+  _wave_swap_reference_samples(): number;
+  _wave_render_spectrogram_level_diff_tile_rgba(
+    tileStartSample: number,
+    tileSampleSpan: number,
+    columnOffset: number,
+    totalColumnCount: number,
+    columnCount: number,
+    rowCount: number,
+    melBandCount: number,
+    fftSize: number,
+    decimationFactor: number,
+    minFrequency: number,
+    maxFrequency: number,
+    analysisType: number,
+    frequencyScale: number,
+    minDecibels: number,
+    rangeDecibels: number,
     windowFunction: number,
     outputPointer: number,
   ): number;

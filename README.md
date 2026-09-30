@@ -85,6 +85,16 @@
 - MFCC coefficient controls
 - Scalogram omega0 control
 
+### Compare two files
+
+- Open a compare panel from the Explorer: select two audio files and choose **Compare Audio Files…**, or use **Select for Audio Compare** then **Compare Audio with Selected**
+- A, B and A − B stacked as synchronized waveform and spectrogram lanes
+- Switch playback between A, B and the A − B residual at the same position (`1` / `2` / `3`, `T` swaps A and B)
+- Automatic offset detection (cross-correlation) with per-sample manual nudge; B is resampled when its sample rate differs
+- Optional least-squares gain matching
+- Null-test readout: residual RMS and peak, null depth, correlation, and integrated LUFS of both files
+- A − B spectrogram as the residual signal or as a per-cell level difference, dB(A) − dB(B), on a diverging color scale
+
 ### Metadata and loudness
 
 - Audio metadata summary

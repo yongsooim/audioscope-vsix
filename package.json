@@ -71,7 +71,10 @@
   ],
   "activationEvents": [
     "onCustomEditor:audioscope.editor",
-    "onCommand:audioscope.openActiveFileInAudioscope"
+    "onCommand:audioscope.openActiveFileInAudioscope",
+    "onCommand:audioscope.compareAudioFiles",
+    "onCommand:audioscope.selectForCompare",
+    "onCommand:audioscope.compareWithSelected"
   ],
   "contributes": {
     "languages": [
@@ -293,6 +296,21 @@
         "command": "audioscope.openActiveFileInAudioscope",
         "title": "Open in audioscope",
         "category": "audioscope"
+      },
+      {
+        "command": "audioscope.compareAudioFiles",
+        "title": "Compare Audio Files…",
+        "category": "audioscope"
+      },
+      {
+        "command": "audioscope.selectForCompare",
+        "title": "Select for Audio Compare",
+        "category": "audioscope"
+      },
+      {
+        "command": "audioscope.compareWithSelected",
+        "title": "Compare Audio with Selected",
+        "category": "audioscope"
       }
     ],
     "menus": {
@@ -301,6 +319,27 @@
           "command": "audioscope.openActiveFileInAudioscope",
           "when": "resourceExtname =~ /\\.(wav|wave|mp3|ogg|oga|flac|m4a|aac|opus|aif|aiff)$/i",
           "group": "navigation@45"
+        },
+        {
+          "command": "audioscope.compareAudioFiles",
+          "when": "listDoubleSelection && resourceExtname =~ /\\.(wav|wave|mp3|ogg|oga|flac|m4a|aac|opus|aif|aiff)$/i",
+          "group": "3_compare@40"
+        },
+        {
+          "command": "audioscope.selectForCompare",
+          "when": "!listDoubleSelection && resourceExtname =~ /\\.(wav|wave|mp3|ogg|oga|flac|m4a|aac|opus|aif|aiff)$/i",
+          "group": "3_compare@41"
+        },
+        {
+          "command": "audioscope.compareWithSelected",
+          "when": "audioscope.compareSelected && !listDoubleSelection && resourceExtname =~ /\\.(wav|wave|mp3|ogg|oga|flac|m4a|aac|opus|aif|aiff)$/i",
+          "group": "3_compare@42"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "audioscope.compareWithSelected",
+          "when": "audioscope.compareSelected"
         }
       ],
       "editor/title/context": [

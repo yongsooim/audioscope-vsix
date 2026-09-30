@@ -3,6 +3,7 @@ import { AUDIO_TRANSPORT_PROCESSOR_NAME } from './audioTransportShared';
 const SNAPSHOT_INTERVAL_QUANTA = 4;
 
 interface ProcessorControlBody {
+  channelMap?: number[] | null;
   loopEnabled?: boolean;
   loopEndFrame?: number;
   loopStartFrame?: number;
@@ -18,6 +19,7 @@ interface ProcessorMessage {
 
 interface ProcessorOptionsPayload {
   channelBuffers?: ArrayBuffer[];
+  initialChannelMap?: number[] | null;
   durationSeconds?: number;
   initialFrame?: number;
   initialLoopEnabled?: boolean;
@@ -35,6 +37,9 @@ interface ProcessorCtorOptions {
 
 class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
   private channelData: Float32Array[];
+  // Output channel -> source channel. Compare views load A, B and A-B side by
+  // side and switch between them here, so the swap is sample-accurate.
+  private channelMap: number[] | null;
   private durationSeconds: number;
   private ended: boolean;
   private lastPublishedEnded: boolean;
@@ -57,6 +62,7 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
     this.channelData = Array.isArray(processorOptions.channelBuffers)
       ? processorOptions.channelBuffers.map((buffer) => new Float32Array(buffer))
       : [];
+    this.channelMap = normalizeChannelMap(processorOptions.initialChannelMap, this.channelData.length);
     this.sourceLength = Math.max(0, Math.trunc(Number(processorOptions.sourceLength) || 0));
     this.sourceSampleRate = Math.max(1, Number(processorOptions.sourceSampleRate) || sampleRate || 1);
     this.durationSeconds = Number.isFinite(processorOptions.durationSeconds)
@@ -102,6 +108,9 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
     );
     const seekSerial = Number.isFinite(body.seekSerial) ? Math.trunc(Number(body.seekSerial)) : null;
 
+    if (body.channelMap !== undefined) {
+      this.channelMap = normalizeChannelMap(body.channelMap, this.channelData.length);
+    }
     this.loopEnabled = loopEnabled;
     this.loopStartFrame = loopStartFrame;
     this.loopEndFrame = loopEndFrame;
@@ -167,7 +176,7 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
 
       for (let channelIndex = 0; channelIndex < output.length; channelIndex += 1) {
         const outputChannel = output[channelIndex];
-        const sourceChannel = this.channelData[Math.min(channelIndex, lastSourceChannelIndex)];
+        const sourceChannel = this.getSourceChannel(channelIndex, lastSourceChannelIndex);
 
         if (!(sourceChannel instanceof Float32Array) || sourceChannel.length === 0) {
           outputChannel[frameIndex] = 0;
@@ -213,7 +222,7 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
 
     for (let channelIndex = 0; channelIndex < output.length; channelIndex += 1) {
       const outputChannel = output[channelIndex];
-      const sourceChannel = this.channelData[Math.min(channelIndex, lastSourceChannelIndex)];
+      const sourceChannel = this.getSourceChannel(channelIndex, lastSourceChannelIndex);
 
       if (!(sourceChannel instanceof Float32Array) || sourceChannel.length === 0) {
         outputChannel.fill(0, outputFrameIndex, outputFrameIndex + frameCount);
@@ -233,6 +242,14 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
         outputChannel.fill(0, outputFrameIndex + availableFrames, outputFrameIndex + frameCount);
       }
     }
+  }
+
+  getSourceChannel(outputChannelIndex: number, lastSourceChannelIndex: number): Float32Array | undefined {
+    const map = this.channelMap;
+    const sourceIndex = map
+      ? map[Math.min(outputChannelIndex, map.length - 1)]
+      : Math.min(outputChannelIndex, lastSourceChannelIndex);
+    return this.channelData[sourceIndex];
   }
 
   advanceFrame(sourceStep: number): void {
@@ -312,6 +329,15 @@ class AudioscopeAudioTransportProcessor extends AudioWorkletProcessor {
       },
     });
   }
+}
+
+function normalizeChannelMap(value: unknown, sourceChannelCount: number): number[] | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+
+  const map = value.map((index) => Math.trunc(Number(index)));
+  return map.every((index) => index >= 0 && index < sourceChannelCount) ? map : null;
 }
 
 function fillSilence(output: Float32Array[]): void {

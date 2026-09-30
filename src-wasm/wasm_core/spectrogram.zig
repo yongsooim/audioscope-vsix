@@ -1306,6 +1306,188 @@ pub export fn wave_sample_analysis_value_at_frame(
     }
 }
 
+// Reference PCM for compare views. It always matches the session length, so any
+// column renderer can read it by swapping it in for the session samples.
+var g_reference_samples: []f32 = &.{};
+
+pub fn freeReferenceSamples() void {
+    if (g_reference_samples.len > 0) core.allocator.free(g_reference_samples);
+    g_reference_samples = &.{};
+}
+
+pub export fn wave_prepare_reference(sample_count: i32) usize {
+    freeReferenceSamples();
+    if (sample_count <= 0 or sample_count != core.g_session.sample_count) return 0;
+
+    g_reference_samples = core.allocator.alloc(f32, @as(usize, @intCast(sample_count))) catch return 0;
+    @memset(g_reference_samples, 0);
+    return @intFromPtr(g_reference_samples.ptr);
+}
+
+pub export fn wave_clear_reference() void {
+    freeReferenceSamples();
+}
+
+// Callers must swap back before returning control, so the session never stays
+// pointed at the reference across calls.
+pub export fn wave_swap_reference_samples() i32 {
+    if (g_reference_samples.len == 0 or g_reference_samples.len != core.g_session.samples.len) return 0;
+
+    const session_samples = core.g_session.samples;
+    core.g_session.samples = g_reference_samples;
+    g_reference_samples = session_samples;
+    return 1;
+}
+
+fn writeStftRowDecibels(
+    analysis_type: core.AnalysisType,
+    resource: *core.FftResource,
+    layout: anytype,
+    center_sample: i32,
+    decimation_factor: i32,
+    rows: []f32,
+) void {
+    const input = resource.input.?;
+    const output_buffer = resource.output.?;
+    const work_buffer = resource.work.?;
+    const setup = resource.setup.?;
+
+    writeWindowedInput(resource, center_sample);
+    core.pffft_transform_ordered(setup, input.ptr, output_buffer.ptr, work_buffer.ptr, .forward);
+    writePowerSpectrum(resource, resource.power_spectrum);
+
+    if (analysis_type == .spectrogram and layout.use_low_frequency_enhancement) {
+        writeDecimatedInput(resource, center_sample, decimation_factor);
+        core.pffft_transform_ordered(setup, input.ptr, output_buffer.ptr, work_buffer.ptr, .forward);
+        writePowerSpectrum(resource, resource.low_power_spectrum);
+    }
+
+    for (rows, 0..) |*slot, row| {
+        const power = if (analysis_type == .mel)
+            mel_analysis.computeMelBandPowerWeighted(
+                resource.power_spectrum,
+                layout.mel_row_offsets,
+                layout.mel_bin_indices,
+                layout.mel_weights,
+                row,
+            )
+        else blk: {
+            const base_range = layout.band_ranges[row];
+            const use_low_band = layout.use_low_frequency_enhancement and base_range.end_frequency <= layout.low_frequency_maximum;
+            break :blk if (use_low_band)
+                computeBandMeanPower(resource.low_power_spectrum, layout.enhanced_band_ranges[row])
+            else
+                computeBandMeanPower(resource.power_spectrum, base_range);
+        };
+        slot.* = powerToDecibels(power);
+    }
+}
+
+fn lerpLevelDiffChannel(neutral: f32, extreme: f32, t: f32) u8 {
+    return @as(u8, @intFromFloat(@round(neutral + ((extreme - neutral) * t))));
+}
+
+// Diverging map: warm where A is louder, cool where B is louder, dark where the
+// two agree. Cells below the display floor in both signals stay near-black so
+// noise-floor jitter does not paint the silence.
+fn writeLevelDiffColor(decibels_a: f32, decibels_b: f32, min_db: f32, range_db: f32, output: []u8) void {
+    if (core.maxF32(decibels_a, decibels_b) < min_db) {
+        output[0] = 6;
+        output[1] = 7;
+        output[2] = 12;
+        output[3] = 255;
+        return;
+    }
+
+    const t = core.clampf32((decibels_a - decibels_b) / core.maxF32(range_db, 0.1), -1.0, 1.0);
+    const magnitude = std.math.sqrt(@abs(t));
+    const extreme: [3]f32 = if (t >= 0.0) .{ 255.0, 112.0, 64.0 } else .{ 72.0, 160.0, 255.0 };
+    output[0] = lerpLevelDiffChannel(20.0, extreme[0], magnitude);
+    output[1] = lerpLevelDiffChannel(22.0, extreme[1], magnitude);
+    output[2] = lerpLevelDiffChannel(30.0, extreme[2], magnitude);
+    output[3] = 255;
+}
+
+// Same tile contract as wave_render_spectrogram_tile_rgba, but each cell shows
+// dB(session) - dB(reference) for the STFT-derived analyses.
+pub export fn wave_render_spectrogram_level_diff_tile_rgba(
+    tile_start_sample: i32,
+    tile_sample_span: i32,
+    column_offset: i32,
+    total_column_count: i32,
+    column_count: i32,
+    row_count: i32,
+    mel_band_count: i32,
+    fft_size: i32,
+    decimation_factor: i32,
+    min_frequency: f32,
+    max_frequency: f32,
+    analysis_type_value: i32,
+    frequency_scale_value: i32,
+    min_db: f32,
+    range_db: f32,
+    window_function_value: i32,
+    output_ptr: usize,
+) i32 {
+    if (core.g_session.samples.len == 0 or g_reference_samples.len != core.g_session.samples.len or output_ptr == 0 or column_count <= 0 or row_count <= 0 or fft_size <= 0 or decimation_factor <= 0 or total_column_count <= 0 or column_offset < 0 or column_offset + column_count > total_column_count or tile_sample_span <= 0 or !core.isFiniteF32(min_frequency) or !core.isFiniteF32(max_frequency) or !core.isFiniteF32(min_db) or !core.isFiniteF32(range_db)) {
+        return 0;
+    }
+
+    const analysis_type = core.decodeAnalysisType(analysis_type_value);
+    if (analysis_type != .spectrogram and analysis_type != .mel) return 0;
+    const frequency_scale = core.decodeFrequencyScale(frequency_scale_value);
+    const window_function = core.decodeWindowFunction(window_function_value);
+
+    const resource = getFftResource(fft_size, window_function) orelse return 0;
+    const tile_window = clampTileSampleWindow(tile_start_sample, tile_sample_span);
+    const safe_min_frequency = core.clampf32(min_frequency, core.g_session.min_frequency, core.g_session.max_frequency);
+    const safe_max_frequency = core.clampf32(max_frequency, safe_min_frequency, core.g_session.max_frequency);
+    if (safe_max_frequency <= safe_min_frequency) return 0;
+    const layout = getBandLayoutResource(
+        analysis_type,
+        frequency_scale,
+        fft_size,
+        decimation_factor,
+        row_count,
+        mel_band_count,
+        safe_min_frequency,
+        safe_max_frequency,
+    ) orelse return 0;
+
+    const row_total = @as(usize, @intCast(row_count));
+    const rows_a = core.allocator.alloc(f32, row_total) catch return 0;
+    defer core.allocator.free(rows_a);
+    const rows_b = core.allocator.alloc(f32, row_total) catch return 0;
+    defer core.allocator.free(rows_b);
+
+    const output = @as([*]u8, @ptrFromInt(output_ptr));
+    const output_width = @as(usize, @intCast(column_count));
+
+    var column_index: i32 = 0;
+    while (column_index < column_count) : (column_index += 1) {
+        const center_sample = computeColumnCenterSample(
+            tile_window.start_sample,
+            tile_window.sample_span,
+            column_offset,
+            column_index,
+            total_column_count,
+        );
+
+        writeStftRowDecibels(analysis_type, resource, layout, center_sample, decimation_factor, rows_a);
+        _ = wave_swap_reference_samples();
+        writeStftRowDecibels(analysis_type, resource, layout, center_sample, decimation_factor, rows_b);
+        _ = wave_swap_reference_samples();
+
+        for (rows_a, rows_b, 0..) |decibels_a, decibels_b, row| {
+            const target_row = row_total - row - 1;
+            const pixel_offset = ((target_row * output_width) + @as(usize, @intCast(column_index))) * 4;
+            writeLevelDiffColor(decibels_a, decibels_b, min_db, range_db, output[pixel_offset .. pixel_offset + 4]);
+        }
+    }
+
+    return 1;
+}
+
 pub export fn wave_render_spectrogram_tile_rgba(
     tile_start_sample: i32,
     tile_sample_span: i32,

@@ -43,8 +43,18 @@ export interface SpectrogramDefaultsPayload {
   windowFunction: 'blackman' | 'hamming' | 'hann' | 'rectangular';
 }
 
+// The second file of a compare panel. It is always decoded by the host, so only
+// identity fields travel with the payload.
+export interface ComparePayload {
+  documentUri: string;
+  fileExtension: string;
+  fileName: string;
+  fileSize: number | null;
+}
+
 export interface AudioscopePayload {
   audioBytes: ArrayBuffer | null;
+  compare: ComparePayload | null;
   documentUri: string;
   enableWebGpuRendering: boolean;
   splitChannels: boolean;
@@ -222,6 +232,11 @@ export interface RequestLoudnessSummaryMessage {
   body: { loadToken: number };
 }
 
+export interface RequestCompareSourceMessage {
+  type: 'requestCompareSource';
+  body: { loadToken: number };
+}
+
 export interface OpenExternalMessage {
   type: 'openExternal';
   body: { url: string };
@@ -250,6 +265,7 @@ export type WebviewToHostMessage =
   | RequestMediaMetadataMessage
   | RequestDecodeFallbackMessage
   | RequestLoudnessSummaryMessage
+  | RequestCompareSourceMessage
   | OpenExternalMessage
   | CopySelectionCsvMessage
   | PlaybackStateMessage;
@@ -294,6 +310,24 @@ export interface LoudnessSummaryErrorMessage {
   body: { loadToken: number; message: string };
 }
 
+export type CompareSourceReadyMessage =
+  & { type: 'compareSourceReady' }
+  & { body: DecodeFallbackPayload & { loadToken: number } };
+
+export interface CompareSourceErrorMessage {
+  type: 'compareSourceError';
+  body: { loadToken: number; message: string };
+}
+
+export interface CompareMetadataReadyMessage {
+  type: 'compareMetadataReady';
+  body: { loadToken: number; metadata: MediaMetadataPayload };
+}
+
+export type CompareLoudnessReadyMessage =
+  & { type: 'compareLoudnessReady' }
+  & { body: LoudnessSummaryPayload & { loadToken: number } };
+
 export type HostToWebviewMessage =
   | LoadAudioMessage
   | ExternalToolStatusMessage
@@ -302,4 +336,8 @@ export type HostToWebviewMessage =
   | DecodeFallbackReadyMessage
   | DecodeFallbackErrorMessage
   | LoudnessSummaryReadyMessage
-  | LoudnessSummaryErrorMessage;
+  | LoudnessSummaryErrorMessage
+  | CompareSourceReadyMessage
+  | CompareSourceErrorMessage
+  | CompareMetadataReadyMessage
+  | CompareLoudnessReadyMessage;

@@ -38,6 +38,7 @@ const workerEntries: Array<[string, string]> = [
   ['embeddedDecodeWorker', path.join(projectRoot, 'src-webview', 'embeddedDecodeWorker.ts')],
   ['interactiveWaveformWorker', path.join(projectRoot, 'src-webview', 'interactive-waveform', 'worker.ts')],
   ['pcmDownmixWorker', path.join(projectRoot, 'src-webview', 'pcmDownmixWorker.ts')],
+  ['compareWorker', path.join(projectRoot, 'src-webview', 'compareWorker.ts')],
 ];
 
 for (const [name, entry] of workerEntries) {

@@ -32,6 +32,7 @@ pub fn resetSessionState() void {
     spectrogram.freeChromaLayoutResources();
     spectrogram.freeScalogramResources();
     spectrogram.freeConstantQResources();
+    spectrogram.freeReferenceSamples();
     if (core.g_session.samples.len > 0) core.allocator.free(core.g_session.samples);
     core.g_session = .{};
 }

@@ -297,6 +297,95 @@ body {
   box-shadow: inset 0 -1px 0 var(--chrome-border);
 }
 
+.wave-panel[data-compare="true"] {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+/* Compare panels only: A/B identity, playback source, alignment and the
+   null-test readout, above the regular toolbar. */
+.compare-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 4px 0 0;
+  min-width: 0;
+  color: var(--chrome-text);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.compare-bar[hidden] {
+  display: none;
+}
+
+.compare-bar-files {
+  display: flex;
+  flex: 1 1 220px;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.compare-bar-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.compare-bar-tag {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--chrome-surface-active);
+  color: var(--chrome-text-strong);
+  font-weight: 600;
+}
+
+.compare-bar-name {
+  overflow: hidden;
+  color: var(--chrome-text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compare-bar .wave-tool-button[role="radio"][aria-checked="true"] {
+  border-color: var(--chrome-border-accent);
+  background: var(--chrome-surface-active);
+  color: var(--chrome-text-strong);
+}
+
+.compare-offset-input {
+  width: 68px;
+  min-height: 22px;
+  padding: 0 4px;
+  border: 0;
+  border-left: 1px solid var(--chrome-border);
+  background: transparent;
+  color: var(--chrome-text-strong);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.compare-bar-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.compare-bar-stats {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--chrome-text-dim);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .wave-toolbar {
   display: flex;
   flex-wrap: nowrap;

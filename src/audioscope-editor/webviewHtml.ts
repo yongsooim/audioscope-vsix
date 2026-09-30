@@ -18,6 +18,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     const waveformWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'interactiveWaveformWorker.js'));
     const decodeWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'embeddedDecodeWorker.js'));
     const pcmDownmixWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'pcmDownmixWorker.js'));
+    const compareWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'compareWorker.js'));
     const decodeBrowserModuleWasmUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'embedded-tools', 'ffdecode_module.wasm'));
     const audioTransportProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview', 'audioTransportProcessor.js'));
     const stretchProcessorUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'src-webview', 'vendor', 'SignalsmithStretch.mjs'));
@@ -36,10 +37,45 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
     <link rel="stylesheet" href="${styleUri}" />
     <title>audioscope</title>
   </head>
-  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-pcm-downmix-worker-src="${pcmDownmixWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}" data-wasm-core-simd-src="${wasmCoreSimdUri}" data-wasm-core-fallback-src="${wasmCoreFallbackUri}">
+  <body data-engine-worker-src="${engineWorkerUri}" data-analysis-worker-src="${analysisWorkerUri}" data-waveform-worker-src="${waveformWorkerUri}" data-decode-module-wasm-src="${decodeBrowserModuleWasmUri}" data-decode-worker-src="${decodeWorkerUri}" data-pcm-downmix-worker-src="${pcmDownmixWorkerUri}" data-compare-worker-src="${compareWorkerUri}" data-audio-transport-processor-src="${audioTransportProcessorUri}" data-stretch-processor-src="${stretchProcessorUri}" data-wasm-core-simd-src="${wasmCoreSimdUri}" data-wasm-core-fallback-src="${wasmCoreFallbackUri}">
     <main class="app-shell">
       <section id="audioscope-viewport" class="viewport" aria-label="audioscope waveform and spectrogram">
         <div id="wave-panel" class="wave-panel">
+          <div id="compare-bar" class="compare-bar" aria-label="Compare A and B" hidden>
+            <div class="compare-bar-files">
+              <span class="compare-bar-file"><span class="compare-bar-tag">A</span><span id="compare-file-a" class="compare-bar-name"></span></span>
+              <span class="compare-bar-file"><span class="compare-bar-tag">B</span><span id="compare-file-b" class="compare-bar-name"></span></span>
+            </div>
+            <div class="wave-toolbar-group wave-seg" role="radiogroup" aria-label="Playback source">
+              <span class="wave-seg-label" title="Playback source — 1 / 2 / 3, T swaps A and B">&#x25B6;&#xFE0E;</span>
+              <button id="compare-play-a" class="wave-tool-button" type="button" role="radio" aria-checked="true" title="Play A (1)">A</button>
+              <button id="compare-play-b" class="wave-tool-button" type="button" role="radio" aria-checked="false" title="Play B (2)">B</button>
+              <button id="compare-play-diff" class="wave-tool-button" type="button" role="radio" aria-checked="false" title="Play the A − B residual (3)">A−B</button>
+            </div>
+            <div class="wave-toolbar-group wave-seg" aria-label="Offset of B">
+              <span class="wave-seg-label" title="Offset of B relative to A, in samples">&#x0394;t</span>
+              <button id="compare-offset-down" class="wave-tool-button" type="button" aria-label="Shift B one sample earlier" title="Shift B one sample earlier (Shift: 10)">-</button>
+              <input id="compare-offset-input" class="compare-offset-input" type="number" step="1" inputmode="numeric" aria-label="Offset of B in samples" />
+              <button id="compare-offset-up" class="wave-tool-button" type="button" aria-label="Shift B one sample later" title="Shift B one sample later (Shift: 10)">+</button>
+              <button id="compare-offset-auto" class="wave-tool-button" type="button" title="Use the auto-detected offset">Auto</button>
+            </div>
+            <label class="compare-bar-toggle" title="Scale B by the least-squares gain that best matches A">
+              <input id="compare-gain-match" type="checkbox" />
+              <span>Match gain</span>
+            </label>
+            <div class="wave-toolbar-group wave-seg" role="radiogroup" aria-label="A − B spectrogram">
+              <span class="wave-seg-label" title="What the A − B spectrogram lane shows">&#x0394;</span>
+              <button id="compare-diff-residual" class="wave-tool-button" type="button" role="radio" aria-checked="true" title="Spectrogram of the A − B signal (phase-sensitive)">Residual</button>
+              <button id="compare-diff-level" class="wave-tool-button" type="button" role="radio" aria-checked="false" title="dB(A) − dB(B) per cell: warm where A is louder, cool where B is louder">Level dB</button>
+              <select id="compare-diff-range" class="wave-seg-select" aria-label="Level difference color range" title="Level difference that reaches full color">
+                <option value="3">±3 dB</option>
+                <option value="6">±6 dB</option>
+                <option value="12" selected>±12 dB</option>
+                <option value="24">±24 dB</option>
+              </select>
+            </div>
+            <div id="compare-stats" class="compare-bar-stats" aria-live="polite"></div>
+          </div>
           <div id="wave-toolbar" class="wave-toolbar">
             <div id="wave-toolbar-info" class="wave-toolbar-info">
               <div id="media-metadata-panel" class="media-metadata-panel" data-state="idle" aria-label="Audio metadata">
