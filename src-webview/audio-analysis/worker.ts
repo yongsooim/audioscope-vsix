@@ -95,11 +95,9 @@ type SurfaceBackend = '2d' | 'initializing' | 'uninitialized' | 'webgpu';
 type AnalysisRenderBackend = '2d-wasm' | 'webgpu-native';
 type SurfaceResetReason = 'device-lost' | 'surface-invalid';
 
-let WEBGPU_ENABLED = false;
-
 interface CanvasInitOptions {
-  enableWebGpu?: boolean;
   offscreenCanvas?: OffscreenCanvas;
+  surfaceRevision?: number;
   pixelHeight?: number;
   pixelWidth?: number;
 }
@@ -441,6 +439,8 @@ const surfaceState = {
   webGpu: null as WebGpuCompositorState | null,
   webGpuInitPromise: null as Promise<void> | null,
   webGpuPresentSerial: 0,
+  revision: 0,
+  presentedSessionVersion: -1,
 };
 
 let analysisState: AnalysisWorkerState = createEmptyAnalysisState();
@@ -609,14 +609,12 @@ self.onmessage = (event) => {
       if (request.sessionVersion !== analysisState.attachedSessionVersion) {
         return;
       }
-      const pcm = getSessionPcmData();
-      if (!pcm) {
+      const module = analysisState.module;
+      if (!module || !analysisState.initialized) {
         return;
       }
       try {
-        const result = analyzeSelection({
-          pcm,
-          sampleRate: analysisState.sampleRate,
+        const result = analyzeSelection(module, {
           startFrame: Number(request.startFrame),
           endFrame: Number(request.endFrame),
           fftSize: 4096,
@@ -1206,6 +1204,22 @@ function postAnalysisInitialized(): void {
   });
 }
 
+// Initial loading follows pixels presented, independent of detail-job generations.
+// Overview tiles and loudness curves can paint without a matching visibleReady.
+function postAnalysisSurfacePresented(): void {
+  if (!analysisState.initialized || surfaceState.presentedSessionVersion === analysisState.attachedSessionVersion) {
+    return;
+  }
+  surfaceState.presentedSessionVersion = analysisState.attachedSessionVersion;
+  self.postMessage({
+    type: 'analysisSurfacePresented',
+    body: {
+      sessionVersion: analysisState.attachedSessionVersion,
+      surfaceRevision: surfaceState.revision,
+    },
+  });
+}
+
 function requestAnalysisSurfaceReset(reason: SurfaceResetReason): void {
   const webGpu = surfaceState.webGpu;
   if (webGpu?.surfaceResetPending) {
@@ -1324,12 +1338,6 @@ async function initializeWebGpuCompositor(): Promise<void> {
     || surfaceState.webGpuInitPromise
     || !surfaceState.canvas
   ) {
-    return;
-  }
-
-  if (!WEBGPU_ENABLED) {
-    initialize2dSurface('WebGPU disabled.');
-    paintSpectrogramDisplayNow();
     return;
   }
 
@@ -1574,15 +1582,13 @@ function resizeWebGpuSurface(): void {
 }
 
 function initializeCanvas(options: CanvasInitOptions | undefined): void {
-  if (typeof options?.enableWebGpu === 'boolean') {
-    WEBGPU_ENABLED = options.enableWebGpu;
-  }
-
   if (options?.offscreenCanvas && options.offscreenCanvas !== surfaceState.canvas) {
     destroyWebGpuCompositor();
     surfaceState.context = null;
     surfaceState.canvas = options.offscreenCanvas;
     surfaceState.backend = 'uninitialized';
+    surfaceState.revision = Number(options.surfaceRevision) || 0;
+    surfaceState.presentedSessionVersion = -1;
   }
 
   surfaceState.pixelWidth = Math.max(1, Math.round(Number(options?.pixelWidth) || surfaceState.pixelWidth || 1));
@@ -2643,7 +2649,7 @@ function drawLoudnessLine(
   context.stroke();
 }
 
-function paintLoudnessDisplay(context: OffscreenCanvasRenderingContext2D): void {
+function paintLoudnessDisplay(context: OffscreenCanvasRenderingContext2D): boolean {
   const width = surfaceState.pixelWidth;
   const height = surfaceState.pixelHeight;
   const displayRange = analysisState.currentDisplayRange;
@@ -2653,7 +2659,7 @@ function paintLoudnessDisplay(context: OffscreenCanvasRenderingContext2D): void 
 
   const loudness = ensureLoudnessCache();
   if (!loudness || !(analysisState.sampleRate > 0)) {
-    return;
+    return false;
   }
 
   const viewStartSeconds = displayRange.start;
@@ -2744,6 +2750,7 @@ function paintLoudnessDisplay(context: OffscreenCanvasRenderingContext2D): void 
       sessionVersion: analysisState.attachedSessionVersion,
     },
   });
+  return true;
 }
 
 let loudnessScratchCanvas: OffscreenCanvas | null = null;
@@ -2758,16 +2765,14 @@ function getLoudnessScratchContext(width: number, height: number): OffscreenCanv
   return loudnessScratchContext;
 }
 
-function paintLoudnessToWebGpuSurface(): void {
+function paintLoudnessToWebGpuSurface(): boolean {
   const webGpu = surfaceState.webGpu;
-  if (!webGpu) { return; }
+  if (!webGpu) { return false; }
 
   const width = surfaceState.pixelWidth;
   const height = surfaceState.pixelHeight;
   const ctx = getLoudnessScratchContext(width, height);
-  if (!ctx) { return; }
-
-  paintLoudnessDisplay(ctx);
+  if (!ctx || !paintLoudnessDisplay(ctx)) { return false; }
 
   try {
     const texture = webGpu.canvasContext.getCurrentTexture();
@@ -2776,8 +2781,10 @@ function paintLoudnessToWebGpuSurface(): void {
       { texture },
       [width, height],
     );
+    return true;
   } catch {
     // copyExternalImageToTexture may fail if device is lost or texture is invalid.
+    return false;
   }
 }
 
@@ -2787,10 +2794,8 @@ function paintSpectrogramDisplay(): void {
 
   // Loudness uses its own 2D curve rendering — bypass WebGPU and tile layers.
   if (analysisState.currentAnalysisType === 'loudness') {
-    if (context) {
-      paintLoudnessDisplay(context);
-    } else if (surfaceState.webGpu) {
-      paintLoudnessToWebGpuSurface();
+    if (context ? paintLoudnessDisplay(context) : paintLoudnessToWebGpuSurface()) {
+      postAnalysisSurfacePresented();
     }
     return;
   }
@@ -2809,33 +2814,35 @@ function paintSpectrogramDisplay(): void {
     return;
   }
 
+  let painted = false;
   if (analysisState.overview.retainedPlan) {
-    paintLayer(context, analysisState.overview.retainedPlan, displayRange, {
+    painted = paintLayer(context, analysisState.overview.retainedPlan, displayRange, {
       smoothing: true,
       smoothingQuality: 'high',
-    });
+    }) || painted;
   }
 
   if (analysisState.overview.plan) {
-    paintLayer(context, analysisState.overview.plan, displayRange, {
+    painted = paintLayer(context, analysisState.overview.plan, displayRange, {
       smoothing: true,
       smoothingQuality: 'high',
-    });
+    }) || painted;
   }
 
   if (analysisState.visible.retainedPlan) {
-    paintLayer(context, analysisState.visible.retainedPlan, displayRange, {
+    painted = paintLayer(context, analysisState.visible.retainedPlan, displayRange, {
       smoothing: true,
       smoothingQuality: 'medium',
-    });
+    }) || painted;
   }
 
   if (analysisState.visible.plan) {
-    paintLayer(context, analysisState.visible.plan, displayRange, {
+    painted = paintLayer(context, analysisState.visible.plan, displayRange, {
       smoothing: true,
       smoothingQuality: 'medium',
-    });
+    }) || painted;
   }
+  if (painted) postAnalysisSurfacePresented();
 }
 
 function paintSpectrogramDisplayWithWebGpu(
@@ -2864,24 +2871,26 @@ function paintSpectrogramDisplayWithWebGpu(
     renderPass.setPipeline(webGpu.backgroundPipeline);
     renderPass.draw(6);
 
+    let painted = false;
     if (displayRange.end > displayRange.start) {
       if (analysisState.overview.retainedPlan) {
-        paintLayerWithWebGpu(renderPass, webGpu, analysisState.overview.retainedPlan, displayRange);
+        painted = paintLayerWithWebGpu(renderPass, webGpu, analysisState.overview.retainedPlan, displayRange) || painted;
       }
       if (analysisState.overview.plan) {
-        paintLayerWithWebGpu(renderPass, webGpu, analysisState.overview.plan, displayRange);
+        painted = paintLayerWithWebGpu(renderPass, webGpu, analysisState.overview.plan, displayRange) || painted;
       }
 
       if (analysisState.visible.retainedPlan) {
-        paintLayerWithWebGpu(renderPass, webGpu, analysisState.visible.retainedPlan, displayRange);
+        painted = paintLayerWithWebGpu(renderPass, webGpu, analysisState.visible.retainedPlan, displayRange) || painted;
       }
       if (analysisState.visible.plan) {
-        paintLayerWithWebGpu(renderPass, webGpu, analysisState.visible.plan, displayRange);
+        painted = paintLayerWithWebGpu(renderPass, webGpu, analysisState.visible.plan, displayRange) || painted;
       }
     }
 
     renderPass.end();
     webGpu.device.queue.submit([commandEncoder.finish()]);
+    if (painted) postAnalysisSurfacePresented();
     return true;
   } catch {
     requestAnalysisSurfaceReset('surface-invalid');
@@ -6307,16 +6316,16 @@ function paintLayerWithWebGpu(
   webGpu: WebGpuCompositorState,
   plan: RenderRequestPlan | null,
   displayRange: AnalysisWorkerState['currentDisplayRange'],
-): void {
+): boolean {
   const instances = collectLayerWebGpuInstances(webGpu, plan, displayRange);
   if (instances.length === 0) {
-    return;
+    return false;
   }
 
   ensurePresentInstanceBuffer(webGpu, instances.length);
   const instanceData = webGpu.presentInstanceData?.subarray(0, instances.length * 4);
   if (!instanceData) {
-    return;
+    return false;
   }
 
   for (let index = 0; index < instances.length; index += 1) {
@@ -6336,6 +6345,7 @@ function paintLayerWithWebGpu(
     renderPass.setBindGroup(0, instances[index].bindGroup);
     renderPass.draw(6, 1, 0, index);
   }
+  return true;
 }
 
 function paintLayer(
@@ -6343,9 +6353,9 @@ function paintLayer(
   plan: RenderRequestPlan | null,
   displayRange: AnalysisWorkerState['currentDisplayRange'],
   { smoothing, smoothingQuality }: { smoothing: boolean; smoothingQuality: ImageSmoothingQuality },
-): void {
+): boolean {
   if (!plan) {
-    return;
+    return false;
   }
 
   const destinationWidth = Math.max(1, surfaceState.pixelWidth);
@@ -6354,6 +6364,7 @@ function paintLayer(
   context.imageSmoothingEnabled = smoothing;
   context.imageSmoothingQuality = smoothingQuality;
 
+  let painted = false;
   for (let tileIndex = plan.startTileIndex; tileIndex <= plan.endTileIndex; tileIndex += 1) {
     const cacheKey = buildTileCacheKey(analysisState.quality, plan, tileIndex);
     const tile = getTileRecord(cacheKey);
@@ -6378,7 +6389,9 @@ function paintLayer(
       geometry.destinationWidthPx,
       destinationHeight,
     );
+    painted = true;
   }
+  return painted;
 }
 
 function ensureSpectrogramOutputCapacity(module: WaveCoreModule, byteLength: number): void {

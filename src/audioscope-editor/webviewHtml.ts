@@ -453,16 +453,6 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
                     <option value="show">Show</option>
                   </select>
                 </label>
-                <div class="spectrogram-control-divider" aria-hidden="true">Experimental</div>
-                <label id="spectrogram-webgpu-control" class="spectrogram-control" title="Render the spectrogram with WebGPU compute when available. Falls back to CPU automatically. Several times faster but uses extra GPU memory.">
-                  <span class="spectrogram-control-label">WebGPU</span>
-                  <span class="spectrogram-control-inline spectrogram-control-toggle-inline">
-                    <input id="spectrogram-webgpu-toggle" class="spectrogram-control-toggle-input" type="checkbox" aria-label="Enable experimental WebGPU spectrogram rendering" />
-                    <span class="spectrogram-control-toggle-track" aria-hidden="true">
-                      <span class="spectrogram-control-toggle-thumb"></span>
-                    </span>
-                  </span>
-                </label>
               </div>
             </div>
             <div id="spectrogram-hover-tooltip" class="surface-hover-tooltip surface-hover-tooltip-detail" aria-hidden="true"></div>
@@ -651,7 +641,11 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
           <div><span>Peak</span><output id="selection-analysis-peak">--</output></div>
           <div><span>RMS</span><output id="selection-analysis-rms">--</output></div>
           <div><span>DC offset</span><output id="selection-analysis-dc">--</output></div>
-          <div><span>Clipping</span><output id="selection-analysis-clipping">--</output></div>
+          <div title="Fraction of all selected samples with absolute amplitude ≥ 0.999. Near-full-scale samples do not necessarily indicate distortion."><span>Clipping</span><output id="selection-analysis-clipping">--</output></div>
+          <div title="20 × log10(peak / RMS), measured over every selected sample. Undefined for silence."><span>Crest factor</span><output id="selection-analysis-crest">--</output></div>
+          <div title="Sign changes divided by the number of adjacent sample pairs in the selection. Zero is treated as nonnegative."><span>ZCR</span><output id="selection-analysis-zcr">--</output></div>
+          <div title="Frequency of the strongest mean-power FFT bin, including DC. Estimated from up to 64 evenly spaced Hann windows; resolution is sample rate / 4096."><span>Dominant</span><output id="selection-analysis-dominant">--</output></div>
+          <div title="One-sided energy-weighted mean frequency, including DC. Estimated from the same FFT windows as the spectrum; undefined for silence."><span>Centroid</span><output id="selection-analysis-centroid">--</output></div>
         </div>
         <div id="selection-analysis-locations" class="selection-analysis-locations" aria-label="Measured sample positions"></div>
       </section>

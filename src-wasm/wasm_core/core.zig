@@ -114,6 +114,8 @@ pub const FftResource = struct {
     window: []f32 = &.{},
     power_spectrum: []f32 = &.{},
     low_power_spectrum: []f32 = &.{},
+    selection_power: []f64 = &.{},
+    selection_window: []f32 = &.{},
     next: ?*FftResource = null,
 
     pub fn deinit(self: *FftResource) void {
@@ -124,6 +126,8 @@ pub const FftResource = struct {
         if (self.window.len > 0) allocator.free(self.window);
         if (self.power_spectrum.len > 0) allocator.free(self.power_spectrum);
         if (self.low_power_spectrum.len > 0) allocator.free(self.low_power_spectrum);
+        if (self.selection_power.len > 0) allocator.free(self.selection_power);
+        if (self.selection_window.len > 0) allocator.free(self.selection_window);
         self.* = .{};
     }
 };

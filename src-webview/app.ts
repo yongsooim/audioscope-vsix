@@ -500,6 +500,10 @@ type SpectrogramAnalysisState = {
 
 type AnalysisWorkerToMainMessage =
   | {
+      body: { sessionVersion: number; surfaceRevision: number };
+      type: 'analysisSurfacePresented';
+    }
+  | {
       body: { requestId: number; result: SelectionAnalysisResult; sessionVersion: number };
       type: 'selectionAnalysisResult';
     }
@@ -789,6 +793,7 @@ const state = {
   spectrogramRenderForcePending: false,
   spectrogramSurfaceResetPromise: null as Promise<void> | null,
   spectrogramSurfaceReadyPromise: null as Promise<void> | null,
+  spectrogramSurfaceRevision: 0,
   viewportResizeDrag: null as { pointerId: number; startClientY: number; startRatio: number } | null,
   viewportSplitRatio: DEFAULT_VIEWPORT_SPLIT_RATIO,
   viewportSplitRatioPersistTimer: null as number | null,
@@ -1414,6 +1419,7 @@ async function ensureAnalysisWorker(loadToken: number): Promise<Worker | null> {
     }
     disposeAnalysisWorker();
     setAnalysisStatus(`Spectrogram failed: ${event.message || 'Unknown worker error.'}`, true);
+    setSurfaceLoading('spectrogram', false);
   });
   worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes } });
   return worker;
@@ -1585,11 +1591,10 @@ async function createSpectrogramSatellite(
   }
 
   const offscreenCanvas = canvas.transferControlToOffscreen();
-  const enableWebGpu = Boolean((state.activeFile as { enableWebGpuRendering?: boolean } | null)?.enableWebGpuRendering);
   const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
   worker.postMessage({
     type: 'initCanvas',
-    body: { offscreenCanvas, pixelHeight, pixelWidth, enableWebGpu },
+    body: { offscreenCanvas, pixelHeight, pixelWidth },
   }, [offscreenCanvas]);
   worker.postMessage({
     type: 'attachAudioSession',
@@ -1969,14 +1974,14 @@ async function initializeSpectrogramSurface(loadToken: number): Promise<void> {
 
   const offscreenCanvas = canvas.transferControlToOffscreen();
   const { pixelHeight, pixelWidth } = getSpectrogramCanvasTargetSize();
-  const enableWebGpu = Boolean((state.activeFile as { enableWebGpuRendering?: boolean } | null)?.enableWebGpuRendering);
+  state.spectrogramSurfaceRevision += 1;
   worker.postMessage({
     type: 'initCanvas',
     body: {
-      enableWebGpu,
       offscreenCanvas,
       pixelHeight,
       pixelWidth,
+      surfaceRevision: state.spectrogramSurfaceRevision,
     },
   }, [offscreenCanvas]);
 }
@@ -2000,41 +2005,6 @@ async function resetSpectrogramSurface(loadToken: number, reason: AnalysisSurfac
     });
 
   return state.spectrogramSurfaceResetPromise;
-}
-
-// Re-initializes the spectrogram surface so the worker re-reads the WebGPU flag
-// from initCanvas, switching the render backend without reopening the file.
-function applyWebGpuRenderingChange(): void {
-  if (!state.analysis?.initialized) {
-    return;
-  }
-
-  const loadToken = state.loadToken;
-  // The live canvas already transferred its control to the worker, so swap in a
-  // fresh element before re-initializing the surface.
-  resetSpectrogramCanvasElement();
-  void resetSpectrogramSurface(loadToken, 'surface-invalid')
-    .then(() => {
-      if (loadToken !== state.loadToken) {
-        return;
-      }
-      scheduleSpectrogramRender({ force: true });
-    })
-    .catch((error) => {
-      if (loadToken !== state.loadToken) {
-        return;
-      }
-      setAnalysisStatus(
-        `Spectrogram failed to switch renderer: ${error instanceof Error ? error.message : String(error)}`,
-        true,
-      );
-    });
-}
-
-function syncWebGpuToggleFromActiveFile(): void {
-  elements.spectrogramWebGpuToggle.checked = Boolean(
-    (state.activeFile as { enableWebGpuRendering?: boolean } | null)?.enableWebGpuRendering,
-  );
 }
 
 function syncSplitChannelsToggleFromActiveFile(): void {
@@ -3275,7 +3245,7 @@ function renderSelectionAnalysis(): void {
   const current = result && selection
     && result.startFrame === selection.startFrame && result.endFrame === selection.endFrame;
   elements.selectionAnalysisStatus.textContent = state.selectionAnalysisError
-    ?? (current ? `dBFS mean-power spectrum · ${result.spectrumWindowCount} Hann windows · FFT 4096 · ${result.sampleCount} samples · ${state.splitChannels ? 'channel 1' : 'mono mix'}`
+    ?? (current ? `Spectrum estimate · ${result.spectrumWindowCount} Hann windows · FFT 4096 · ${result.sampleCount} samples · ${state.splitChannels ? 'channel 1' : 'mono mix'}`
       : selection ? 'Analyzing selected range…' : 'Select a range to analyze.');
   elements.selectionAnalysisCopyCsv.disabled = !current;
   elements.selectionAnalysisCopySummary.disabled = !current;
@@ -3283,7 +3253,14 @@ function renderSelectionAnalysis(): void {
   elements.selectionAnalysisRms.textContent = current ? formatAmplitudeDbfs(result.rms) : '--';
   elements.selectionAnalysisDc.textContent = current ? result.dcOffset.toFixed(6) : '--';
   elements.selectionAnalysisClipping.textContent = current
-    ? `${result.clippingSampleCount} near-full-scale samples` : '--';
+    ? `${(100 * result.clippingRatio).toFixed(2)}% (${result.clippingSampleCount})` : '--';
+  elements.selectionAnalysisCrest.textContent = current && result.crestFactorDb !== null
+    ? `${result.crestFactorDb.toFixed(2)} dB` : '--';
+  elements.selectionAnalysisZcr.textContent = current ? `${result.zeroCrossingRate.toFixed(4)} /sample` : '--';
+  elements.selectionAnalysisDominant.textContent = current && result.dominantFrequencyHz !== null
+    ? `${result.dominantFrequencyHz.toFixed(1)} Hz` : '--';
+  elements.selectionAnalysisCentroid.textContent = current && result.spectralCentroidHz !== null
+    ? `${result.spectralCentroidHz.toFixed(1)} Hz` : '--';
   const locations = document.createDocumentFragment();
   if (current) {
     const positions = [
@@ -3390,6 +3367,12 @@ function copySelectionSummary(): void {
     `rms_dbfs,${result.rms > 0 ? (20 * Math.log10(result.rms)).toFixed(3) : '-Infinity'}`,
     `dc_offset,${result.dcOffset.toFixed(8)}`,
     `near_full_scale_samples,${result.clippingSampleCount}`,
+    `near_full_scale_ratio,${result.clippingRatio}`,
+    `crest_factor_db,${result.crestFactorDb ?? ''}`,
+    `zero_crossing_rate,${result.zeroCrossingRate}`,
+    `dominant_frequency_hz,${result.dominantFrequencyHz ?? ''}`,
+    `spectral_centroid_hz,${result.spectralCentroidHz ?? ''}`,
+    `spectrum_window_count,${result.spectrumWindowCount}`,
   ];
   vscode.postMessage({ type: 'copySelectionCsv', body: { csv: rows.join('\n') } });
   elements.selectionAnalysisStatus.textContent = 'Measurement values sent to clipboard.';
@@ -5514,6 +5497,13 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
     return;
   }
 
+  if (message?.type === 'analysisSurfacePresented') {
+    if (message.body.surfaceRevision === state.spectrogramSurfaceRevision) {
+      setSurfaceLoading('spectrogram', false);
+    }
+    return;
+  }
+
   if (message?.type === 'analysisInitialized') {
     state.lastSyncedSpectrogramDisplay = null;
     state.analysis.initialized = true;
@@ -5553,6 +5543,7 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
           `Spectrogram failed to recover surface: ${error instanceof Error ? error.message : String(error)}`,
           true,
         );
+        setSurfaceLoading('spectrogram', false);
       });
     return;
   }
@@ -5601,7 +5592,6 @@ function handleAnalysisWorkerMessage(loadToken: number, message: AnalysisWorkerT
       viewStart: Number(body.viewStart) || 0,
     };
     setAnalysisStatus('Ready');
-    setSurfaceLoading('spectrogram', false);
     return;
   }
 
@@ -6004,6 +5994,7 @@ async function initializePlaybackFromPreparedData(
       return;
     }
     setAnalysisStatus(`Spectrogram failed: ${error instanceof Error ? error.message : String(error)}`, true);
+    setSurfaceLoading('spectrogram', false);
   });
 
   await audioTransport.load({
@@ -6097,7 +6088,6 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
     state.playbackVolume = normalizePlaybackVolume(message.body?.playbackVolume);
     renderPlaybackVolumeUi();
     state.audioTransport?.setVolume(state.playbackVolume);
-    syncWebGpuToggleFromActiveFile();
     syncSplitChannelsToggleFromActiveFile();
     renderSpectrogramMeta();
     state.externalTools = normalizeExternalToolStatus(message.body?.externalTools, EMBEDDED_MEDIA_TOOLS_GUIDANCE);
@@ -6670,15 +6660,6 @@ function attachUiEvents(): void {
       elements.spectrogramDistributionSelect.value,
     );
     refreshSpectrogramAnalysisConfig();
-    scheduleKeyboardSurfaceFocus();
-  });
-  elements.spectrogramWebGpuToggle.addEventListener('change', () => {
-    const enabled = elements.spectrogramWebGpuToggle.checked;
-    if (state.activeFile) {
-      (state.activeFile as { enableWebGpuRendering?: boolean }).enableWebGpuRendering = enabled;
-    }
-    vscode.postMessage({ type: 'persistWebGpuRendering', body: { enabled } });
-    applyWebGpuRenderingChange();
     scheduleKeyboardSurfaceFocus();
   });
   elements.spectrogramSplitChannelsToggle.addEventListener('change', () => {

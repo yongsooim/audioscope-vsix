@@ -79,7 +79,10 @@ function createWebWorkerHarness(bundlePath: string): Worker {
         this.height = Math.max(1, Number(height) || 1);
       }
       getContext() {
-        return new Proxy({}, {
+        return new Proxy({
+          createLinearGradient: () => ({ addColorStop() {} }),
+          createImageData: (width, height) => ({ data: new Uint8ClampedArray(width * height * 4) }),
+        }, {
           get: (target, key) => (key in target ? target[key] : () => {}),
           set: (target, key, value) => { target[key] = value; return true; },
         });
@@ -637,3 +640,87 @@ test('startup bundle keeps optional stretch and decoder glue out of hot-path imp
   assert.ok(fs.statSync(mainBundlePath).size < 200_000, 'startup bundle exceeded 200 KB');
   assert.equal(fs.readFileSync(decoderWorkerPath, 'utf8').includes('import('), false);
 });
+
+test('selection analysis runs on the worker WASM session and transfers independent results', { timeout: 10_000 }, async () => {
+  const worker = createWebWorkerHarness(path.join(projectRoot, 'dist', 'webview', 'audioAnalysisWorker.js'));
+  try {
+    const ready = waitForWorkerMessage(worker, (message) => message.type === 'runtimeReady');
+    worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes: {
+      simd: readArrayBuffer(path.join(projectRoot, 'dist', 'wasm', 'wasm_core_simd.wasm')),
+      fallback: readArrayBuffer(path.join(projectRoot, 'dist', 'wasm', 'wasm_core_fallback.wasm')),
+    } } });
+    await ready;
+    const pcm = Float32Array.from({ length: 8192 }, (_, frame) => 0.5 * Math.sin(2 * Math.PI * 1024 * frame / 8192));
+    const initialized = waitForWorkerMessage(worker, (message) => message.type === 'analysisInitialized');
+    worker.postMessage({ type: 'attachAudioSession', body: {
+      duration: 1, sampleCount: pcm.length, sampleRate: 8192, samplesBuffer: pcm.buffer, sessionVersion: 7,
+    } }, [pcm.buffer]);
+    await initialized;
+    for (const requestId of [1, 2]) {
+      const response = waitForWorkerMessage(worker, (message) => message.type === 'selectionAnalysisResult'
+        || message.type === 'selectionAnalysisError');
+      worker.postMessage({ type: 'requestSelectionAnalysis', body: {
+        startFrame: 1024, endFrame: 7168, requestId, sessionVersion: 7,
+      } });
+      const message = await response;
+      assert.equal(message.type, 'selectionAnalysisResult', message.body?.message);
+      assert.equal(message.body.requestId, requestId);
+      assert.equal(message.body.sessionVersion, 7);
+      assert.equal(message.body.result.sampleCount, 6144);
+      assert.equal(message.body.result.dominantFrequencyHz, 1024);
+      assert.ok(Math.abs(message.body.result.crestFactorDb - 3.0103) < 0.001);
+      assert.equal(message.body.result.frequenciesHz.length, 2049);
+      assert.equal(message.body.result.levelsDb.length, 2049);
+    }
+  } finally {
+    await worker.terminate();
+  }
+});
+
+for (const analysisType of ['spectrogram', 'loudness']) {
+  test(`${analysisType} reports the first painted surface without a visible-range completion`, { timeout: 10_000 }, async () => {
+    const worker = createWebWorkerHarness(path.join(projectRoot, 'dist', 'webview', 'audioAnalysisWorker.js'));
+    const presented: any[] = [];
+    worker.on('message', (message) => {
+      if (message.type === 'analysisSurfacePresented') presented.push(message.body);
+    });
+    try {
+      const ready = waitForWorkerMessage(worker, (message) => message.type === 'runtimeReady');
+      worker.postMessage({ type: 'bootstrapRuntime', body: { wasmBytes: {
+        simd: readArrayBuffer(path.join(projectRoot, 'dist', 'wasm', 'wasm_core_simd.wasm')),
+        fallback: readArrayBuffer(path.join(projectRoot, 'dist', 'wasm', 'wasm_core_fallback.wasm')),
+      } } });
+      await ready;
+      const pcm = Float32Array.from({ length: 8192 }, (_, frame) => 0.5 * Math.sin(2 * Math.PI * 1024 * frame / 8192));
+      const initialized = waitForWorkerMessage(worker, (message) => message.type === 'analysisInitialized');
+      worker.postMessage({ type: 'attachAudioSession', body: {
+        duration: 1, sampleCount: pcm.length, sampleRate: 8192, samplesBuffer: pcm.buffer, sessionVersion: 7,
+      } }, [pcm.buffer]);
+      await initialized;
+      const init = (surfaceRevision: number) => worker.postMessage({ type: 'initCanvas', body: {
+        offscreenCanvas: { width: 320, height: 128 }, pixelWidth: 320, pixelHeight: 128, surfaceRevision,
+      } });
+      const request = { analysisType, fftSize: 1024, configVersion: 1, pixelWidth: 320, pixelHeight: 128 };
+      init(1);
+      // A background-only paint must not report loaded content.
+      const resized = waitForWorkerMessage(worker, (message) => message.type === 'analysisInitialized');
+      worker.postMessage({ type: 'resizeCanvas', body: { pixelWidth: 320, pixelHeight: 128 } });
+      await resized;
+      assert.equal(presented.length, 0);
+      worker.postMessage({ type: 'updateVisibleDisplayRange', body: {
+        displayStart: 0, displayEnd: 1, pixelWidth: 320, pixelHeight: 128,
+      } });
+      const firstPaint = waitForWorkerMessage(worker, (message) => message.type === 'analysisSurfacePresented', 1_000);
+      // Overview paints real pixels without ever emitting visibleReady; loudness bypasses tiles entirely.
+      worker.postMessage({ type: 'renderOverview', body: request });
+      assert.deepEqual((await firstPaint).body, { sessionVersion: 7, surfaceRevision: 1 });
+      const repeatPaint = waitForWorkerMessage(worker, (message) => message.type === 'analysisSurfacePresented', 1_000);
+      init(2);
+      worker.postMessage({ type: 'renderOverview', body: request });
+      assert.deepEqual((await repeatPaint).body, { sessionVersion: 7, surfaceRevision: 2 });
+      assert.equal(presented.length, 2, 'each surface reports readiness only once');
+    } finally {
+      await worker.terminate();
+    }
+  });
+}

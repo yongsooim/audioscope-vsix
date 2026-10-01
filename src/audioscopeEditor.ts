@@ -363,17 +363,10 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
           return;
         }
 
-        case 'persistWebGpuRendering': {
-          await vscode.workspace
-            .getConfiguration('audioscope')
-            .update('experimental.enableWebGpuRendering', Boolean(message.body?.enabled), vscode.ConfigurationTarget.Global);
-          return;
-        }
-
         case 'persistSplitChannels': {
           await vscode.workspace
             .getConfiguration('audioscope')
-            .update('experimental.splitChannels', Boolean(message.body?.enabled), vscode.ConfigurationTarget.Global);
+            .update('splitChannels', Boolean(message.body?.enabled), vscode.ConfigurationTarget.Global);
           return;
         }
 
@@ -641,12 +634,13 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
     const spectrogramDefaults = normalizeSpectrogramDefaults(
       vscode.workspace.getConfiguration('audioscope').get('spectrogramDefaults', DEFAULT_SPECTROGRAM_DEFAULTS),
     );
-    const enableWebGpuRendering = vscode.workspace
-      .getConfiguration('audioscope', documentUri)
-      .get<boolean>('experimental.enableWebGpuRendering', true);
-    const splitChannels = vscode.workspace
-      .getConfiguration('audioscope', documentUri)
-      .get<boolean>('experimental.splitChannels', false);
+    const channelConfiguration = vscode.workspace.getConfiguration('audioscope', documentUri);
+    const channelSetting = channelConfiguration.inspect<boolean>('splitChannels');
+    // Keep previously saved channel preferences until the regular setting is set.
+    const splitChannels = channelSetting?.workspaceFolderValue
+      ?? channelSetting?.workspaceValue
+      ?? channelSetting?.globalValue
+      ?? channelConfiguration.get<boolean>('experimental.splitChannels', false);
     const viewportSplitRatioSetting = Number(
       vscode.workspace.getConfiguration('audioscope', documentUri).get<number>('viewportSplitRatio', 0.5),
     );
@@ -676,7 +670,6 @@ export class AudioscopeEditorProvider implements vscode.CustomReadonlyEditorProv
         }
         : null,
       documentUri: documentUri.toString(),
-      enableWebGpuRendering,
       splitChannels,
       viewportSplitRatio,
       waveformAmplitudeMax,

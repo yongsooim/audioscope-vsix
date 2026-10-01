@@ -18,7 +18,7 @@
 
 ![A/B comparison, gain matching, and spectral level difference](./images/01-compare-files.webp)
 
-**Channel views** — switch from the mono downmix to separate channel waveforms and spectrograms (experimental).
+**Channel views** — switch from the mono downmix to separate channel waveforms and spectrograms.
 
 ![Mono downmix and separate stereo channel views](./images/07-channel-views.webp)
 
@@ -46,11 +46,12 @@
 
 ![Follow playback](./images/03-follow-playhead.webp)
 
-- **Selection analysis:** inspect spectrum, peak, RMS, and DC offset; copy spectrum data as CSV.
+- **Selection analysis:** inspect spectrum, peak, RMS, DC offset, clipping ratio, crest factor, zero-crossing rate, dominant frequency, and spectral centroid; copy measurements or spectrum data as CSV. WASM computes time-domain statistics in one pass over every selected sample and reuses the spectrogram's FFT resources for spectral estimates from up to 64 evenly spaced windows.
+- **Audio paths in text:** hover a path in a manifest, log, or source file and choose **Open in audioscope**, or run **audioscope: Open Audio Path at Cursor**. Supports quoted paths with spaces, JSON-escaped paths, absolute paths, and paths relative to the text file or workspace folders, including Remote SSH.
 - **Export:** save a selection or the whole file as WAV, MP3, M4A, or FLAC.
 - **Playback:** adjust speed, volume, and waveform amplitude; seek and zoom to a selection.
 - **Metadata:** inspect codec, format, tags, and chapters with chapter navigation.
-- **Acceleration:** use experimental WebGPU analysis with WASM fallback.
+- **Acceleration:** automatically use WebGPU analysis when available, with CPU/WASM fallback.
 
 ## Quick Start
 
@@ -64,7 +65,9 @@ The editor is read-only. VS Code Media Preview may take precedence on first open
 
 ## Settings
 
-Open VS Code Settings and search for `audioscope` to adjust analysis quality, defaults, and experimental features. Playback volume, waveform amplitude, and the panel split are saved automatically.
+Open VS Code Settings and search for `audioscope` to adjust analysis quality, defaults, and channel views. Playback volume, waveform amplitude, and the panel split are saved automatically.
+
+Text-path navigation can be disabled with `audioscope.audioPathNavigation.enabled`. Only the hovered line is parsed (up to 20,000 characters); files are checked when you open the path.
 
 ## Development
 

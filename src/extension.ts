@@ -1,8 +1,10 @@
 import * as vscode from 'vscode';
 import { AudioscopeEditorProvider } from './audioscopeEditor';
+import { registerAudioPathNavigation } from './audioPathNavigation';
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(AudioscopeEditorProvider.register(context));
+  context.subscriptions.push(registerAudioPathNavigation());
   void maybeOpenBundledSample(context);
 }
 

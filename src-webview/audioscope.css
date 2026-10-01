@@ -1361,19 +1361,6 @@ body {
   white-space: nowrap;
 }
 
-.spectrogram-control-divider {
-  margin-top: 3px;
-  padding-top: 8px;
-  border-top: 1px solid var(--chrome-border);
-  color: var(--chrome-text);
-  font-family: var(--mono);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  opacity: 0.62;
-}
-
 .spectrogram-control-toggle-inline {
   position: relative;
   justify-content: flex-start;
@@ -2514,7 +2501,7 @@ body {
 
 .analysis-status {
   /* Status badge fully suppressed (Ready / Loading… / Decoding… / errors and
-     the messages that flash on reload when experimental toggles change). */
+     the messages that flash on reload when channel settings change). */
   display: none;
   justify-self: end;
   min-width: 0;

@@ -56,7 +56,6 @@ export interface AudioscopePayload {
   audioBytes: ArrayBuffer | null;
   compare: ComparePayload | null;
   documentUri: string;
-  enableWebGpuRendering: boolean;
   splitChannels: boolean;
   viewportSplitRatio: number;
   waveformAmplitudeMax: number;
@@ -181,11 +180,6 @@ export interface PersistSpectrogramDefaultsMessage {
   body: Partial<SpectrogramDefaultsPayload>;
 }
 
-export interface PersistWebGpuRenderingMessage {
-  type: 'persistWebGpuRendering';
-  body: { enabled: boolean };
-}
-
 export interface PersistSplitChannelsMessage {
   type: 'persistSplitChannels';
   body: { enabled: boolean };
@@ -256,7 +250,6 @@ export type WebviewToHostMessage =
   | ReadyMessage
   | ReloadMessage
   | PersistSpectrogramDefaultsMessage
-  | PersistWebGpuRenderingMessage
   | PersistSplitChannelsMessage
   | PersistViewportSplitRatioMessage
   | PersistWaveformAmplitudeMaxMessage

@@ -2,7 +2,7 @@
   "name": "audioscope",
   "displayName": "audioscope",
   "description": "Audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
@@ -70,6 +70,7 @@
     "workspace"
   ],
   "activationEvents": [
+    "onLanguage",
     "onCustomEditor:audioscope.editor",
     "onCommand:audioscope.openActiveFileInAudioscope",
     "onCommand:audioscope.compareAudioFiles",
@@ -106,28 +107,22 @@
     "configuration": {
       "title": "audioscope",
       "properties": {
+        "audioscope.audioPathNavigation.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Show an Open in audioscope hover action for audio paths in text files. Paths are resolved from the text file's directory, then workspace folders, only when opened."
+        },
         "audioscope.openSampleOnStartupInDevelopment": {
           "type": "boolean",
           "default": true,
           "description": "Automatically open the bundled sample audio file in audioscope when the extension runs in development mode."
         },
-        "audioscope.experimental.enableWebGpuRendering": {
-          "type": "boolean",
-          "default": true,
-          "scope": "window",
-          "tags": [
-            "experimental"
-          ],
-          "markdownDescription": "Automatically render analysis with WebGPU compute when validation succeeds, falling back to the CPU/WASM path otherwise. Disable this to reduce GPU memory usage. Reopen audio files for changes to take effect."
-        },
-        "audioscope.experimental.splitChannels": {
+        "audioscope.splitChannels": {
           "type": "boolean",
           "default": false,
           "scope": "window",
-          "tags": [
-            "experimental"
-          ],
-          "markdownDescription": "(Experimental) Visualize each audio channel as its own stacked lane in the waveform and spectrogram instead of a single mono downmix. Increases compute and memory roughly in proportion to the channel count."
+          "markdownDescription": "Visualize each audio channel as its own stacked lane in the waveform and spectrogram instead of a single mono downmix. Increases compute and memory roughly in proportion to the channel count."
         },
         "audioscope.viewportSplitRatio": {
           "type": "number",
@@ -293,6 +288,11 @@
     },
     "commands": [
       {
+        "command": "audioscope.openAudioPathAtCursor",
+        "title": "Open Audio Path at Cursor",
+        "category": "audioscope"
+      },
+      {
         "command": "audioscope.openActiveFileInAudioscope",
         "title": "Open in audioscope",
         "category": "audioscope"
@@ -314,6 +314,13 @@
       }
     ],
     "menus": {
+      "editor/context": [
+        {
+          "command": "audioscope.openAudioPathAtCursor",
+          "when": "editorTextFocus && config.audioscope.audioPathNavigation.enabled",
+          "group": "navigation@46"
+        }
+      ],
       "explorer/context": [
         {
           "command": "audioscope.openActiveFileInAudioscope",

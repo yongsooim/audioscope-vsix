@@ -32,7 +32,7 @@ pub fn freeConstantQResources() void {
     resource_pool.disposeAll(core.ConstantQResource, &core.g_session.constant_q_resources);
 }
 
-fn getFftResource(fft_size_i32: i32, window_function: core.WindowFunction) ?*core.FftResource {
+pub fn getFftResource(fft_size_i32: i32, window_function: core.WindowFunction) ?*core.FftResource {
     const fft_size = @as(usize, @intCast(fft_size_i32));
     const maximum_bin = @as(usize, @intCast(core.maxI32(2, @divTrunc(fft_size_i32, 2))));
     var current = core.g_session.fft_resources;

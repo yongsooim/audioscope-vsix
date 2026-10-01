@@ -4,6 +4,7 @@ const exportedFunctionNames = [
   'wave_dispose_session',
   'wave_prepare_session',
   'wave_get_pcm_ptr',
+  'wave_analyze_selection',
   'wave_begin_waveform_pyramid_build',
   'wave_build_waveform_pyramid',
   'wave_build_waveform_pyramid_step',
@@ -61,6 +62,13 @@ export interface WaveCoreModule {
     metaOutputPointer: number,
   ): number;
   _wave_get_pcm_ptr(): number;
+  _wave_analyze_selection(
+    startFrame: number,
+    endFrame: number,
+    fftSize: number,
+    windowFunction: number,
+    outputPointer: number,
+  ): number;
   _wave_plan_spectrogram_follow_render(
     displayStart: number,
     displayEnd: number,
