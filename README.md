@@ -14,17 +14,17 @@
 
 ## Features
 
+**Compare files** — align A/B audio, match gain, and switch between the originals, A − B residual, and spectral level differences.
+
+![A/B comparison, gain matching, and spectral level difference](./images/01-compare-files.webp)
+
+**Channel views** — switch from the mono downmix to separate channel waveforms and spectrograms (experimental).
+
+![Mono downmix and separate stereo channel views](./images/07-channel-views.webp)
+
 **Sample inspection** — zoom into individual samples and read per-channel amplitudes.
 
 ![Sample-level inspection](./images/02-sample-level-inspection.webp)
-
-**Follow playback** — keep the playhead in view as the audio plays.
-
-![Follow playback](./images/03-follow-playhead.webp)
-
-**Loop selection** — select a range, adjust its edges, and repeat it.
-
-![Loop selection](./images/04-loop-region.webp)
 
 **Spectrogram** — inspect time and frequency with synchronized zoom and hover readouts.
 
@@ -38,12 +38,19 @@
 
 ![Loudness LUFS view](./images/09-loudness-lufs.webp)
 
-- **Compare files:** align A/B audio, match gain, and inspect the A − B residual or spectral level difference.
+**Loop selection** — select a range, adjust its edges, and repeat it.
+
+![Loop selection](./images/04-loop-region.webp)
+
+**Follow playback** — keep the playhead in view as the audio plays.
+
+![Follow playback](./images/03-follow-playhead.webp)
+
 - **Selection analysis:** inspect spectrum, peak, RMS, and DC offset; copy spectrum data as CSV.
 - **Export:** save a selection or the whole file as WAV, MP3, M4A, or FLAC.
 - **Playback:** adjust speed, volume, and waveform amplitude; seek and zoom to a selection.
 - **Metadata:** inspect codec, format, tags, and chapters with chapter navigation.
-- **Experimental:** view channels separately and accelerate analysis with WebGPU (WASM fallback).
+- **Acceleration:** use experimental WebGPU analysis with WASM fallback.
 
 ## Quick Start
 
