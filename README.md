@@ -57,7 +57,7 @@
 
 1. Install the extension and open an audio file.
 2. If needed, right-click the file and choose **Open in audioscope**.
-3. To compare, select two audio files in the Explorer and choose **Compare Audio Files…**.
+3. To compare, select two audio files in the Explorer and choose **Compare Audio Files…**. B is automatically aligned to A using FFT cross-correlation within ±2 seconds, then refined to the nearest sample. Adjust the sample offset manually if needed, or choose **Auto align** to restore the estimate. Silent or constant signals keep a zero automatic offset.
 
 The editor is read-only. VS Code Media Preview may take precedence on first open.
 

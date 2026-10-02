@@ -57,7 +57,7 @@ export function getAudioscopeWebviewHtml(context: vscode.ExtensionContext, webvi
               <button id="compare-offset-down" class="wave-tool-button" type="button" aria-label="Shift B one sample earlier" title="Shift B one sample earlier (Shift: 10)">-</button>
               <input id="compare-offset-input" class="compare-offset-input" type="number" step="1" inputmode="numeric" aria-label="Offset of B in samples" />
               <button id="compare-offset-up" class="wave-tool-button" type="button" aria-label="Shift B one sample later" title="Shift B one sample later (Shift: 10)">+</button>
-              <button id="compare-offset-auto" class="wave-tool-button" type="button" title="Use the auto-detected offset">Auto</button>
+              <button id="compare-offset-auto" class="wave-tool-button" type="button" title="Align B to A using cross-correlation (up to ±2 seconds)">Auto align</button>
             </div>
             <label class="compare-bar-toggle" title="Scale B by the least-squares gain that best matches A">
               <input id="compare-gain-match" type="checkbox" />

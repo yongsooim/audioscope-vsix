@@ -14,7 +14,7 @@ const OFFSET_REFINE_SAMPLES = 65536;
 export interface OffsetEstimate {
   // A[n] ~ B[n + offsetSamples]; positive means B starts later than A.
   offsetSamples: number;
-  // Normalized correlation at the chosen offset (0..1).
+  // DC-centered normalized correlation at the chosen offset (0..1).
   confidence: number;
 }
 
@@ -105,6 +105,7 @@ export function downmixToMono(channels: Float32Array[], length: number): Pcm {
 function decimate(input: Float32Array, factor: number, maxLength: number): Float32Array {
   const length = Math.min(maxLength, Math.floor(input.length / factor));
   const output = new Float32Array(length);
+  let total = 0;
   for (let index = 0; index < length; index += 1) {
     let sum = 0;
     const start = index * factor;
@@ -112,6 +113,12 @@ function decimate(input: Float32Array, factor: number, maxLength: number): Float
       sum += input[start + tap];
     }
     output[index] = sum / factor;
+    total += output[index];
+  }
+  // DC bias must not dominate the cross-spectrum's delay estimate.
+  const mean = length > 0 ? total / length : 0;
+  for (let index = 0; index < length; index += 1) {
+    output[index] -= mean;
   }
   return output;
 }
@@ -192,7 +199,7 @@ function crossCorrelate(a: Float32Array, b: Float32Array, maxLag: number): { lag
   fft(aRe, aIm, true);
 
   let bestLag = 0;
-  let bestValue = -Infinity;
+  let bestValue = 0;
   const limit = Math.min(maxLag, size / 2 - 1);
   for (let lag = -limit; lag <= limit; lag += 1) {
     const value = aRe[lag >= 0 ? lag : size + lag];
@@ -226,12 +233,25 @@ function correlationAt(a: Float32Array, b: Float32Array, lag: number, start: num
   let dot = 0;
   let energyA = 0;
   let energyB = 0;
-  const end = Math.min(a.length, start + length);
-  for (let index = start; index < end; index += 1) {
-    const other = index + lag;
-    const valueB = other >= 0 && other < b.length ? b[other] : 0;
-    dot += a[index] * valueB;
-    energyA += a[index] * a[index];
+  let sumA = 0;
+  let sumB = 0;
+  const end = Math.min(a.length, start + length, b.length - lag);
+  const first = Math.max(start, -lag);
+  const count = end - first;
+  if (count < 2) {
+    return 0;
+  }
+  for (let index = first; index < end; index += 1) {
+    sumA += a[index];
+    sumB += b[index + lag];
+  }
+  const meanA = sumA / count;
+  const meanB = sumB / count;
+  for (let index = first; index < end; index += 1) {
+    const valueA = a[index] - meanA;
+    const valueB = b[index + lag] - meanB;
+    dot += valueA * valueB;
+    energyA += valueA * valueA;
     energyB += valueB * valueB;
   }
   const norm = Math.sqrt(energyA * energyB);
@@ -252,16 +272,19 @@ export function estimateOffset(
   const analysisLength = Math.ceil((OFFSET_ANALYSIS_SECONDS * sampleRate) / factor);
   const coarseA = decimate(monoA, factor, analysisLength);
   const coarseB = decimate(monoB, factor, analysisLength);
-  const maxCoarseLag = Math.ceil((maxLagSeconds * sampleRate) / factor);
+  const maxLag = Math.max(0, Math.floor(maxLagSeconds * sampleRate));
+  const maxCoarseLag = Math.ceil(maxLag / factor);
   const coarse = coarseA.length > 0 && coarseB.length > 0
     ? crossCorrelate(coarseA, coarseB, maxCoarseLag).lag * factor
     : 0;
 
   const segmentLength = Math.min(OFFSET_REFINE_SAMPLES, monoA.length);
   const segmentStart = findLoudestSegmentStart(monoA, segmentLength, OFFSET_ANALYSIS_SECONDS * sampleRate);
-  let bestLag = coarse;
-  let bestCorrelation = -Infinity;
-  for (let lag = coarse - 2 * factor; lag <= coarse + 2 * factor; lag += 1) {
+  let bestLag = 0;
+  let bestCorrelation = 0;
+  const firstLag = Math.max(-maxLag, coarse - 2 * factor);
+  const lastLag = Math.min(maxLag, coarse + 2 * factor);
+  for (let lag = firstLag; lag <= lastLag; lag += 1) {
     const value = correlationAt(monoA, monoB, lag, segmentStart, segmentLength);
     if (value > bestCorrelation) {
       bestCorrelation = value;
@@ -270,7 +293,7 @@ export function estimateOffset(
   }
 
   return {
-    confidence: Math.max(0, bestCorrelation),
+    confidence: Math.min(1, bestCorrelation),
     offsetSamples: bestLag,
   };
 }

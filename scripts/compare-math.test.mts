@@ -57,6 +57,53 @@ test('aligning by the estimated offset and matching gain nulls a scaled copy', (
   assert.ok((stats.nullDepthDb ?? 0) > 80, `null depth ${stats.nullDepthDb}`);
 });
 
+test('auto alignment leaves silent and constant signals at zero offset', () => {
+  const signal = noiseBurst(8000, 17);
+  for (const [a, b] of [
+    [new Float32Array(8000), new Float32Array(8000)],
+    [signal, new Float32Array(8000)],
+    [new Float32Array(8000), signal],
+    [new Float32Array(8000).fill(0.25), new Float32Array(8000).fill(0.5)],
+    [new Float32Array(7999).fill(0.1), new Float32Array(6001).fill(0.3)],
+  ]) {
+    assert.deepEqual(estimateOffset(a, b, 4000), { confidence: 0, offsetSamples: 0 });
+  }
+});
+
+test('auto alignment respects a zero-width search range during refinement', () => {
+  const a = noiseBurst(8000, 19);
+  const b = new Float32Array(a.length + 1);
+  b.set(a, 1);
+  assert.equal(estimateOffset(a, b, 4000, 0).offsetSamples, 0);
+});
+
+test('auto alignment recovers both endpoints of the allowed search range', () => {
+  const sampleRate = 44100;
+  const maxLagSeconds = 0.025;
+  const maxLag = Math.floor(sampleRate * maxLagSeconds);
+  const a = noiseBurst(sampleRate, 31);
+  for (const delay of [-maxLag, maxLag]) {
+    const b = alignChannel(a, -delay, a.length + Math.max(0, delay));
+    const estimate = estimateOffset(a, b, sampleRate, maxLagSeconds);
+    assert.equal(estimate.offsetSamples, delay);
+    assert.ok(estimate.confidence > 0.99, `confidence ${estimate.confidence}`);
+  }
+});
+
+test('auto alignment recovers a delayed copy with gain, DC bias, and noise', () => {
+  const sampleRate = 44100;
+  const delay = 523;
+  const a = noiseBurst(sampleRate * 2, 23);
+  const interference = noiseBurst(a.length, 29);
+  const b = new Float32Array(a.length + delay).fill(0.4);
+  for (let index = 0; index < a.length; index += 1) {
+    b[index + delay] += a[index] * 0.5 + interference[index] * 0.02;
+  }
+  const estimate = estimateOffset(a, b, sampleRate);
+  assert.equal(estimate.offsetSamples, delay);
+  assert.ok(estimate.confidence > 0.99, `confidence ${estimate.confidence}`);
+});
+
 test('resampling keeps a tone at the same frequency and level', () => {
   const fromRate = 44100;
   const toRate = 48000;
