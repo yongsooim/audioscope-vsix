@@ -56,6 +56,27 @@ async function audioFrame(page: Page): Promise<Frame> {
   throw new Error('The installed audio editor did not create a webview.');
 }
 
+async function openInstalledEditor(page: Page): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    // The palette snapshots commands when opened. Reopen it if the installed
+    // extension's contributions have not finished registering yet.
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+P' : 'Control+Shift+P');
+    const input = page.locator('.quick-input-widget input');
+    await input.fill('>audioscope: Open in audioscope');
+    const command = page.locator('.quick-input-list .monaco-list-row.focused').filter({ hasText: 'Open in audioscope' });
+    const available = await command.waitFor({ state: 'visible', timeout: 1_000 }).then(() => true, () => false);
+    if (available) {
+      await input.press('Enter');
+      await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
+      return;
+    }
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(200);
+  }
+  throw new Error('The installed audioscope Open command did not register.');
+}
+
 await install();
 const installed = (await fs.readdir(extensions)).find((entry) => entry.startsWith('yongsooim.audioscope-'));
 assert.ok(installed, 'The VSIX must be installed into the isolated extension directory.');
@@ -103,12 +124,7 @@ for (const mode of modes) {
     // Use the installed extension's Open command after startup so editor
     // association resolution cannot race extension scanning on a fresh profile.
     await page.locator('.tabs-container .tab').filter({ hasText: 'sample-tone.wav' }).first().waitFor({ state: 'visible' });
-    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+P' : 'Control+Shift+P');
-    const input = page.locator('.quick-input-widget input');
-    await input.fill('>audioscope: Open in audioscope');
-    await page.locator('.quick-input-list .monaco-list-row.focused').filter({ hasText: 'Open in audioscope' }).waitFor({ state: 'visible' });
-    await input.press('Enter');
-    await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
+    await openInstalledEditor(page);
     await app.evaluate(({ webContents }) => {
       for (const contents of webContents.getAllWebContents()) contents.setAudioMuted(true);
       return true;
