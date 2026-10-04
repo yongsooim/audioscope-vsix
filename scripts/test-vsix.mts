@@ -134,7 +134,8 @@ for (const mode of modes) {
     await frame.waitForFunction(() => !(document.querySelector('#play-toggle') as HTMLButtonElement)?.disabled, undefined, { timeout: 60_000 });
     const opened = JSON.parse(await fs.readFile(driverStatus, 'utf8'));
     assert.equal(opened.error, undefined);
-    assert.equal(path.resolve(opened.path), path.resolve(extensions, installed));
+    const normalizedPath = (value: string) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+    assert.equal(normalizedPath(opened.path), normalizedPath(path.join(extensions, installed)));
     const launchToReadyMs = performance.now() - startedAt;
     await frame.waitForFunction(() => document.querySelector('#media-metadata-panel')?.getAttribute('data-state') === 'ready', undefined, { timeout: 30_000 });
     const toolDetails = await frame.locator('#media-metadata-detail').textContent() || '';
