@@ -72,6 +72,7 @@ for (const mode of modes) {
     'security.workspace.trust.enabled': false,
     'extensions.ignoreRecommendations': true, 'telemetry.telemetryLevel': 'off',
     'git.enabled': false,
+    'update.mode': 'none', 'workbench.enableExperiments': false,
     'audioscope.openSampleOnStartupInDevelopment': false,
     'audioscope.nativeDecoding': mode === 'native-experimental',
     'audioscope.playbackVolume': 0.25,
@@ -80,11 +81,12 @@ for (const mode of modes) {
   if (mode === 'wasm-fallback') await fs.rename(nativeDirectory, nativeDirectory + '.disabled');
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined;
   try {
+    const startedAt = performance.now();
     app = await electron.launch({
       executablePath: executable,
       args: ['--new-window', '--skip-welcome', '--skip-release-notes',
         '--disable-workspace-trust', '--no-sandbox', '--disable-gpu-sandbox',
-        '--user-data-dir=' + userData, '--extensions-dir=' + extensions, fixture],
+        '--user-data-dir=' + userData, '--extensions-dir=' + extensions, fixture, path.join(fixture, 'sample-tone.wav')],
       env: isolatedEnv, timeout: 60_000,
     });
     app.process().stderr?.on('data', (chunk) => process.stderr.write(chunk));
@@ -96,16 +98,10 @@ for (const mode of modes) {
       for (const contents of webContents.getAllWebContents()) contents.setAudioMuted(true);
       return true;
     });
-    const startedAt = performance.now();
-    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+p' : 'Control+p');
-    const input = page.locator('.quick-input-widget input').first();
-    await input.waitFor();
-    await input.fill(path.join(fixture, 'sample-tone.wav'));
-    await page.keyboard.press('Enter');
     const frame = await audioFrame(page);
     await frame.locator('#play-toggle').waitFor({ state: 'visible' });
     await frame.waitForFunction(() => !(document.querySelector('#play-toggle') as HTMLButtonElement)?.disabled, undefined, { timeout: 60_000 });
-    const openToReadyMs = performance.now() - startedAt;
+    const launchToReadyMs = performance.now() - startedAt;
     await frame.waitForFunction(() => document.querySelector('#media-metadata-panel')?.getAttribute('data-state') === 'ready', undefined, { timeout: 30_000 });
     assert.equal(await frame.locator('#status').isVisible(), false);
     await frame.waitForFunction(() => (document.querySelector('#waveform-loading') as HTMLElement)?.hidden === true, undefined, { timeout: 30_000 });
@@ -170,8 +166,8 @@ for (const mode of modes) {
       assert.ok(Math.abs(Number(metadata.format.duration) - 1) < 0.1, 'UI selection duration: ' + format);
       exports.push({ format, bytes: size, codec: stream.codec_name, duration: metadata.format.duration });
     }
-    results.push({ mode, openToReadyMs, audioSignal: true, exports });
-    console.log('Passed: ' + mode + ', ready in ' + openToReadyMs.toFixed(0) + 'ms');
+    results.push({ mode, launchToReadyMs, audioSignal: true, exports });
+    console.log('Passed: ' + mode + ', ready in ' + launchToReadyMs.toFixed(0) + 'ms');
   } finally {
     await app?.close();
     if (mode === 'wasm-fallback') await fs.rename(nativeDirectory + '.disabled', nativeDirectory);
