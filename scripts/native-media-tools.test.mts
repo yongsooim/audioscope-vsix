@@ -50,7 +50,8 @@ test('native PCM preserves every channel and sample; loudness agrees with WASM',
   assert.equal(native.decode.frameCount, frames);
   assert.deepEqual(native.decode.channelBuffers.map((buffer) => Buffer.from(buffer)), wasm.decode.channelBuffers.map((buffer) => Buffer.from(buffer)));
   for (const key of ['integratedLufs', 'loudnessRangeLu', 'samplePeakDbfs', 'truePeakDbtp'] as const) {
-    assert.ok(Math.abs(native.summary[key]! - wasm.summary[key]!) <= 0.01, key);
+    assert.ok(Math.abs(native.summary[key]! - wasm.summary[key]!) <= 0.01,
+      key + ' native=' + native.summary[key] + ' wasm=' + wasm.summary[key]);
   }
   assert.equal(native.summary.channelLayout, wasm.summary.channelLayout);
 });
@@ -65,8 +66,10 @@ test('native ffprobe and standalone loudness retain the WASM metadata contract',
   for (const key of ['codec_name', 'sample_rate', 'channels', 'channel_layout', 'duration']) {
     assert.equal(native.metadata.streams[0][key], wasm.metadata.streams[0][key], key);
   }
-  assert.ok(Math.abs(native.loudness.integratedLufs! - wasm.loudness.integratedLufs!) < 0.01);
-  assert.ok(Math.abs(native.loudness.truePeakDbtp! - wasm.loudness.truePeakDbtp!) < 0.01);
+  assert.ok(Math.abs(native.loudness.integratedLufs! - wasm.loudness.integratedLufs!) < 0.01,
+    JSON.stringify({ native: native.loudness, wasm: wasm.loudness }));
+  assert.ok(Math.abs(native.loudness.truePeakDbtp! - wasm.loudness.truePeakDbtp!) < 0.01,
+    JSON.stringify({ native: native.loudness, wasm: wasm.loudness }));
 });
 
 test('native WAV/FLAC selections retain sample-accurate boundaries and contents', async () => {

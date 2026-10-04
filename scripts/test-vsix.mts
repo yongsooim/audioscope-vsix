@@ -156,8 +156,20 @@ for (const mode of modes) {
       }, target);
       await frame.locator('#wave-export').click();
       await frame.locator('#wave-export-menu [data-export-format="' + format + '"]').click();
-      await page.getByText('audioscope: exported export.' + format, { exact: true }).waitFor({ timeout: 30_000 });
-      const size = (await fs.stat(target)).size;
+      // Notifications can be coalesced by VS Code. Wait for a completed file
+      // rather than accepting an early MP4 ftyp header or relying on a toast.
+      let previousSize = 0;
+      let stable = 0;
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        const current = await fs.stat(target).then((stat) => stat.size, () => 0);
+        stable = current > 64 && current === previousSize ? stable + 1 : 0;
+        previousSize = current;
+        if (stable >= 4) break;
+        await page.waitForTimeout(100);
+      }
+      assert.ok(stable >= 4, 'UI export did not finish: ' + format);
+      const size = previousSize;
       const metadata = JSON.parse(await withBackend('wasm', () => mediaTools.runEmbeddedFfprobe(resourceFor(target), 30_000)));
       const stream = metadata.streams.find((item: any) => item.codec_type === 'audio');
       assert.ok(stream, 'UI export must contain an audio stream: ' + format);

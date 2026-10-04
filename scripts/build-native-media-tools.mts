@@ -64,7 +64,7 @@ async function ensureLame(): Promise<void> {
     await fsp.writeFile(tarball, Buffer.from(await response.arrayBuffer()));
   }
   if (await hashFile(tarball) !== lameSha256) throw new Error('LAME checksum mismatch.');
-  await run('tar', ['-xzf', tarball]);
+  await run('tar', ['--force-local', '-xzf', nativePath(tarball)]);
   const lameSource = path.join(buildRoot, 'lame-' + lameVersion);
   console.log('Building native LAME (' + target + ')…');
   await run('sh', [
