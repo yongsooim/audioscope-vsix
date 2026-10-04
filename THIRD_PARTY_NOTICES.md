@@ -1,11 +1,11 @@
 # Third-Party Notices
 
-audioscope distributes WebAssembly binaries that are built from the following
+audioscope distributes native and WebAssembly binaries built from the following
 third-party components.
 
 ## FFmpeg
 
-audioscope distributes embedded FFmpeg WebAssembly binaries built from FFmpeg.
+audioscope distributes embedded native and WebAssembly binaries built from FFmpeg.
 The FFmpeg source is vendored in this repository as the
 `src-wasm/third_party/ffmpeg` submodule. The exact bundled revision and
 rebuild notes for this release are documented in `FFMPEG_SOURCE.md`.
@@ -22,7 +22,7 @@ source repository under the same paths:
 
 ## LAME (libmp3lame)
 
-audioscope distributes an embedded `ffencode` WebAssembly binary that
+audioscope distributes embedded native and WebAssembly `ffencode` binaries that
 statically links libmp3lame from the LAME project for MP3 export. The LAME
 source tarball (`lame-3.100.tar.gz`) is downloaded and verified by checksum
 during the build; see `scripts/build-embedded-media-tools.mts` and

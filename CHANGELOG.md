@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.1.9 — 2026-10-05
+
+- Accelerate metadata and export with bundled, compatible native media tools; retain WASM decoding and loudness as the default.
+- Add optional experimental native decoding, with automatic codec threading where supported and WASM fallback.
+- Build macOS binaries for 12.0 and gate native execution by OS/architecture/runtime compatibility.
+- Stage platform-specific VSIX packages from persistent verified artifacts; add installed VSIX playback/export/fallback tests and a six-platform release workflow.
 
 - Clarify the A/B Auto align control and keep automatic offsets at zero for silent or constant signals. Remove DC bias from alignment correlation and constrain sample refinement to the alignment search range.
 - Clear the analysis-view loading spinner when the current canvas first presents audio content, including overview tiles and loudness curves, independently of detail-render request generations.

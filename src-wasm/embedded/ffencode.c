@@ -312,6 +312,9 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
+#ifndef __EMSCRIPTEN__
+    decoder_context->thread_count = 0;
+#endif
     if (avcodec_open2(decoder_context, decoder, NULL) < 0) {
         fprintf(stderr, "Unable to open audio decoder.\n");
         goto cleanup;

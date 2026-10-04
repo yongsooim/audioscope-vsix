@@ -52,6 +52,12 @@
 - **Playback:** adjust speed, volume, and waveform amplitude; seek and zoom to a selection.
 - **Metadata:** inspect codec, format, tags, and chapters with chapter navigation.
 - **Acceleration:** automatically use WebGPU analysis when available, with CPU/WASM fallback.
+- **Media backend:** bundled native tools accelerate metadata and exporting when
+  compatible. Decoding and codec loudness use the established WASM path by default.
+  Native decoding is available through the experimental `audioscope.nativeDecoding`
+  setting (reload the window after changing it). Failed native operations use WASM.
+  Remote playback transfers compressed audio and decodes in the webview to avoid
+  sending large PCM buffers over the connection. Analysis WASM and WebGPU are unchanged.
 
 ## Quick Start
 
@@ -77,6 +83,8 @@ Build prerequisites:
 - `zig` `0.15+`
 - Emscripten toolchain
 - FFmpeg submodule checkout
+- A native C compiler, `make`, `pkg-config`, and a POSIX shell
+  (MSYS2/MinGW on Windows; x86 builds also need an assembler such as NASM)
 
 Build from source:
 
@@ -89,9 +97,50 @@ bun run compile
 The full build compiles:
 
 - embedded FFmpeg / ffprobe WASM tools
+- native audio tools for the build machine's OS and architecture
 - analysis WASM binaries
 - webview bundles
 - extension host output
+
+Native artifacts persist in `.artifacts/native-tools/<platform>-<arch>/`; the
+native build also copies the current target into `dist/native-tools/` for local
+development. macOS binaries target 12.0. Linux packages record the glibc version
+they require; older glibc and musl environments keep using WASM.
+
+Package verified runtime files without rebuilding or deleting native artifacts:
+
+```bash
+bun run package:release darwin-arm64
+bun run package:release universal
+```
+
+The universal package is WASM-only. Platform packages contain exactly one native
+target. `.github/workflows/release-readiness.yml` builds and tests all six x64/ARM64
+targets for macOS, Linux, and Windows, plus the universal fallback package.
+Packages are saved in `.artifacts/release/`.
+
+Test an installed VSIX in an isolated VS Code profile:
+
+```bash
+bun run test:vsix .artifacts/release/audioscope-1.1.9-darwin-arm64.vsix
+```
+
+This opens the real editor, verifies rendered waveform and audio signal, exports
+WAV/MP3/M4A/FLAC through the UI, and checks the native option and WASM fallback.
+It uses isolated settings and extension directories and does not change the
+user's installed extension.
+
+Run the reproducible native/WASM comparison after compiling:
+
+```bash
+bun run benchmark:native-audio
+```
+
+The benchmark validates PCM and loudness agreement, alternates backend order,
+and reports five-run medians for decoding, decoding plus loudness, metadata, and
+WAV/MP3 selection exports. Results and raw timings are saved as JSON and CSV
+under `benchmarks/native-audio/`. Times include host-side PCM delivery and exclude
+webview rendering. The WASM pool is warmed; native requests start new processes.
 
 ## Third-Party And Vendor Code
 
@@ -99,7 +148,7 @@ This repository includes vendored and third-party source.
 
 - `src-wasm/third_party/ffmpeg`
   The FFmpeg source tree vendored as a submodule and used to build the
-  embedded FFmpeg / ffprobe WebAssembly binaries.
+  embedded native and WebAssembly media tools.
   Upstream repository: <https://github.com/FFmpeg/FFmpeg>
 - `src-wasm/third_party/pffft`
   PFFFT and FFTPACK-based FFT code used by the analysis WASM runtime.

@@ -4,6 +4,12 @@
 `ffloudness`, and `ffencode` (the export tool, which additionally links
 libmp3lame — see the LAME section below).
 
+Platform-specific builds also ship native `ffdecode`, `ffdecode-wav`, `ffprobe`,
+`ffloudness`, and `ffencode` executables from the same FFmpeg source revision.
+The native decoder shares `src-wasm/embedded/ffdecode_module.c` with the WASM
+decoder, preserves the source sample rate and channels, and delivers PCM before
+the retained-PCM loudness pass. Its temporary PCM file is removed after the task.
+
 ## Exact Upstream Revision
 
 - Upstream repository: `https://github.com/FFmpeg/FFmpeg.git`
@@ -37,6 +43,24 @@ It writes the packaged artifacts and build manifest to:
 - `dist/embedded-tools/`
 
 The generated `dist/embedded-tools/manifest.json` currently records the build timestamp and bundled FFmpeg revision for the current build.
+
+Build the native tools with a C compiler, `make`, `pkg-config`, and a POSIX shell:
+
+```bash
+bun run build:native-media-tools
+```
+
+The build script is `scripts/build-native-media-tools.mts`. It statically links
+the audio-only FFmpeg libraries and LAME, leaving only system libraries as runtime
+dependencies. Output persists in `.artifacts/native-tools/<platform>-<arch>/` and is copied to
+`dist/native-tools/<platform>-<arch>/` for development; its manifest
+records the exact source revision, target, compiler, and FFmpeg configure flags.
+Native and WASM builds share the codec list in `scripts/audio-codec-config.mts`.
+Build on the intended target OS/architecture (MSYS2/MinGW on Windows). The build
+does not enable GPL or nonfree components. macOS uses a 12.0 deployment target.
+The manifest includes CPU architecture, minimum runtime versions, binary SHA-256,
+and source SHA-256. Packaging checks these against the current shared WASM build
+and helper sources before creating a target-specific VSIX.
 
 ## LAME (libmp3lame)
 
