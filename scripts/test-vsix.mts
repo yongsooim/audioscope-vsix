@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { _electron as electron, type Frame, type Page } from 'playwright';
@@ -17,17 +18,23 @@ const executable = process.env.AUDIOSCOPE_VSCODE_EXECUTABLE || await downloadAnd
 const fixture = path.join(directory, 'workspace');
 await fs.mkdir(fixture, { recursive: true });
 await fs.copyFile(path.join(root, 'exampleFiles', 'sample-tone.wav'), path.join(fixture, 'sample-tone.wav'));
-const userData = path.join(directory, 'user-data');
-const extensions = path.join(directory, 'extensions');
+// VS Code's Unix-domain socket needs a short path (macOS limits it to 103 bytes).
+const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'as-vsix-'));
+const userData = path.join(profile, 'user');
+const extensions = path.join(profile, 'ext');
 await fs.mkdir(path.join(userData, 'User'), { recursive: true });
 await fs.mkdir(extensions, { recursive: true });
+const isolatedEnv: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter(
+  (entry): entry is [string, string] => typeof entry[1] === 'string'
+    && !entry[0].startsWith('VSCODE_') && entry[0] !== 'ELECTRON_RUN_AS_NODE',
+));
 
 async function install(): Promise<void> {
   const [cli, ...cliArgs] = resolveCliArgsFromVSCodeExecutablePath(executable, { reuseMachineInstall: true });
   await new Promise<void>((resolve, reject) => {
     const child = spawn(cli, [...cliArgs, '--user-data-dir', userData, '--extensions-dir', extensions,
       '--install-extension', vsix, '--force'], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      env: { ...isolatedEnv, ELECTRON_RUN_AS_NODE: '1' },
       stdio: 'inherit', shell: process.platform === 'win32',
     });
     child.on('error', reject);
@@ -69,17 +76,16 @@ for (const mode of modes) {
     'workbench.editorAssociations': { '*.wav': 'audioscope.editor' },
   }, null, 2));
   if (mode === 'wasm-fallback') await fs.rename(nativeDirectory, nativeDirectory + '.disabled');
-  const env: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-  delete env.ELECTRON_RUN_AS_NODE;
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined;
   try {
     app = await electron.launch({
       executablePath: executable,
-      args: [fixture, '--new-window', '--skip-welcome', '--skip-release-notes',
+      args: ['--new-window', '--skip-welcome', '--skip-release-notes',
         '--disable-workspace-trust', '--no-sandbox', '--disable-gpu-sandbox',
-        '--user-data-dir=' + userData, '--extensions-dir=' + extensions],
-      env, timeout: 60_000,
+        '--user-data-dir=' + userData, '--extensions-dir=' + extensions, fixture],
+      env: isolatedEnv, timeout: 60_000,
     });
+    app.process().stderr?.on('data', (chunk) => process.stderr.write(chunk));
     // Mute this isolated VS Code instance after audio mixing. The audio graph
     // still runs and its signal is checked below without playing test tones.
     await app.evaluate(({ webContents }) => {
@@ -165,3 +171,4 @@ await fs.writeFile(path.join(directory, 'results.json'), JSON.stringify({
   platform: process.platform, arch: process.arch, vsix, vscode: '1.138.0', results,
 }, null, 2) + '\n');
 console.log('Installed VSIX tests passed: ' + directory);
+await fs.rm(profile, { recursive: true, force: true });
