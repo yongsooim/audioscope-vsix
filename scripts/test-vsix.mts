@@ -78,7 +78,7 @@ for (const mode of modes) {
     'audioscope.openSampleOnStartupInDevelopment': false,
     'audioscope.nativeDecoding': mode === 'native-experimental',
     'audioscope.playbackVolume': 0.25,
-    'workbench.editorAssociations': { '*.wav': 'audioscope.editor' },
+    'workbench.editorAssociations': { '*.wav': 'default' },
   }, null, 2));
   if (mode === 'wasm-fallback') await fs.rename(nativeDirectory, nativeDirectory + '.disabled');
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined;
@@ -100,6 +100,15 @@ for (const mode of modes) {
       return true;
     });
     await page.locator('.monaco-workbench').waitFor({ timeout: 60_000 });
+    // Use the installed extension's Open command after startup so editor
+    // association resolution cannot race extension scanning on a fresh profile.
+    await page.locator('.tabs-container .tab').filter({ hasText: 'sample-tone.wav' }).first().waitFor({ state: 'visible' });
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+P' : 'Control+Shift+P');
+    const input = page.locator('.quick-input-widget input');
+    await input.fill('>audioscope: Open in audioscope');
+    await page.locator('.quick-input-list .monaco-list-row.focused').filter({ hasText: 'Open in audioscope' }).waitFor({ state: 'visible' });
+    await input.press('Enter');
+    await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
     await app.evaluate(({ webContents }) => {
       for (const contents of webContents.getAllWebContents()) contents.setAudioMuted(true);
       return true;
