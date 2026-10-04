@@ -142,6 +142,24 @@ WAV/MP3 selection exports. Results and raw timings are saved as JSON and CSV
 under `benchmarks/native-audio/`. Times include host-side PCM delivery and exclude
 webview rendering. The WASM pool is warmed; native requests start new processes.
 
+### Native backend measurements
+
+Measured on 2026-10-05 with an Apple M4 Pro, 48 GiB RAM, Node 22.23.0, five
+alternating runs, and native decoder threading set to automatic (codec-dependent).
+Values below are median milliseconds, **native / WASM**. Exports select 15 seconds.
+
+| Input | Decode | Decode + LUFS | Metadata | WAV export | MP3 export |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MP3, 216 s | 151.1 / 169.9 | 931.8 / 875.3 | 4.9 / 39.9 | 19.6 / 74.4 | 100.4 / 208.0 |
+| AAC, 211 s | 123.2 / 110.8 | 860.1 / 767.4 | 5.4 / 42.5 | 17.6 / 64.1 | 116.7 / 208.5 |
+| FLAC, 120 s | 51.6 / 189.0 | 474.7 / 560.4 | 4.5 / 38.8 | 15.3 / 91.3 | 110.7 / 232.3 |
+| WAV, 120 s | 26.8 / 15.4 | 450.5 / 398.8 | 8.5 / 46.8 | 11.0 / 48.3 | 110.6 / 195.4 |
+
+Native metadata and export improve consistently in these fixtures. Decoding and
+loudness depend on the codec, which is why the native decoder remains optional.
+These are host operation timings including I/O and PCM delivery, excluding editor
+rendering; they are not full VS Code end-to-end timings or guarantees for other CPUs.
+
 ## Third-Party And Vendor Code
 
 This repository includes vendored and third-party source.

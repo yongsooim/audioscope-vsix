@@ -139,7 +139,7 @@
           "minimum": 0.01,
           "maximum": 1,
           "scope": "window",
-          "description": "Waveform vertical scale: the amplitude displayed at the top/bottom guide lines (\u00b1value). 1 shows full scale; smaller values zoom into quiet audio. Updated automatically from the waveform Amp toolbar control."
+          "description": "Waveform vertical scale: the amplitude displayed at the top/bottom guide lines (±value). 1 shows full scale; smaller values zoom into quiet audio. Updated automatically from the waveform Amp toolbar control."
         },
         "audioscope.playbackVolume": {
           "type": "number",
@@ -193,56 +193,26 @@
           "properties": {
             "analysisType": {
               "type": "string",
-              "enum": [
-                "spectrogram",
-                "mel",
-                "mfcc",
-                "scalogram",
-                "chroma",
-                "loudness"
-              ]
+              "enum": ["spectrogram", "mel", "mfcc", "scalogram", "chroma", "loudness"]
             },
             "colormapDistribution": {
               "type": "string",
-              "enum": [
-                "balanced",
-                "contrast",
-                "soft"
-              ]
+              "enum": ["balanced", "contrast", "soft"]
             },
             "fftSize": {
               "type": "number",
-              "enum": [
-                256,
-                512,
-                1024,
-                2048,
-                4096,
-                8192,
-                16384
-              ]
+              "enum": [256, 512, 1024, 2048, 4096, 8192, 16384]
             },
             "frequencyScale": {
               "type": "string",
-              "enum": [
-                "log",
-                "mixed",
-                "linear"
-              ]
+              "enum": ["log", "mixed", "linear"]
             },
             "loudnessCurves": {
               "type": "string",
-              "enum": [
-                "both",
-                "momentary",
-                "shortTerm"
-              ]
+              "enum": ["both", "momentary", "shortTerm"]
             },
             "loudnessRefLevel": {
-              "type": [
-                "number",
-                "null"
-              ],
+              "type": ["number", "null"],
               "minimum": -70,
               "maximum": 6
             },
@@ -261,50 +231,29 @@
             },
             "loudnessYAxisMode": {
               "type": "string",
-              "enum": [
-                "auto",
-                "fixed"
-              ]
+              "enum": ["auto", "fixed"]
             },
             "maxDecibels": {
               "type": "number"
             },
             "melBandCount": {
               "type": "number",
-              "enum": [
-                128,
-                256,
-                512
-              ]
+              "enum": [128, 256, 512]
             },
             "mfccCoefficientCount": {
               "type": "number",
-              "enum": [
-                13,
-                20,
-                32,
-                40
-              ]
+              "enum": [13, 20, 32, 40]
             },
             "mfccMelBandCount": {
               "type": "number",
-              "enum": [
-                128,
-                256,
-                512
-              ]
+              "enum": [128, 256, 512]
             },
             "minDecibels": {
               "type": "number"
             },
             "overlapRatio": {
               "type": "number",
-              "enum": [
-                0.5,
-                0.75,
-                0.875,
-                0.9375
-              ]
+              "enum": [0.5, 0.75, 0.875, 0.9375]
             },
             "scalogramMaxFrequency": {
               "type": "number"
@@ -314,27 +263,11 @@
             },
             "scalogramOmega0": {
               "type": "number",
-              "enum": [
-                4,
-                5,
-                6,
-                7,
-                8,
-                10,
-                12
-              ]
+              "enum": [4, 5, 6, 7, 8, 10, 12]
             },
             "scalogramRowDensity": {
               "type": "number",
-              "enum": [
-                0.5,
-                0.75,
-                1,
-                1.5,
-                2,
-                3,
-                4
-              ]
+              "enum": [0.5, 0.75, 1, 1.5, 2, 3, 4]
             },
             "spectrogramMaxFrequency": {
               "type": "number",
@@ -348,12 +281,7 @@
             },
             "windowFunction": {
               "type": "string",
-              "enum": [
-                "hann",
-                "hamming",
-                "blackman",
-                "rectangular"
-              ]
+              "enum": ["hann", "hamming", "blackman", "rectangular"]
             }
           }
         },
@@ -378,7 +306,7 @@
       },
       {
         "command": "audioscope.compareAudioFiles",
-        "title": "Compare Audio Files\u2026",
+        "title": "Compare Audio Files…",
         "category": "audioscope"
       },
       {

@@ -93,6 +93,8 @@ function startNativeDecode(
     let readPromise: Promise<void> | null = null;
     let decodeReady = false;
     let settled = false;
+    let closed = false;
+    let failure: Error | null = null;
     let stderr = Buffer.alloc(0);
     const summaryChunks: Buffer[] = [];
     const timer = timeout > 0 ? setTimeout(() => fail(new Error('Native decode timed out after ' + timeout + 'ms.')), timeout) : null;
@@ -100,8 +102,15 @@ function startNativeDecode(
     function fail(error: Error): void {
       if (settled) return;
       settled = true;
+      failure = error;
       if (timer) clearTimeout(timer);
       child.kill('SIGKILL');
+      // Windows cannot remove a temporary file while the helper still owns it.
+      // Wait for process exit and any in-flight PCM read before rejecting.
+      if (closed) rejectFailure(error);
+    }
+
+    function rejectFailure(error: Error): void {
       if (decodeReady) rejectLoudness(error);
       else reject(error);
     }
@@ -159,7 +168,12 @@ function startNativeDecode(
       if (offset < chunk.length) summaryChunks.push(chunk.subarray(offset));
     });
     child.on('close', async (code, signal) => {
+      closed = true;
       if (readPromise) await readPromise;
+      if (failure) {
+        rejectFailure(failure);
+        return;
+      }
       if (settled) return;
       if (code !== 0 || signal || !decodeReady) {
         fail(new Error('Native decoder exited (' + (signal || code) + '): ' + stderr.toString('utf8').trim()));

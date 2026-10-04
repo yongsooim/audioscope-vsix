@@ -18,6 +18,7 @@ const prefix = path.join(buildRoot, 'prefix');
 const outputDir = path.join(projectRoot, '.artifacts', 'native-tools', target);
 const liveDir = path.join(projectRoot, 'dist', 'native-tools', target);
 const nativeFlags = process.platform === 'darwin' ? ['-mmacosx-version-min=12.0'] : [];
+const ebur128Flags = target === 'darwin-arm64' ? ['-fno-slp-vectorize'] : [];
 const nativePath = (value: string) => process.platform === 'win32' ? value.replaceAll('\\', '/') : value;
 const compiler = process.env.CC || 'cc';
 const extension = process.platform === 'win32' ? '.exe' : '';
@@ -106,7 +107,7 @@ async function main(): Promise<void> {
     '--extra-ldflags=' + [...nativeFlags, '-L' + nativePath(path.join(lamePrefix, 'lib')),
       ...(process.platform === 'win32' ? ['-static', '-static-libgcc'] : [])].join(' '),
   ];
-  const stamp = JSON.stringify({ revision, configureArgs, lameSha256 });
+  const stamp = JSON.stringify({ revision, configureArgs, lameSha256, ebur128Flags });
   const stampPath = path.join(buildDir, '.stamp.json');
   const previous = await fsp.readFile(stampPath, 'utf8').catch(() => '');
   if (previous !== stamp || !fs.existsSync(path.join(prefix, 'lib', 'libavcodec.a'))) {
@@ -114,6 +115,10 @@ async function main(): Promise<void> {
     await fsp.rm(buildDir, { recursive: true, force: true });
     await fsp.mkdir(buildDir, { recursive: true });
     await run('sh', [nativePath(path.join(sourceDir, 'configure')), ...configureArgs], buildDir);
+    if (ebur128Flags.length) {
+      await fsp.appendFile(path.join(buildDir, 'ffbuild', 'config.mak'),
+        '\nlibavfilter/f_ebur128.o: CFLAGS += ' + ebur128Flags.join(' ') + '\n');
+    }
     await run('make', ['-j', jobs, 'install'], buildDir);
     await fsp.writeFile(stampPath, stamp);
   }
@@ -184,6 +189,7 @@ async function main(): Promise<void> {
   await fsp.writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify({
     schema: 1, target: target as NativeTarget, ffmpegRevision: revision, compiler,
     builtAt: new Date().toISOString(), configureArgs, sha256, sourceSha256,
+    ebur128Flags,
     minimumKernelRelease: process.platform === 'darwin' ? '21.0.0' : process.platform === 'win32' ? '10.0.0' : undefined,
     minimumGlibcVersion,
   }, null, 2) + '\n');

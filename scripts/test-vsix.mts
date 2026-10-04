@@ -66,6 +66,8 @@ const modes = hasNative ? ['hybrid', 'native-experimental', 'wasm-fallback'] : [
 for (const mode of modes) {
   console.log('Installed VSIX smoke test: ' + mode);
   const output = path.join(directory, mode);
+  const userData = path.join(profile, 'user-' + mode);
+  await fs.mkdir(path.join(userData, 'User'), { recursive: true });
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(path.join(userData, 'User', 'settings.json'), JSON.stringify({
     'workbench.startupEditor': 'none', 'window.restoreWindows': 'none',

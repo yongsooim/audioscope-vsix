@@ -35,6 +35,12 @@ later. The distribution includes `licenses/LAME-COPYING` and
 `licenses/LAME-LICENSE` from the verified 3.100 source archive. The matching
 source is available from [the LAME project](https://sourceforge.net/projects/lame/files/lame/3.100/).
 
+## MinGW-w64 Runtime
+
+Windows native binaries link the MinGW-w64 runtime. Its copyright and license
+notices are included in `licenses/MinGW-w64-runtime.txt`, copied from the
+[runtime source used by the Windows toolchain](https://github.com/mingw-w64/mingw-w64/blob/4564ee4b5063097bf747af3a3f8270a28adff820/COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt).
+
 ## Signalsmith Stretch Web
 
 audioscope vendors `src-webview/vendor/SignalsmithStretch.mjs` from

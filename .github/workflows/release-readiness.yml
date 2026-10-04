@@ -23,7 +23,7 @@ jobs:
           node-version: '22'
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.3.9'
+          bun-version: '1.3.10'
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: '4.0.21'
@@ -53,8 +53,8 @@ jobs:
           - { target: darwin-x64, runner: macos-15-intel }
           - { target: linux-arm64, runner: ubuntu-22.04-arm }
           - { target: linux-x64, runner: ubuntu-22.04 }
-          - { target: win32-arm64, runner: windows-11-arm, msystem: CLANGARM64, compiler: clang }
-          - { target: win32-x64, runner: windows-2022, msystem: UCRT64, compiler: gcc }
+          - { target: win32-arm64, runner: windows-11-arm, msystem: CLANGARM64, compiler: clang, packages: 'clang:p pkgconf:p' }
+          - { target: win32-x64, runner: windows-2022, msystem: UCRT64, compiler: gcc, packages: 'gcc:p pkgconf:p nasm:p' }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     steps:
@@ -68,7 +68,7 @@ jobs:
           node-version: '22'
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.3.9'
+          bun-version: '1.3.10'
       - if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
@@ -76,7 +76,7 @@ jobs:
           path-type: inherit
           update: true
           install: make diffutils tar gzip
-          pacboy: toolchain:p pkgconf:p nasm:p
+          pacboy: ${{ matrix.packages }}
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y nasm pkg-config xvfb libgtk-3-0 libgbm1 libasound2
       - if: runner.os == 'macOS'
@@ -120,6 +120,7 @@ jobs:
           path: |
             .artifacts/release/*.vsix
             native-*.tar.gz
+            .artifacts/native-tools/**
             .artifacts/vsix-test/**/results.json
             .artifacts/vsix-test/**/*.png
             .ffmpeg-build/native-*/ffmpeg/ffbuild/config.log
@@ -136,7 +137,7 @@ jobs:
           node-version: '22'
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.3.9'
+          bun-version: '1.3.10'
       - run: bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:

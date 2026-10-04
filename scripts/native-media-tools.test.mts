@@ -202,3 +202,21 @@ test('native helper timeout terminates the subprocess', async () => {
   await fs.writeFile(helper, 'setInterval(() => {}, 1000);');
   await assert.rejects(nativeTools.runNativeDecodeLoudnessPipeline(process.execPath, helper, 50), /timed out/u);
 });
+
+test('native timeout after PCM delivery rejects loudness and removes temporary PCM', async () => {
+  const helper = path.join(directory, 'late-timeout.cjs');
+  const marker = path.join(directory, 'pcm-path.txt');
+  await fs.writeFile(helper, [
+    'const fs = require("node:fs");',
+    'const header = Buffer.alloc(16); header.write("ADP1");',
+    'header.writeUInt32LE(48000,4); header.writeUInt32LE(1,8); header.writeUInt32LE(4,12);',
+    'fs.writeFileSync(process.argv[2], Buffer.alloc(16));',
+    'fs.writeFileSync(' + JSON.stringify(marker) + ', process.argv[2]);',
+    'process.stdout.write(header); setInterval(() => {}, 1000);',
+  ].join('\n'));
+  const pipeline = await nativeTools.runNativeDecodeLoudnessPipeline(process.execPath, helper, 2_000);
+  assert.equal(pipeline.decode.frameCount, 4);
+  await assert.rejects(pipeline.loudnessPromise, /timed out/u);
+  const pcm = await fs.readFile(marker, 'utf8');
+  await assert.rejects(fs.stat(path.dirname(pcm)), { code: 'ENOENT' });
+});
