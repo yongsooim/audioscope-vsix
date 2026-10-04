@@ -56,6 +56,7 @@
     "FFMPEG_SOURCE.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
+    "licenses/**",
     "src-wasm/third_party/ffmpeg/COPYING.LGPLv2.1",
     "src-wasm/third_party/ffmpeg/COPYING.LGPLv3"
   ],

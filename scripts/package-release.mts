@@ -29,6 +29,7 @@ try {
   }
   await fs.cp(path.join(root, 'src-webview', 'vendor'), path.join(stage, 'src-webview', 'vendor'), { recursive: true });
   for (const file of ['README.md', 'CHANGELOG.md', 'FFMPEG_SOURCE.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE',
+    'licenses/LAME-COPYING', 'licenses/LAME-LICENSE',
     'src-wasm/third_party/ffmpeg/COPYING.LGPLv2.1', 'src-wasm/third_party/ffmpeg/COPYING.LGPLv3']) {
     await fs.mkdir(path.dirname(path.join(stage, file)), { recursive: true });
     await fs.copyFile(path.join(root, file), path.join(stage, file));

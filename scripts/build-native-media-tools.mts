@@ -64,12 +64,12 @@ async function ensureLame(): Promise<void> {
     await fsp.writeFile(tarball, Buffer.from(await response.arrayBuffer()));
   }
   if (await hashFile(tarball) !== lameSha256) throw new Error('LAME checksum mismatch.');
-  await run('tar', ['--force-local', '-xzf', nativePath(tarball)]);
+  await run('tar', [...(process.platform === 'win32' ? ['--force-local'] : []), '-xzf', nativePath(tarball)]);
   const lameSource = path.join(buildRoot, 'lame-' + lameVersion);
   console.log('Building native LAME (' + target + ')…');
   await run('sh', [
     nativePath(path.join(lameSource, 'configure')), '--prefix=' + nativePath(lamePrefix),
-    ...(process.platform === 'win32' ? ['--host=' + (await run(compiler, ['-dumpmachine'])).trim()] : []),
+    ...(process.platform === 'win32' ? ['--host=' + (process.arch === 'arm64' ? 'aarch64' : 'x86_64') + '-w64-mingw32'] : []),
     '--disable-shared', '--enable-static', '--disable-frontend',
     '--disable-analyzer-hooks', '--disable-gtktest', '--disable-decoder',
     'CC=' + compiler, 'CFLAGS=' + ['-O3', ...nativeFlags].join(' '),
@@ -103,7 +103,8 @@ async function main(): Promise<void> {
     '--enable-encoder=pcm_f32le,pcm_s16le,flac,aac,libmp3lame',
     '--enable-libmp3lame',
     '--extra-cflags=' + ['-O3', ...nativeFlags, '-I' + nativePath(path.join(lamePrefix, 'include'))].join(' '),
-    '--extra-ldflags=' + [...nativeFlags, '-L' + nativePath(path.join(lamePrefix, 'lib'))].join(' '),
+    '--extra-ldflags=' + [...nativeFlags, '-L' + nativePath(path.join(lamePrefix, 'lib')),
+      ...(process.platform === 'win32' ? ['-static', '-static-libgcc'] : [])].join(' '),
   ];
   const stamp = JSON.stringify({ revision, configureArgs, lameSha256 });
   const stampPath = path.join(buildDir, '.stamp.json');
@@ -156,6 +157,17 @@ async function main(): Promise<void> {
       throw new Error('Unexpected macOS deployment target: ' + name + ' ' + info.minimumMacOS);
     }
     sha256[name + extension] = createHash('sha256').update(bytes).digest('hex');
+    if (process.platform === 'win32') {
+      const imports = await run(compiler === 'clang' ? 'llvm-objdump' : 'objdump', ['-p', file]);
+      const dependencies = [...imports.matchAll(/DLL Name:\s*(\S+)/gu)].map((match) => match[1].toLowerCase());
+      if (!dependencies.length) throw new Error('Unable to inspect Windows dependencies: ' + name);
+      for (const dependency of dependencies) {
+        if (!/^(?:kernel32|advapi32|shell32|user32|ole32|ws2_32|bcrypt|msvcrt|ucrtbase)\.dll$/u.test(dependency)
+            && !/^api-ms-win-crt-[a-z0-9-]+\.dll$/u.test(dependency)) {
+          throw new Error('Unbundled Windows runtime dependency: ' + name + ' ' + dependency);
+        }
+      }
+    }
     if (process.platform === 'linux') {
       const versions = [...(await run('readelf', ['--version-info', file])).matchAll(/GLIBC_(\d+\.\d+)/gu)].map((match) => match[1]);
       for (const version of versions) {

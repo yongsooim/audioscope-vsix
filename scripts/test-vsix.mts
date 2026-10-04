@@ -93,6 +93,10 @@ for (const mode of modes) {
     // Mute this isolated VS Code instance after audio mixing. The audio graph
     // still runs and its signal is checked below without playing test tones.
     const page = await app.firstWindow();
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].setSize(1440, 1000);
+      return true;
+    });
     await page.locator('.monaco-workbench').waitFor({ timeout: 60_000 });
     await app.evaluate(({ webContents }) => {
       for (const contents of webContents.getAllWebContents()) contents.setAudioMuted(true);
@@ -180,6 +184,10 @@ for (const mode of modes) {
     }
     results.push({ mode, launchToReadyMs, audioSignal: true, exports });
     console.log('Passed: ' + mode + ', ready in ' + launchToReadyMs.toFixed(0) + 'ms');
+  } catch (error) {
+    const page = app?.windows()[0];
+    await page?.screenshot({ path: path.join(output, 'failure.png') }).catch(() => {});
+    throw error;
   } finally {
     await app?.close();
     if (mode === 'wasm-fallback') await fs.rename(nativeDirectory + '.disabled', nativeDirectory);

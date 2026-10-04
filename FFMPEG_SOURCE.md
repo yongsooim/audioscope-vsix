@@ -71,6 +71,7 @@ The `ffencode` binary statically links libmp3lame for MP3 export.
 - Source tarball: `lame-3.100.tar.gz`, downloaded during the build and verified
   against SHA-256 `ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e`
 - LAME is licensed under the GNU Lesser General Public License, version 2 or later.
+- Included license texts: `licenses/LAME-COPYING` and `licenses/LAME-LICENSE`.
 
 ## Matching Source Checkout
 

@@ -31,6 +31,10 @@ jobs:
         with:
           version: '0.15.2'
       - run: sudo apt-get update && sudo apt-get install -y nasm pkg-config
+      - uses: actions/cache@v4
+        with:
+          path: .ffmpeg-build
+          key: shared-emsdk-4.0.21-${{ hashFiles('scripts/build-embedded-media-tools.mts', 'scripts/audio-codec-config.mts', 'src-wasm/embedded/**', '.gitmodules') }}
       - run: bun install --frozen-lockfile
       - run: bun run compile
       - run: bun run test:performance
@@ -81,6 +85,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: shared-runtime
+      - uses: actions/cache@v4
+        with:
+          path: .ffmpeg-build/native-${{ matrix.target }}
+          key: native-${{ matrix.target }}-${{ hashFiles('scripts/build-native-media-tools.mts', 'scripts/audio-codec-config.mts', '.gitmodules') }}
       - if: runner.os != 'Windows'
         run: tar -xzf shared-runtime.tar.gz
       - if: runner.os == 'Windows'
@@ -96,7 +104,7 @@ jobs:
       - run: bunx tsx --test scripts/native-platform.test.mts scripts/native-media-tools.test.mts
       - run: bun run package:release ${{ matrix.target }}
       - if: runner.os == 'Linux'
-        run: xvfb-run -a bun run test:vsix .artifacts/release/audioscope-1.1.9-${{ matrix.target }}.vsix
+        run: xvfb-run -a --server-args="-screen 0 1600x1200x24" bun run test:vsix .artifacts/release/audioscope-1.1.9-${{ matrix.target }}.vsix
       - if: runner.os != 'Linux'
         run: bun run test:vsix .artifacts/release/audioscope-1.1.9-${{ matrix.target }}.vsix
       - if: runner.os != 'Windows'
@@ -108,11 +116,14 @@ jobs:
         if: always()
         with:
           name: release-${{ matrix.target }}
+          include-hidden-files: true
           path: |
             .artifacts/release/*.vsix
             native-*.tar.gz
             .artifacts/vsix-test/**/results.json
             .artifacts/vsix-test/**/*.png
+            .ffmpeg-build/native-*/ffmpeg/ffbuild/config.log
+            .ffmpeg-build/native-*/lame-3.100/config.log
   universal:
     needs: shared
     runs-on: ubuntu-22.04
@@ -133,10 +144,13 @@ jobs:
       - run: tar -xzf shared-runtime.tar.gz
       - run: sudo apt-get update && sudo apt-get install -y xvfb libgtk-3-0 libgbm1 libasound2
       - run: bun run package:release universal
-      - run: xvfb-run -a bun run test:vsix .artifacts/release/audioscope-1.1.9-universal.vsix
+      - run: xvfb-run -a --server-args="-screen 0 1600x1200x24" bun run test:vsix .artifacts/release/audioscope-1.1.9-universal.vsix
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: release-universal
+          include-hidden-files: true
           path: |
             .artifacts/release/*.vsix
             .artifacts/vsix-test/**/results.json
+            .artifacts/vsix-test/**/*.png
