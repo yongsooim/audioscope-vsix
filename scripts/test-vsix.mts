@@ -88,11 +88,12 @@ for (const mode of modes) {
     app.process().stderr?.on('data', (chunk) => process.stderr.write(chunk));
     // Mute this isolated VS Code instance after audio mixing. The audio graph
     // still runs and its signal is checked below without playing test tones.
-    await app.evaluate(({ webContents }) => {
-      for (const contents of webContents.getAllWebContents()) contents.setAudioMuted(true);
-    });
     const page = await app.firstWindow();
     await page.locator('.monaco-workbench').waitFor({ timeout: 60_000 });
+    await app.evaluate(({ webContents }) => {
+      for (const contents of webContents.getAllWebContents()) contents.setAudioMuted(true);
+      return true;
+    });
     const startedAt = performance.now();
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+p' : 'Control+p');
     const input = page.locator('.quick-input-widget input').first();
@@ -141,12 +142,19 @@ for (const mode of modes) {
     await frame.locator('#play-toggle').click();
     await page.screenshot({ path: path.join(output, 'editor.png') });
 
+    await frame.locator('#wave-selection-toggle').click();
+    await frame.locator('#selection-start-input').fill('0.25');
+    await frame.locator('#selection-end-input').fill('1.25');
+    await frame.locator('#selection-apply').click();
+    await frame.locator('#wave-selection-toggle').click();
+    await frame.waitForFunction(() => !(document.querySelector('#wave-export') as HTMLButtonElement)?.disabled);
     const exports = [];
     for (const format of ['wav', 'mp3', 'm4a', 'flac']) {
       const target = path.join(output, 'export.' + format);
       await fs.rm(target, { force: true });
       await app.evaluate(({ dialog }, file) => {
         dialog.showSaveDialog = async () => ({ canceled: false, filePath: file });
+        return true;
       }, target);
       await frame.locator('#wave-export').click();
       await frame.locator('#wave-export-menu [data-export-format="' + format + '"]').click();
