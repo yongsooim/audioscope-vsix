@@ -23,8 +23,32 @@ await fs.copyFile(path.join(root, 'exampleFiles', 'sample-tone.wav'), path.join(
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'as-vsix-'));
 const userData = path.join(profile, 'user');
 const extensions = path.join(profile, 'ext');
+const driver = path.join(profile, 'driver');
+const driverStatus = path.join(fixture, 'driver-status.json');
 await fs.mkdir(path.join(userData, 'User'), { recursive: true });
 await fs.mkdir(extensions, { recursive: true });
+await fs.mkdir(driver, { recursive: true });
+await fs.writeFile(path.join(driver, 'package.json'), JSON.stringify({
+  name: 'audioscope-release-test-driver', publisher: 'audioscope-tests', version: '0.0.1',
+  engines: { vscode: '^1.100.0' }, main: './driver.cjs', activationEvents: ['onStartupFinished'],
+}));
+// Only this driver is a development extension. Audioscope runs from the installed
+// VSIX in production mode; the driver uses its public command after activation.
+await fs.writeFile(path.join(driver, 'driver.cjs'), [
+  'const vscode = require("vscode"); const fs = require("node:fs");',
+  'exports.activate = async () => {',
+  '  try {',
+  '    const extension = vscode.extensions.getExtension("yongsooim.audioscope");',
+  '    if (!extension) throw new Error("Installed audioscope extension is missing.");',
+  '    await extension.activate();',
+  '    await vscode.commands.executeCommand("audioscope.openActiveFileInAudioscope", vscode.Uri.file(' + JSON.stringify(path.join(fixture, 'sample-tone.wav')) + '));',
+  '    fs.writeFileSync(' + JSON.stringify(driverStatus) + ', JSON.stringify({ path: extension.extensionUri.fsPath, version: extension.packageJSON.version }));',
+  '  } catch (error) {',
+  '    fs.writeFileSync(' + JSON.stringify(driverStatus) + ', JSON.stringify({ error: String(error.stack || error) }));',
+  '    throw error;',
+  '  }',
+  '};',
+].join('\n'));
 const isolatedEnv: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter(
   (entry): entry is [string, string] => typeof entry[1] === 'string'
     && !entry[0].startsWith('VSCODE_') && entry[0] !== 'ELECTRON_RUN_AS_NODE',
@@ -56,27 +80,6 @@ async function audioFrame(page: Page): Promise<Frame> {
   throw new Error('The installed audio editor did not create a webview.');
 }
 
-async function openInstalledEditor(page: Page): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    // The palette snapshots commands when opened. Reopen it if the installed
-    // extension's contributions have not finished registering yet.
-    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+P' : 'Control+Shift+P');
-    const input = page.locator('.quick-input-widget input');
-    await input.fill('>audioscope: Open in audioscope');
-    const command = page.locator('.quick-input-list .monaco-list-row.focused').filter({ hasText: 'Open in audioscope' });
-    const available = await command.waitFor({ state: 'visible', timeout: 1_000 }).then(() => true, () => false);
-    if (available) {
-      await input.press('Enter');
-      await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
-      return;
-    }
-    await page.keyboard.press('Escape');
-    await page.waitForTimeout(200);
-  }
-  throw new Error('The installed audioscope Open command did not register.');
-}
-
 await install();
 const installed = (await fs.readdir(extensions)).find((entry) => entry.startsWith('yongsooim.audioscope-'));
 assert.ok(installed, 'The VSIX must be installed into the isolated extension directory.');
@@ -89,6 +92,7 @@ for (const mode of modes) {
   const output = path.join(directory, mode);
   const userData = path.join(profile, 'u' + modes.indexOf(mode));
   await fs.mkdir(path.join(userData, 'User'), { recursive: true });
+  await fs.rm(driverStatus, { force: true });
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(path.join(userData, 'User', 'settings.json'), JSON.stringify({
     'workbench.startupEditor': 'none', 'window.restoreWindows': 'none',
@@ -109,7 +113,7 @@ for (const mode of modes) {
       executablePath: executable,
       args: ['--new-window', '--skip-welcome', '--skip-release-notes',
         '--disable-workspace-trust', '--no-sandbox', '--disable-gpu-sandbox',
-        '--user-data-dir=' + userData, '--extensions-dir=' + extensions, fixture, path.join(fixture, 'sample-tone.wav')],
+        '--user-data-dir=' + userData, '--extensions-dir=' + extensions, '--extensionDevelopmentPath=' + driver, fixture],
       env: isolatedEnv, timeout: 60_000,
     });
     app.process().stderr?.on('data', (chunk) => process.stderr.write(chunk));
@@ -121,10 +125,6 @@ for (const mode of modes) {
       return true;
     });
     await page.locator('.monaco-workbench').waitFor({ timeout: 60_000 });
-    // Use the installed extension's Open command after startup so editor
-    // association resolution cannot race extension scanning on a fresh profile.
-    await page.locator('.tabs-container .tab').filter({ hasText: 'sample-tone.wav' }).first().waitFor({ state: 'visible' });
-    await openInstalledEditor(page);
     await app.evaluate(({ webContents }) => {
       for (const contents of webContents.getAllWebContents()) contents.setAudioMuted(true);
       return true;
@@ -132,6 +132,9 @@ for (const mode of modes) {
     const frame = await audioFrame(page);
     await frame.locator('#play-toggle').waitFor({ state: 'visible' });
     await frame.waitForFunction(() => !(document.querySelector('#play-toggle') as HTMLButtonElement)?.disabled, undefined, { timeout: 60_000 });
+    const opened = JSON.parse(await fs.readFile(driverStatus, 'utf8'));
+    assert.equal(opened.error, undefined);
+    assert.equal(path.resolve(opened.path), path.resolve(extensions, installed));
     const launchToReadyMs = performance.now() - startedAt;
     await frame.waitForFunction(() => document.querySelector('#media-metadata-panel')?.getAttribute('data-state') === 'ready', undefined, { timeout: 30_000 });
     const toolDetails = await frame.locator('#media-metadata-detail').textContent() || '';
@@ -193,7 +196,8 @@ for (const mode of modes) {
         return true;
       }, target);
       await frame.locator('#wave-export').click();
-      await frame.locator('#wave-export-menu [data-export-format="' + format + '"]').click();
+      await frame.locator('#wave-export-menu [data-export-format="' + format + '"]').press('Enter');
+      await frame.waitForFunction(() => document.querySelector('#wave-export')?.getAttribute('aria-expanded') === 'false');
       // Notifications can be coalesced by VS Code. Wait for a completed file
       // rather than accepting an early MP4 ftyp header or relying on a toast.
       let previousSize = 0;
@@ -223,6 +227,7 @@ for (const mode of modes) {
     await page?.screenshot({ path: path.join(output, 'failure.png') }).catch(() => {});
     await fs.cp(path.join(userData, 'logs'), path.join(output, 'logs'), { recursive: true }).catch(() => {});
     await fs.copyFile(path.join(userData, 'User', 'settings.json'), path.join(output, 'settings.json')).catch(() => {});
+    await fs.copyFile(driverStatus, path.join(output, 'driver-status.json')).catch(() => {});
     throw error;
   } finally {
     await app?.close();

@@ -125,6 +125,7 @@ jobs:
             .artifacts/vsix-test/**/*.png
             .artifacts/vsix-test/**/logs/**/*.log
             .artifacts/vsix-test/**/settings.json
+            .artifacts/vsix-test/**/driver-status.json
             .ffmpeg-build/native-*/ffmpeg/ffbuild/config.log
             .ffmpeg-build/native-*/lame-3.100/config.log
   universal:
@@ -159,3 +160,4 @@ jobs:
             .artifacts/vsix-test/**/*.png
             .artifacts/vsix-test/**/logs/**/*.log
             .artifacts/vsix-test/**/settings.json
+            .artifacts/vsix-test/**/driver-status.json
