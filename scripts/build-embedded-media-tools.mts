@@ -84,6 +84,7 @@ const sharedConfigureArgs = [
   '--disable-inline-asm',
   '--disable-doc',
   '--disable-debug',
+  '--disable-stripping',
   '--disable-network',
   '--disable-autodetect',
   '--disable-iconv',

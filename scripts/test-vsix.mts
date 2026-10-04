@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { _electron as electron, type Frame, type Page } from 'playwright';
 import { downloadAndUnzipVSCode, resolveCliArgsFromVSCodeExecutablePath } from '@vscode/test-electron';
+import { mediaTools, resourceFor, withBackend } from './media-tools-harness.mts';
 
 const root = path.resolve(import.meta.dirname, '..');
 const vsix = path.resolve(process.argv[2] || '');
@@ -70,6 +71,7 @@ for (const mode of modes) {
     'workbench.startupEditor': 'none', 'window.restoreWindows': 'none',
     'security.workspace.trust.enabled': false,
     'extensions.ignoreRecommendations': true, 'telemetry.telemetryLevel': 'off',
+    'git.enabled': false,
     'audioscope.openSampleOnStartupInDevelopment': false,
     'audioscope.nativeDecoding': mode === 'native-experimental',
     'audioscope.playbackVolume': 0.25,
@@ -158,15 +160,15 @@ for (const mode of modes) {
       }, target);
       await frame.locator('#wave-export').click();
       await frame.locator('#wave-export-menu [data-export-format="' + format + '"]').click();
-      const deadline = Date.now() + 30_000;
-      let size = 0;
-      while (Date.now() < deadline) {
-        size = await fs.stat(target).then((stat) => stat.size, () => 0);
-        if (size > 0) break;
-        await page.waitForTimeout(100);
-      }
-      assert.ok(size > 0, 'UI export failed: ' + format);
-      exports.push({ format, bytes: size });
+      await page.getByText('audioscope: exported export.' + format, { exact: true }).waitFor({ timeout: 30_000 });
+      const size = (await fs.stat(target)).size;
+      const metadata = JSON.parse(await withBackend('wasm', () => mediaTools.runEmbeddedFfprobe(resourceFor(target), 30_000)));
+      const stream = metadata.streams.find((item: any) => item.codec_type === 'audio');
+      assert.ok(stream, 'UI export must contain an audio stream: ' + format);
+      assert.equal(stream.sample_rate, '44100');
+      assert.equal(stream.channels, 1);
+      assert.ok(Math.abs(Number(metadata.format.duration) - 1) < 0.1, 'UI selection duration: ' + format);
+      exports.push({ format, bytes: size, codec: stream.codec_name, duration: metadata.format.duration });
     }
     results.push({ mode, openToReadyMs, audioSignal: true, exports });
     console.log('Passed: ' + mode + ', ready in ' + openToReadyMs.toFixed(0) + 'ms');
