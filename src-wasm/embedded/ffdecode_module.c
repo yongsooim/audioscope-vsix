@@ -6,7 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
+#else
+#define EMSCRIPTEN_KEEPALIVE
+#endif
 
 #include "libavcodec/avcodec.h"
 #include "libavformat/avformat.h"
@@ -545,6 +549,9 @@ static int wave_decode_file_internal(const char *input_path) {
         goto cleanup;
     }
 
+#ifndef __EMSCRIPTEN__
+    decoder_context->thread_count = 0;
+#endif
     if (avcodec_open2(decoder_context, decoder, NULL) < 0) {
         set_last_error("Unable to open audio decoder.");
         goto cleanup;

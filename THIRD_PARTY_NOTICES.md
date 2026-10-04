@@ -1,11 +1,11 @@
 # Third-Party Notices
 
-audioscope distributes WebAssembly binaries that are built from the following
+audioscope distributes native and WebAssembly binaries built from the following
 third-party components.
 
 ## FFmpeg
 
-audioscope distributes embedded FFmpeg WebAssembly binaries built from FFmpeg.
+audioscope distributes embedded native and WebAssembly binaries built from FFmpeg.
 The FFmpeg source is vendored in this repository as the
 `src-wasm/third_party/ffmpeg` submodule. The exact bundled revision and
 rebuild notes for this release are documented in `FFMPEG_SOURCE.md`.
@@ -22,8 +22,8 @@ source repository under the same paths:
 
 ## LAME (libmp3lame)
 
-audioscope distributes an embedded `ffencode` WebAssembly binary that
-statically links libmp3lame from the LAME project for MP3 export. The LAME
+audioscope distributes embedded native and WebAssembly `ffencode` binaries that
+statically link libmp3lame from the LAME project for MP3 export. The LAME
 source tarball (`lame-3.100.tar.gz`) is downloaded and verified by checksum
 during the build; see `scripts/build-embedded-media-tools.mts` and
 `FFMPEG_SOURCE.md` for rebuild notes.
@@ -31,9 +31,15 @@ during the build; see `scripts/build-embedded-media-tools.mts` and
 Copyright (c) the LAME development team
 
 LAME is licensed under the GNU Lesser General Public License, version 2 or
-later. The license text is available at
-`https://sourceforge.net/projects/lame/` together with the corresponding
-source code for the bundled version (3.100).
+later. The distribution includes `licenses/LAME-COPYING` and
+`licenses/LAME-LICENSE` from the verified 3.100 source archive. The matching
+source is available from [the LAME project](https://sourceforge.net/projects/lame/files/lame/3.100/).
+
+## MinGW-w64 Runtime
+
+Windows native binaries link the MinGW-w64 runtime. Its copyright and license
+notices are included in `licenses/MinGW-w64-runtime.txt`, copied from the
+[runtime source used by the Windows toolchain](https://github.com/mingw-w64/mingw-w64/blob/4564ee4b5063097bf747af3a3f8270a28adff820/COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt).
 
 ## Signalsmith Stretch Web
 

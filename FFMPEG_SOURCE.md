@@ -4,6 +4,12 @@
 `ffloudness`, and `ffencode` (the export tool, which additionally links
 libmp3lame — see the LAME section below).
 
+Platform-specific builds also ship native `ffdecode`, `ffdecode-wav`, `ffprobe`,
+`ffloudness`, and `ffencode` executables from the same FFmpeg source revision.
+The native decoder shares `src-wasm/embedded/ffdecode_module.c` with the WASM
+decoder, preserves the source sample rate and channels, and delivers PCM before
+the retained-PCM loudness pass. Its temporary PCM file is removed after the task.
+
 ## Exact Upstream Revision
 
 - Upstream repository: `https://github.com/FFmpeg/FFmpeg.git`
@@ -38,6 +44,28 @@ It writes the packaged artifacts and build manifest to:
 
 The generated `dist/embedded-tools/manifest.json` currently records the build timestamp and bundled FFmpeg revision for the current build.
 
+Build the native tools with a C compiler, `make`, `pkg-config`, and a POSIX shell:
+
+```bash
+bun run build:native-media-tools
+```
+
+The build script is `scripts/build-native-media-tools.mts`. It statically links
+the audio-only FFmpeg libraries and LAME, leaving only system libraries as runtime
+dependencies. Output persists in `.artifacts/native-tools/<platform>-<arch>/` and is copied to
+`dist/native-tools/<platform>-<arch>/` for development; its manifest
+records the exact source revision, target, compiler, and FFmpeg configure flags.
+Native and WASM builds share the codec list in `scripts/audio-codec-config.mts`.
+Build on the intended target OS/architecture (MSYS2/MinGW on Windows). The build
+does not enable GPL or nonfree components. macOS uses a 12.0 deployment target.
+The manifest includes CPU architecture, minimum runtime versions, binary SHA-256,
+and source SHA-256. Packaging checks these against the current shared WASM build
+and helper sources before creating a target-specific VSIX.
+The native manifest also records the compiler version. The macOS ARM64 build
+disables loop vectorization only for `libavfilter/f_ebur128.o` to avoid an Apple
+Clang 15 miscompile of the multi-channel filter; other FFmpeg objects retain
+their normal optimization and SIMD, and supported codecs use automatic threading.
+
 ## LAME (libmp3lame)
 
 The `ffencode` binary statically links libmp3lame for MP3 export.
@@ -47,6 +75,7 @@ The `ffencode` binary statically links libmp3lame for MP3 export.
 - Source tarball: `lame-3.100.tar.gz`, downloaded during the build and verified
   against SHA-256 `ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e`
 - LAME is licensed under the GNU Lesser General Public License, version 2 or later.
+- Included license texts: `licenses/LAME-COPYING` and `licenses/LAME-LICENSE`.
 
 ## Matching Source Checkout
 

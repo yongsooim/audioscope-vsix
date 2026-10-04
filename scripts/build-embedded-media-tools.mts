@@ -1,3 +1,4 @@
+import { audioCodecConfigureArgs } from './audio-codec-config.mts';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -83,6 +84,7 @@ const sharedConfigureArgs = [
   '--disable-inline-asm',
   '--disable-doc',
   '--disable-debug',
+  '--disable-stripping',
   '--disable-network',
   '--disable-autodetect',
   '--disable-iconv',
@@ -96,37 +98,7 @@ const sharedConfigureArgs = [
   '--disable-avdevice',
   '--disable-ffplay',
   '--disable-everything',
-  '--enable-avcodec',
-  '--enable-avformat',
-  '--enable-avutil',
-  '--enable-protocol=file',
-  '--enable-demuxer=aac',
-  '--enable-demuxer=aiff',
-  '--enable-demuxer=flac',
-  '--enable-demuxer=mov',
-  '--enable-demuxer=mp3',
-  '--enable-demuxer=ogg',
-  '--enable-demuxer=wav',
-  '--enable-decoder=aac',
-  '--enable-decoder=alac',
-  '--enable-decoder=flac',
-  '--enable-decoder=mp3float',
-  '--enable-decoder=opus',
-  '--enable-decoder=pcm_f32be',
-  '--enable-decoder=pcm_f32le',
-  '--enable-decoder=pcm_s16be',
-  '--enable-decoder=pcm_s16le',
-  '--enable-decoder=pcm_s24be',
-  '--enable-decoder=pcm_s24le',
-  '--enable-decoder=pcm_s32be',
-  '--enable-decoder=pcm_s32le',
-  '--enable-decoder=pcm_u8',
-  '--enable-decoder=vorbis',
-  '--enable-parser=aac',
-  '--enable-parser=flac',
-  '--enable-parser=mpegaudio',
-  '--enable-parser=opus',
-  '--enable-parser=vorbis',
+  ...audioCodecConfigureArgs,
 ];
 
 const toolSpecs: ToolSpec[] = [

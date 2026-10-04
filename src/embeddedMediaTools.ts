@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import { spawnProcessAsync } from './mediaToolProcess';
+import { getNativeExecutablePath, getNativeManifest, runNativeDecodeLoudnessPipeline, type NativeToolName } from './nativeMediaTools';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
@@ -53,7 +54,7 @@ interface EmbeddedToolManifest {
 
 export interface EmbeddedExecutableStatus {
   available: boolean;
-  backend: 'bundled';
+  backend: 'bundled' | 'native';
   command: string;
   path: string | null;
   version: string | null;
@@ -134,6 +135,25 @@ function formatEmbeddedVersion(toolName: EmbeddedToolName): string {
 }
 
 export function getEmbeddedExecutableStatusSync(toolName: EmbeddedToolName): EmbeddedExecutableStatus {
+  const nativePath = toolName === 'ffmpeg' && !nativeDecodingEnabled()
+    ? null : getNativeExecutablePath(toolName === 'ffmpeg' ? 'ffdecode' : 'ffprobe');
+  if (nativePath) {
+    return {
+      available: true,
+      backend: 'native',
+      command: toolName + ' (native)',
+      path: nativePath,
+      version: 'native (' + toolName + ' @ ' + (getNativeManifest()?.ffmpegRevision.slice(0, 7) || 'unknown') + ')',
+    };
+  }
+  return getWasmExecutableStatusSync(toolName);
+}
+
+function nativeDecodingEnabled(): boolean {
+  return vscode.workspace.getConfiguration?.('audioscope').get<boolean>('nativeDecoding', false) ?? false;
+}
+
+function getWasmExecutableStatusSync(toolName: EmbeddedToolName): EmbeddedExecutableStatus {
   const scriptPath = getEmbeddedScriptPath(toolName);
   const wasmPath = getEmbeddedWasmPath(toolName);
   const available = fs.existsSync(scriptPath) && fs.existsSync(wasmPath);
@@ -200,6 +220,30 @@ function getExecErrorMessage(error: unknown): string {
   }
 
   return String(error);
+}
+
+async function tryNativeTool<T>(
+  name: NativeToolName,
+  resource: vscode.Uri,
+  run: (executable: string, inputPath: string) => Promise<T>,
+): Promise<{ value: T } | null> {
+  const executable = getNativeExecutablePath(name);
+  if (!executable) return null;
+  let temporaryDirectory: string | null = null;
+  try {
+    let inputPath = await getCliReadablePath(resource);
+    if (!inputPath) {
+      temporaryDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'audioscope-native-'));
+      inputPath = path.join(temporaryDirectory, 'input' + (path.extname(resource.path) || '.bin'));
+      await fsp.writeFile(inputPath, await readResourceBytes(resource));
+    }
+    return { value: await run(executable, inputPath) };
+  } catch (error) {
+    console.warn('audioscope native ' + name + ' failed; using WASM: ' + getExecErrorMessage(error));
+    return null;
+  } finally {
+    if (temporaryDirectory) await fsp.rm(temporaryDirectory, { recursive: true, force: true });
+  }
 }
 
 function hasDirectDecodeModule(): boolean {
@@ -455,6 +499,7 @@ function selectDecodeWorker(): BackgroundDecodeWorker {
 }
 
 export async function prewarmEmbeddedDirectDecodeModule(): Promise<void> {
+  if (nativeDecodingEnabled() && getNativeExecutablePath('ffdecode')) return;
   if (!hasDirectDecodeModule()) {
     return;
   }
@@ -468,90 +513,15 @@ function copyToArrayBuffer(bytes: Uint8Array | Buffer): ArrayBuffer {
   return ownedBytes.buffer;
 }
 
-function spawnProcessAsync(
-  command: string,
-  args: string[],
-  {
-    stdinData = null,
-    timeout,
-  }: {
-    stdinData?: Uint8Array | Buffer | null;
-    timeout: number;
-  },
-): Promise<{ stderr: Buffer; stdout: Buffer }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let didTimeout = false;
-    let settled = false;
-    let timeoutId: NodeJS.Timeout | null = null;
-
-    const finish = (callback: () => void) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        timeoutId = null;
-      }
-      callback();
-    };
-
-    child.stdout.on('data', (chunk: Buffer | Uint8Array | string) => {
-      stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    });
-    child.stderr.on('data', (chunk: Buffer | Uint8Array | string) => {
-      stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    });
-    child.on('error', (error) => {
-      finish(() => {
-        reject(error);
-      });
-    });
-    child.on('close', (code, signal) => {
-      finish(() => {
-        const stdout = Buffer.concat(stdoutChunks);
-        const stderr = Buffer.concat(stderrChunks);
-
-        if (code === 0 && signal === null && !didTimeout) {
-          resolve({ stderr, stdout });
-          return;
-        }
-
-        const stderrText = stderr.toString('utf8').trim();
-        const reason = didTimeout
-          ? `Command timed out after ${timeout}ms`
-          : signal
-            ? `Command exited with signal ${signal}`
-            : `Command exited with code ${code ?? 'unknown'}`;
-        reject(new Error(stderrText ? `${reason}: ${stderrText}` : reason));
-      });
-    });
-
-    if (timeout > 0) {
-      timeoutId = setTimeout(() => {
-        didTimeout = true;
-        child.kill('SIGKILL');
-      }, timeout);
-    }
-
-    if (stdinData && stdinData.byteLength > 0) {
-      child.stdin.end(Buffer.isBuffer(stdinData) ? stdinData : Buffer.from(stdinData));
-      return;
-    }
-
-    child.stdin.end();
-  });
-}
-
 export async function runEmbeddedFfprobe(resource: vscode.Uri, timeout: number): Promise<string> {
-  const toolStatus = getEmbeddedExecutableStatusSync('ffprobe');
+  const native = await tryNativeTool('ffprobe', resource, async (executable, inputPath) => {
+    const { stdout } = await spawnProcessAsync(executable, [
+      '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-show_chapters', inputPath,
+    ], { timeout });
+    return stdout.toString('utf8');
+  });
+  if (native) return native.value;
+  const toolStatus = getWasmExecutableStatusSync('ffprobe');
 
   if (!toolStatus.available || !toolStatus.path) {
     throw new Error('ffprobe.wasm is unavailable.');
@@ -593,7 +563,19 @@ export async function runEmbeddedFfmpegDecodeToWav(
   resource: vscode.Uri,
   timeout: number,
 ): Promise<{ audioBuffer: ArrayBuffer; byteLength: number; mimeType: 'audio/wav' }> {
-  const toolStatus = getEmbeddedExecutableStatusSync('ffmpeg');
+  const native = nativeDecodingEnabled() ? await tryNativeTool('ffdecode-wav', resource, async (executable, inputPath) => {
+    const directory = await fsp.mkdtemp(path.join(os.tmpdir(), 'audioscope-wav-'));
+    try {
+      const output = path.join(directory, 'output.wav');
+      await spawnProcessAsync(executable, [inputPath, output], { timeout });
+      const bytes = await fsp.readFile(output);
+      return { audioBuffer: copyToArrayBuffer(bytes), byteLength: bytes.byteLength, mimeType: 'audio/wav' as const };
+    } finally {
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
+  }) : null;
+  if (native) return native.value;
+  const toolStatus = getWasmExecutableStatusSync('ffmpeg');
 
   if (!toolStatus.available || !toolStatus.path) {
     throw new Error('ffmpeg.wasm is unavailable.');
@@ -646,6 +628,14 @@ export async function runEmbeddedFfencodeExport(
   endSeconds: number,
   timeout: number,
 ): Promise<void> {
+  const native = await tryNativeTool('ffencode', resource, async (executable, inputPath) => {
+    await spawnProcessAsync(executable, [
+      inputPath, targetPath, format, startSeconds.toFixed(6), endSeconds.toFixed(6),
+    ], { timeout });
+    const exported = await fsp.stat(targetPath);
+    if (exported.size <= 0) throw new Error('Native ffencode did not produce an output file.');
+  });
+  if (native) return;
   if (!fs.existsSync(FFENCODE_EXECUTABLE_PATH) || !fs.existsSync(FFENCODE_EXECUTABLE_WASM_PATH)) {
     throw new Error('ffencode.wasm is unavailable. Rebuild or reinstall audioscope to restore exporting.');
   }
@@ -689,6 +679,11 @@ export async function runEmbeddedFfmpegMeasureLoudness(
   resource: vscode.Uri,
   timeout: number,
 ): Promise<EmbeddedLoudnessSummaryPayload> {
+  const native = nativeDecodingEnabled() ? await tryNativeTool('ffloudness', resource, async (executable, inputPath) => {
+    const { stdout } = await spawnProcessAsync(executable, [inputPath], { timeout });
+    return JSON.parse(stdout.toString('utf8')) as EmbeddedLoudnessSummaryPayload;
+  }) : null;
+  if (native) return native.value;
   if (!hasLoudnessExecutable()) {
     throw new Error('ffloudness.wasm is unavailable.');
   }
@@ -726,6 +721,17 @@ export async function runEmbeddedFfmpegMeasureLoudness(
 export async function runEmbeddedFfmpegDecodeLoudnessPipeline(
   resource: vscode.Uri,
 ): Promise<EmbeddedPcmDecodeLoudnessPipelinePayload> {
+  const native = nativeDecodingEnabled() ? await tryNativeTool('ffdecode', resource, (executable, inputPath) =>
+    runNativeDecodeLoudnessPipeline(executable, inputPath)) : null;
+  if (native) {
+    return {
+      decode: native.value.decode,
+      loudnessPromise: native.value.loudnessPromise.catch((error) => {
+        console.warn('audioscope native loudness failed; retrying: ' + getExecErrorMessage(error));
+        return runEmbeddedFfmpegMeasureLoudness(resource, 120_000);
+      }),
+    };
+  }
   if (!hasDirectDecodeModule()) {
     throw new Error('Background FFmpeg decode worker is unavailable.');
   }

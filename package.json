@@ -2,7 +2,7 @@
   "name": "audioscope",
   "displayName": "audioscope",
   "description": "Audio inspector for waveform, spectrogram, playback, loop selection, loudness, and metadata review",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "publisher": "yongsooim",
   "repository": {
     "type": "git",
@@ -56,6 +56,7 @@
     "FFMPEG_SOURCE.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
+    "licenses/**",
     "src-wasm/third_party/ffmpeg/COPYING.LGPLv2.1",
     "src-wasm/third_party/ffmpeg/COPYING.LGPLv3"
   ],
@@ -283,6 +284,12 @@
               "enum": ["hann", "hamming", "blackman", "rectangular"]
             }
           }
+        },
+        "audioscope.nativeDecoding": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Experimental native audio decoding and codec loudness analysis. Keep disabled for the established WASM playback path. Native metadata and export remain automatic when compatible. Reload the window after changing this setting."
         }
       }
     },
@@ -401,21 +408,28 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "bun run compile",
+    "vscode:prepublish": "bun run build:shared",
     "clean": "node -e \"const fs=require('node:fs'); for (const dir of ['dist','out']) fs.rmSync(dir,{recursive:true,force:true});\"",
     "build:embedded-media-tools": "tsx ./scripts/build-embedded-media-tools.mts",
+    "build:native-media-tools": "tsx ./scripts/build-native-media-tools.mts",
+    "benchmark:native-audio": "tsx ./scripts/benchmark-native-audio.mts",
     "build:wasm-core": "tsx ./scripts/build-wasm.mts",
     "build:webview": "tsx ./scripts/build-webview.mts",
-    "compile": "bun run clean && bun run build:embedded-media-tools && bun run build:wasm-core && bun run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
+    "compile": "bun run clean && bun run build:shared && bun run build:native-media-tools",
     "test:performance": "tsx --test \"./scripts/*.test.mts\"",
-    "watch": "tsc -w -p ./"
+    "watch": "tsc -w -p ./",
+    "build:shared": "bun run build:embedded-media-tools && bun run build:wasm-core && bun run build:webview && tsc -p ./ && tsc -p ./tsconfig.webview.json && tsc -p ./tsconfig.scripts.json",
+    "package:release": "tsx ./scripts/package-release.mts",
+    "test:vsix": "tsx ./scripts/test-vsix.mts"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "@types/vscode": "^1.100.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "playwright": "^1.63.0",
     "rolldown": "^1.0.0-rc.12",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
-    
   }
 }
