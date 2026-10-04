@@ -132,6 +132,8 @@ const report = {
   node: process.version, ffmpegRevision: nativeManifest.ffmpegRevision, runs,
   nativeDecoderThreads: 'auto (thread_count=0); codec-dependent',
   nativeConfigureArgs: nativeManifest.configureArgs,
+  nativeCompilerVersion: nativeManifest.compilerVersion,
+  nativeEbur128Flags: nativeManifest.ebur128Flags,
   method: 'Production host entry points; warmed WASM worker pool; fresh native process per request; one validation/warm-up per input; alternating serial runs; includes input reads, temporary PCM file delivery/cleanup for native, and channel buffers delivered to the host; excludes Webview rendering and fixture generation. Probe/export start fresh processes for both backends. Medians in milliseconds. Other applications were not stopped.',
   results,
 };

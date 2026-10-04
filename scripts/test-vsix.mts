@@ -66,7 +66,7 @@ const modes = hasNative ? ['hybrid', 'native-experimental', 'wasm-fallback'] : [
 for (const mode of modes) {
   console.log('Installed VSIX smoke test: ' + mode);
   const output = path.join(directory, mode);
-  const userData = path.join(profile, 'user-' + mode);
+  const userData = path.join(profile, 'u' + modes.indexOf(mode));
   await fs.mkdir(path.join(userData, 'User'), { recursive: true });
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(path.join(userData, 'User', 'settings.json'), JSON.stringify({
@@ -109,6 +109,13 @@ for (const mode of modes) {
     await frame.waitForFunction(() => !(document.querySelector('#play-toggle') as HTMLButtonElement)?.disabled, undefined, { timeout: 60_000 });
     const launchToReadyMs = performance.now() - startedAt;
     await frame.waitForFunction(() => document.querySelector('#media-metadata-panel')?.getAttribute('data-state') === 'ready', undefined, { timeout: 30_000 });
+    const toolDetails = await frame.locator('#media-metadata-detail').textContent() || '';
+    const backends = {
+      decode: toolDetails.includes('native (ffmpeg @') ? 'native' : 'wasm',
+      probe: toolDetails.includes('native (ffprobe @') ? 'native' : 'wasm',
+    };
+    assert.equal(backends.decode, mode === 'native-experimental' ? 'native' : 'wasm');
+    assert.equal(backends.probe, ['hybrid', 'native-experimental'].includes(mode) ? 'native' : 'wasm');
     assert.equal(await frame.locator('#status').isVisible(), false);
     await frame.waitForFunction(() => (document.querySelector('#waveform-loading') as HTMLElement)?.hidden === true, undefined, { timeout: 30_000 });
 
@@ -184,11 +191,13 @@ for (const mode of modes) {
       assert.ok(Math.abs(Number(metadata.format.duration) - 1) < 0.1, 'UI selection duration: ' + format);
       exports.push({ format, bytes: size, codec: stream.codec_name, duration: metadata.format.duration });
     }
-    results.push({ mode, launchToReadyMs, audioSignal: true, exports });
+    results.push({ mode, backends, launchToReadyMs, audioSignal: true, exports });
     console.log('Passed: ' + mode + ', ready in ' + launchToReadyMs.toFixed(0) + 'ms');
   } catch (error) {
     const page = app?.windows()[0];
     await page?.screenshot({ path: path.join(output, 'failure.png') }).catch(() => {});
+    await fs.cp(path.join(userData, 'logs'), path.join(output, 'logs'), { recursive: true }).catch(() => {});
+    await fs.copyFile(path.join(userData, 'User', 'settings.json'), path.join(output, 'settings.json')).catch(() => {});
     throw error;
   } finally {
     await app?.close();

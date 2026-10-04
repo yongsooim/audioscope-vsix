@@ -18,9 +18,12 @@ const prefix = path.join(buildRoot, 'prefix');
 const outputDir = path.join(projectRoot, '.artifacts', 'native-tools', target);
 const liveDir = path.join(projectRoot, 'dist', 'native-tools', target);
 const nativeFlags = process.platform === 'darwin' ? ['-mmacosx-version-min=12.0'] : [];
-const ebur128Flags = target === 'darwin-arm64' ? ['-fno-slp-vectorize'] : [];
+// Older Apple Clang loads stale filter state when vectorizing the EBUR128
+// channel loop. Disable only that object's loop vectorization (5.1 parity test).
+const ebur128Flags = target === 'darwin-arm64' ? ['-fno-vectorize'] : [];
 const nativePath = (value: string) => process.platform === 'win32' ? value.replaceAll('\\', '/') : value;
 const compiler = process.env.CC || 'cc';
+let compilerVersion: string;
 const extension = process.platform === 'win32' ? '.exe' : '';
 const jobs = String(Math.max(1, Math.min(8, os.availableParallelism())));
 const lameVersion = '3.100';
@@ -52,7 +55,7 @@ async function hashFile(file: string): Promise<string> {
 
 async function ensureLame(): Promise<void> {
   const stampPath = path.join(lamePrefix, '.stamp.json');
-  const stamp = JSON.stringify({ lameVersion, lameSha256, compiler, nativeFlags });
+  const stamp = JSON.stringify({ lameVersion, lameSha256, compiler, compilerVersion, nativeFlags });
   if (fs.existsSync(path.join(lamePrefix, 'lib', 'libmp3lame.a'))
       && await fsp.readFile(stampPath, 'utf8').catch(() => '') === stamp) return;
   await fsp.rm(lamePrefix, { recursive: true, force: true });
@@ -85,6 +88,7 @@ async function main(): Promise<void> {
   }
   await fsp.mkdir(buildRoot, { recursive: true });
   await fsp.mkdir(outputDir, { recursive: true });
+  compilerVersion = (await run(compiler, ['--version'])).split(/\r?\n/u)[0];
   await ensureLame();
   const revision = (await run('git', ['-C', sourceDir, 'rev-parse', 'HEAD'])).trim();
   const configureArgs = [
@@ -107,7 +111,7 @@ async function main(): Promise<void> {
     '--extra-ldflags=' + [...nativeFlags, '-L' + nativePath(path.join(lamePrefix, 'lib')),
       ...(process.platform === 'win32' ? ['-static', '-static-libgcc'] : [])].join(' '),
   ];
-  const stamp = JSON.stringify({ revision, configureArgs, lameSha256, ebur128Flags });
+  const stamp = JSON.stringify({ revision, configureArgs, lameSha256, ebur128Flags, compilerVersion });
   const stampPath = path.join(buildDir, '.stamp.json');
   const previous = await fsp.readFile(stampPath, 'utf8').catch(() => '');
   if (previous !== stamp || !fs.existsSync(path.join(prefix, 'lib', 'libavcodec.a'))) {
@@ -187,7 +191,7 @@ async function main(): Promise<void> {
     sourceSha256[name] = await hashFile(path.join(embeddedDir, name));
   }
   await fsp.writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify({
-    schema: 1, target: target as NativeTarget, ffmpegRevision: revision, compiler,
+    schema: 1, target: target as NativeTarget, ffmpegRevision: revision, compiler, compilerVersion,
     builtAt: new Date().toISOString(), configureArgs, sha256, sourceSha256,
     ebur128Flags,
     minimumKernelRelease: process.platform === 'darwin' ? '21.0.0' : process.platform === 'win32' ? '10.0.0' : undefined,

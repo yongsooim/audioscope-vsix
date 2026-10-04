@@ -61,6 +61,10 @@ does not enable GPL or nonfree components. macOS uses a 12.0 deployment target.
 The manifest includes CPU architecture, minimum runtime versions, binary SHA-256,
 and source SHA-256. Packaging checks these against the current shared WASM build
 and helper sources before creating a target-specific VSIX.
+The native manifest also records the compiler version. The macOS ARM64 build
+disables loop vectorization only for `libavfilter/f_ebur128.o` to avoid an Apple
+Clang 15 miscompile of the multi-channel filter; other FFmpeg objects retain
+their normal optimization and SIMD, and supported codecs use automatic threading.
 
 ## LAME (libmp3lame)
 

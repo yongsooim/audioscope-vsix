@@ -512,6 +512,7 @@ function copyToArrayBuffer(bytes: Uint8Array | Buffer): ArrayBuffer {
   ownedBytes.set(bytes);
   return ownedBytes.buffer;
 }
+
 export async function runEmbeddedFfprobe(resource: vscode.Uri, timeout: number): Promise<string> {
   const native = await tryNativeTool('ffprobe', resource, async (executable, inputPath) => {
     const { stdout } = await spawnProcessAsync(executable, [

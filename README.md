@@ -150,10 +150,10 @@ Values below are median milliseconds, **native / WASM**. Exports select 15 secon
 
 | Input | Decode | Decode + LUFS | Metadata | WAV export | MP3 export |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| MP3, 216 s | 151.1 / 169.9 | 931.8 / 875.3 | 4.9 / 39.9 | 19.6 / 74.4 | 100.4 / 208.0 |
-| AAC, 211 s | 123.2 / 110.8 | 860.1 / 767.4 | 5.4 / 42.5 | 17.6 / 64.1 | 116.7 / 208.5 |
-| FLAC, 120 s | 51.6 / 189.0 | 474.7 / 560.4 | 4.5 / 38.8 | 15.3 / 91.3 | 110.7 / 232.3 |
-| WAV, 120 s | 26.8 / 15.4 | 450.5 / 398.8 | 8.5 / 46.8 | 11.0 / 48.3 | 110.6 / 195.4 |
+| MP3, 216 s | 158.1 / 171.8 | 987.5 / 874.6 | 6.2 / 40.6 | 20.4 / 77.8 | 116.4 / 202.3 |
+| AAC, 211 s | 160.9 / 161.7 | 1067.5 / 1047.0 | 7.3 / 54.4 | 22.0 / 103.2 | 137.5 / 348.9 |
+| FLAC, 120 s | 120.1 / 224.4 | 685.5 / 695.0 | 6.8 / 47.3 | 26.1 / 115.6 | 143.3 / 359.5 |
+| WAV, 120 s | 40.4 / 18.2 | 526.1 / 515.7 | 10.1 / 53.0 | 13.2 / 77.0 | 132.2 / 279.9 |
 
 Native metadata and export improve consistently in these fixtures. Decoding and
 loudness depend on the codec, which is why the native decoder remains optional.

@@ -45,6 +45,7 @@ test('native PCM preserves every channel and sample; loudness agrees with WASM',
   await withBackend('native', async () => assert.equal(mediaTools.getEmbeddedExecutableStatusSync('ffmpeg').backend, 'native'));
   const native = await decode(input, 'native');
   const wasm = await decode(input, 'wasm');
+  assert.ok(Math.abs(wasm.summary.integratedLufs! + 6.156448) <= 0.01, '5.1 fixture reference LUFS');
   assert.equal(native.decode.sampleRate, sampleRate);
   assert.equal(native.decode.numberOfChannels, channels);
   assert.equal(native.decode.frameCount, frames);

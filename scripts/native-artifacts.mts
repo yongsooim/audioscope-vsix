@@ -9,10 +9,15 @@ const { inspectNativeBinary, NATIVE_TARGETS } = createRequire(import.meta.url)('
 export async function verifyNativeArtifacts(directory: string, target: NativeTarget, root = path.resolve(import.meta.dirname, '..')) {
   const manifest = JSON.parse(await fs.readFile(path.join(directory, 'manifest.json'), 'utf8')) as NativeManifest & {
     sourceSha256: Record<string, string>;
+    compilerVersion: string;
+    ebur128Flags: string[];
   };
   assert.equal(manifest.schema, 1, 'Native manifest schema');
   assert.equal(manifest.target, target);
   assert.ok(NATIVE_TARGETS.includes(target));
+  assert.match(manifest.compilerVersion || '', /\S/u, 'Compiler version must be recorded.');
+  assert.deepEqual(manifest.ebur128Flags, target === 'darwin-arm64' ? ['-fno-vectorize'] : [],
+    'EBUR128 compiler workaround');
   const shared = JSON.parse(await fs.readFile(path.join(root, 'dist', 'embedded-tools', 'manifest.json'), 'utf8'));
   assert.equal(manifest.ffmpegRevision, shared.ffmpegRevision, 'Native and WASM FFmpeg revisions must match.');
   if (target.startsWith('darwin-')) assert.equal(manifest.minimumKernelRelease, '21.0.0');
